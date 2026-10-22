@@ -3,6 +3,7 @@ import os
 import subprocess
 import logging
 import json
+from internet_tools import search_internet, internet_tool_definition, INTERNET_TOOL_MAP
 
 # --- Configuration ---
 # Note: These are defaults. In a more robust system, these could be passed from the main agent.
@@ -112,7 +113,8 @@ TOOL_MAP = {
     "read_file_lines": read_file_lines,
     "search_file": search_file,
     "list_files": list_files,
-    "write_file": write_file
+    "write_file": write_file,
+    **INTERNET_TOOL_MAP
 }
 
 # Tool definitions for the LLM
@@ -198,5 +200,6 @@ tools = [
                 "required": ["path", "content"]
             }
         }
-    }
+    },
+    internet_tool_definition
 ]
