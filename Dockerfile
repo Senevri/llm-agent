@@ -40,7 +40,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir \
         requests pydantic openai python-dotenv \
-        pytest ipython
+        pytest ipython ddgs
 
 
 USER sandboxuser
