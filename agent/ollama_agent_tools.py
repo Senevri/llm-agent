@@ -3,7 +3,7 @@ import os
 import subprocess
 import logging
 import json
-from internet_tools import search_internet, internet_tool_definition, INTERNET_TOOL_MAP
+from internet_tools import search_internet, get_weather, internet_tool_definition, weather_tool_definition, INTERNET_TOOL_MAP
 
 # --- Configuration ---
 # Note: These are defaults. In a more robust system, these could be passed from the main agent.
@@ -201,5 +201,6 @@ tools = [
             }
         }
     },
-    internet_tool_definition
+    internet_tool_definition,
+    weather_tool_definition
 ]
