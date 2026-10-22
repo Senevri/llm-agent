@@ -1,0 +1,25 @@
+services:
+  sandbox:
+    build: .
+    image: agent-sandbox:latest
+    container_name: agent-sandbox-session
+    network_mode: "host"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # pids_limit: 100
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2.0'
+    #       memory: 2G
+    # read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=100m
+    volumes:
+      - ./workspace:/workspace:rw,Z
+      - ./agent:/agent:ro,Z
+    stdin_open: true
+    tty: true
+    command: ["/bin/bash"]

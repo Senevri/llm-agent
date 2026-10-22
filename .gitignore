@@ -1,0 +1,5 @@
+*.pyc
+*.md
+__pycache__/
+# Add other boilerplate:
+.env
