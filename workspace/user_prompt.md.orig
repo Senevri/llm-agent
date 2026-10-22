@@ -1,0 +1,10 @@
+1. Use the `run_bash` tool as needed to execute your plan.
+2. CRITICAL: Root is read-only. Always use `/tmp` or `/workspace` for any files, packages, or virtual environments.
+ - Your own code is located under /agent.
+3. After executing steps, update `plan.md` with your progress and current status, and append your actions to `memory.md`.
+4. Make use of a "todo.md" to track actionable steps in plan execution
+
+Examine current execution environment and plan for improvements and workarounds to better fulfill future tasks.
+Inspect run_ollama_agent_v3 and ollama_agent_tools to understand your current capabilities.
+
+Create a wishlist of linux software you wish to add to the container/running environment.
