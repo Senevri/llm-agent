@@ -6,6 +6,7 @@ import logging
 from openai import OpenAI
 from get_ip import get_gateway_ip
 from ollama_agent_tools import tools, TOOL_MAP
+from openai_error_handling import handle_api_error
 
 # --- Configuration ---
 LOG_LEVEL = os.getenv("AGENT_LOG_LEVEL", "INFO")
@@ -66,8 +67,7 @@ def main():
                 tool_choice="auto"
             )
         except Exception as e:
-            logger.error(f"API Error: {e}")
-            time.sleep(5)
+            handle_api_error(e)
             continue
 
         choice = response.choices[0]
