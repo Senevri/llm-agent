@@ -3,26 +3,26 @@ import logging
 import time
 
 logger = logging.getLogger(__name__)
+from enum import Enum
 
-def handle_api_error(e: Exception):
-    if e in (openai.BadRequestError, openai.AuthenticationError, openai.NotFoundError, openai.PermissionDeniedError):
-        # permanent config errors — retrying will never help
-        logger.error(f"Fatal API error (will not retry): {e}")
+class Action(Enum):
+    ABORT = "abort"
+    RETRY = "retry"
+    BACKOFF = "backoff"
+
+_FATAL = (openai.BadRequestError, openai.AuthenticationError,
+          openai.NotFoundError, openai.PermissionDeniedError)
+
+def classify_api_error(e: Exception) -> tuple[Action, float]:
+    if isinstance(e, _FATAL):
         body = getattr(e, "body", None)
         if isinstance(body, dict) and body.get("type"):
-            logger.error(f"  type={body['type']} code={body.get('code')}")
-        raise SystemExit(1)
-    elif e in (openai.RateLimitError):
-        logger.warning(f"Rate limited, backing off: {e}")
-        time.sleep(10)
-        return
-    elif e in (openai.APIConnectionError, openai.InternalServerError):
-        logger.error(f"Transient API error, retrying: {e}")
-        time.sleep(5)
-        return
-    elif isinstance(e, openai.APIError):
-        logger.error(f"Unclassified API error: {e}")
-        return
-    else:
-        logger.error(f"Unexpected error: {e}")
-        raise SystemExit(1)
+            logger.error(f"Fatal API error: type={body['type']} code={body.get('code')}")
+        return Action.ABORT, 0.0
+    if isinstance(e, openai.RateLimitError):
+        return Action.BACKOFF, 10.0
+    if isinstance(e, (openai.APIConnectionError, openai.InternalServerError)):
+        return Action.RETRY, 5.0
+    if isinstance(e, openai.APIError):
+        return Action.RETRY, 5.0
+    return Action.ABORT, 0.0

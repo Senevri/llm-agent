@@ -4,12 +4,13 @@ import json
 import logging
 from openai import OpenAI
 from ollama_agent_tools import tools, TOOL_MAP
-from openai_error_handling import handle_api_error
+from openai_error_handling import classify_api_error, Action
 
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")).resolve()
 
 # --- Tiny .env loader (no extra dependency) ---
 def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
@@ -48,6 +49,15 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger("MistralAgentV3")
+
+
+logger.info(f"Prompt dir: {PROMPT_DIR}")
+
+for name in ("system_prompt.md", "user_prompt.md"):
+    if not (PROMPT_DIR / name).exists():
+        logger.error(f"Missing {PROMPT_DIR / name}")
+        raise SystemExit(1)
+
 
 # Connect to Mistral (OpenAI-compatible endpoint)
 client = OpenAI(
@@ -100,9 +110,13 @@ def main():
                 tool_choice="auto",
             )
         except Exception as e:
-            handle_api_error(e)
+            action, delay = classify_api_error(e)
+            if action is Action.ABORT:
+                logger.error(f"Aborting on: {e}")
+                raise SystemExit(1)
+            logger.warning(f"{action.name} in {delay}s: {e}")
+            time.sleep(delay)
             continue
-
         choice = response.choices[0]
         msg = choice.message
         finish_reason = choice.finish_reason
