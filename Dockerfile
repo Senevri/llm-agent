@@ -3,12 +3,16 @@ FROM python:3.15-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/home/sandboxuser/.local/bin:${PATH}"
 
+# Disable APT sandbox so it doesn't try to drop privileges to the _apt user
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10sandbox
+
 # Tier 1: system packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     git \
     curl \
     wget \
+    w3m \
     jq \
     less \
     procps \
@@ -16,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iputils-ping \
     vim-tiny \
     tree \
+    tmux \
     ripgrep \
     fd-find \
     bat \
@@ -40,7 +45,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir \
         requests pydantic openai python-dotenv \
-        pytest ipython ddgs
+        pytest ipython ddgs rich
 
 
 USER sandboxuser

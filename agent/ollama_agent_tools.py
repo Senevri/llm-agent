@@ -3,7 +3,8 @@ import os
 import subprocess
 import logging
 import json
-from internet_tools import search_internet, get_weather, internet_tool_definition, weather_tool_definition, INTERNET_TOOL_MAP
+from internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
+from bash_tools import run_bash
 
 # --- Configuration ---
 # Note: These are defaults. In a more robust system, these could be passed from the main agent.
@@ -13,30 +14,6 @@ MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
 logger = logging.getLogger("OllamaAgentTools")
 
 # --- Tool Implementations ---
-
-def run_bash(command: str) -> str:
-    """Execute a bash command inside the container environment."""
-    logger.info(f"Executing bash: {command}")
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            cwd="/workspace"
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        if not output:
-            return "Command executed successfully with no output."
-
-        if len(output) > MAX_OUTPUT_LENGTH:
-            return f"Output truncated to {MAX_OUTPUT_LENGTH} characters:\n\n{output[:MAX_OUTPUT_LENGTH]}..."
-        return output
-    except subprocess.TimeoutExpired:
-        return "Error: Command timed out."
-    except Exception as e:
-        return f"Execution error: {str(e)}"
 
 def read_file(path: str) -> str:
     """Read the contents of a file."""
@@ -101,10 +78,11 @@ def write_file(path: str, content: str) -> str:
     try:
         with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
-        #return f"Successfully wrote {len(content)} chars to {path}:\n\n{content}"
         return f"Successfully wrote {len(content)} chars to {path}"
     except Exception as e:
         return f"Error writing file: {str(e)}"
+
+
 
 # Tool Mapping
 TOOL_MAP = {
@@ -201,6 +179,7 @@ tools = [
             }
         }
     },
-    internet_tool_definition,
-    weather_tool_definition
 ]
+
+# Add internet tools to the tool definitions
+tools.extend(INTERNET_TOOL_DEFINITION_MAP.values())

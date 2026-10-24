@@ -1,12 +1,15 @@
 services:
   sandbox:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: agent-sandbox:latest
     container_name: agent-sandbox-session
     network_mode: "host"
     cap_drop:
       - ALL
     security_opt:
+      - seccomp=unconfined
       - no-new-privileges:true
     # pids_limit: 100
     # deploy:

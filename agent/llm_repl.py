@@ -9,6 +9,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Any, List, Callable
 from openai import OpenAI
+import threading
+import atexit
 
 # --- Paths ---
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -35,8 +37,7 @@ except ImportError:
 
 try:
     from internet_tools import (
-        search_internet, get_weather,
-        internet_tool_definition, weather_tool_definition,
+        INTERNET_TOOL_DEFINITION_MAP, INTERNET_TOOL_MAP
     )
 except ImportError:
     def search_internet(query: str, max_results: int = 5) -> str:
@@ -45,6 +46,8 @@ except ImportError:
         return "Weather lookup is not available."
     internet_tool_definition = None
     weather_tool_definition = None
+
+
 
 # --- .env loader (script-relative, matching run_agent.py convention) ---
 def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
@@ -156,7 +159,169 @@ PROFILES: Dict[str, Path] = {
 }
 
 
-def tool_dispatch_agent(
+# At top of file, add to imports:
+import threading
+import atexit
+
+# Module-level job registry
+JOBS: Dict[str, dict] = {}
+
+# Watchdog
+def _watchdog(job_id, timeout):
+    time.sleep(timeout)
+    job = JOBS.get(job_id)
+    if job and job["proc"].poll() is None:
+        try:
+            job["proc"].kill()
+        except Exception:
+            pass
+        logger.warning(f"{job_id} killed after {timeout}s")
+
+# Cleanup
+def _cleanup_jobs():
+    for jid, j in list(JOBS.items()):
+        proc = j.get("proc")
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            logger.warning(f"Killed orphaned job {jid} on exit")
+        f = j.get("log_f")
+        if f and not f.closed:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+atexit.register(_cleanup_jobs)
+
+# Dispatch (complete, self-contained)
+def tool_dispatch_agent(task, profile="engineering", max_turns=40, timeout=1800):
+    try:
+        if profile not in PROFILES:
+            return f"Error: unknown profile '{profile}'. Known: {sorted(PROFILES)}"
+
+        prompt_dir = PROFILES[profile].resolve()
+        src_prompt = prompt_dir / "system_prompt.md"
+        if not src_prompt.exists():
+            return f"Error: profile '{profile}' has no system_prompt.md at {src_prompt}"
+
+        agent_script = AGENT_DIR / "run_agent.py"
+        if not agent_script.exists():
+            return f"Error: agent script not found at {agent_script}"
+
+        workspace = Path(tempfile.mkdtemp(prefix=f"agent_run_{profile}_"))
+
+        original_prompt = src_prompt.read_text(encoding="utf-8")
+        override = (
+            f"# DISPATCH OVERRIDE — read this first\n\n"
+            f"Your working directory for this run is: {workspace}\n"
+            f"- Write ALL output files here, using relative paths or paths under {workspace}.\n"
+            f"- Do NOT write to /workspace.\n"
+            f"- plan.md, memory.md, todo.md, and all deliverables live in {workspace}.\n"
+            f"- Confirm with `pwd` before writing anything.\n\n---\n\n"
+        )
+        system_prompt_path = workspace / "system_prompt.md"
+        system_prompt_path.write_text(override + original_prompt, encoding="utf-8")
+
+        task_path = workspace / "user_prompt.md"
+        task_path.write_text(task, encoding="utf-8")
+        log_path = workspace / "agent.log"
+
+        backend = os.getenv("AGENT_BACKEND", "ollama")
+        cmd = [
+            sys.executable, str(agent_script),
+            "--backend", backend,
+            "--system-prompt", str(system_prompt_path),
+            "--user-prompt", str(task_path),
+            "--max-turns", str(max_turns),
+            "--log-level", "INFO",
+        ]
+        model_override = os.getenv(f"AGENT_MODEL_{backend.upper()}") or os.getenv("AGENT_MODEL")
+        if model_override:
+            cmd.extend(["--model", model_override])
+
+        log_f = open(log_path, "w", encoding="utf-8")
+        proc = subprocess.Popen(
+            cmd, cwd=str(workspace), stdout=log_f, stderr=subprocess.STDOUT,
+        )
+
+        job_id = f"job_{len(JOBS) + 1}"
+        JOBS[job_id] = {
+            "proc": proc, "workspace": workspace, "log": log_path,
+            "log_f": log_f, "closed": False,
+            "start": time.time(), "timeout": timeout,
+            "profile": profile, "backend": backend,
+        }
+        threading.Thread(target=_watchdog, args=(job_id, timeout), daemon=True).start()
+
+        logger.info(f"dispatch_agent: {job_id} started (profile={profile}, pid={proc.pid})")
+        return (
+            f"Dispatched {job_id} (profile={profile}, backend={backend}). Running in background.\n"
+            f"Workspace: {workspace}\n"
+            f"Log: {log_path}\n"
+            f"Poll with check_job('{job_id}') or list_jobs(). Do NOT block waiting.\n"
+        )
+    except Exception as e:
+        logger.exception(f"dispatch_agent failed: {e}")
+        return f"Error dispatching agent: {type(e).__name__}: {e}"
+
+def tool_check_job(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return f"Error: unknown job '{job_id}'. Known: {sorted(JOBS)}"
+    proc = job["proc"]
+    rc = proc.poll()
+    if rc is None:
+        elapsed = time.time() - job["start"]
+        try:
+            tail = job["log"].read_text(errors="replace")[-1500:]
+        except Exception as e:
+            tail = f"(could not read log: {e})"
+        return (
+            f"{job_id} RUNNING ({elapsed:.0f}s, profile={job['profile']})\n"
+            f"Workspace: {job['workspace']}\n--- log tail ---\n{tail}"
+        )
+    # DONE
+    if not job.get("closed"):
+        try:
+            job["log_f"].close()
+        except Exception:
+            pass
+        job["closed"] = True
+    try:
+        files = sorted(
+            str(p.relative_to(job["workspace"]))
+            for p in job["workspace"].rglob("*")
+            if p.is_file() and p.name not in {"system_prompt.md", "user_prompt.md", "agent.log"}
+        )
+    except Exception:
+        files = []
+    try:
+        tail = job["log"].read_text(errors="replace")[-2000:]
+    except Exception as e:
+        tail = f"(could not read log: {e})"
+    elapsed = time.time() - job["start"]
+    return (
+        f"{job_id} DONE rc={rc} ({elapsed:.0f}s, profile={job['profile']})\n"
+        f"Workspace: {job['workspace']}\n"
+        f"Files:\n  " + ("\n  ".join(files) if files else "(no output files)") + "\n"
+        f"--- log tail ---\n{tail}"
+    )
+
+def tool_list_jobs():
+    if not JOBS:
+        return "No jobs dispatched yet."
+    lines = []
+    for jid, j in JOBS.items():
+        rc = j["proc"].poll()
+        status = "RUNNING" if rc is None else f"DONE rc={rc}"
+        elapsed = time.time() - j["start"]
+        lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j['profile']})")
+    return "\n".join(lines)
+
+def tool_dispatch_agent_sync(
     task: str,
     profile: str = "engineering",
     max_turns: int = 40,
@@ -284,9 +449,10 @@ TOOL_MAP: Dict[str, Callable] = {
     "read_file": tool_read_file,
     "write_file": tool_write_file,
     "list_files": tool_list_files,
-    "search_internet": search_internet,
-    "get_weather": get_weather,
     "dispatch_agent": tool_dispatch_agent,
+    "check_job": tool_check_job,
+    "list_jobs": tool_list_jobs,
+    **INTERNET_TOOL_MAP
 }
 
 TOOL_SCHEMAS = [
@@ -313,40 +479,38 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "dispatch_agent",
         "description": (
-            "Run an autonomous agent on a self-contained task in a fresh, isolated workspace. "
-            "Use for multi-step work (research, code changes, reports) that needs more than 2-3 tool calls. "
-            "The task MUST be a complete brief: goal, constraints, and what 'done' looks like. "
-            "The agent writes its outputs to its own workspace (returned in the result); it does NOT "
-            "write to /workspace. Returns exit code, workspace path, list of produced files, "
-            "log path, and last 2000 chars of log. "
-            "Do NOT use run_bash to invoke run_agent.py."
+            "Dispatch an autonomous agent to run a multi-step task in a fresh, isolated workspace. "
+            "Returns IMMEDIATELY with a job ID — the work runs in the background. "
+            "Use check_job(job_id) to poll for status. The task must be a complete brief: "
+            "goal, constraints, and what 'done' looks like. Multiple dispatches may run concurrently."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "task": {
-                    "type": "string",
-                    "description": "Complete task brief: goal, constraints, deliverable definition.",
-                },
-                "profile": {
-                    "type": "string",
-                    "description": f"Prompt profile. One of: {sorted(PROFILES)}. Default 'engineering'.",
-                },
-                "max_turns": {
-                    "type": "integer",
-                    "description": "Maximum agent turns (default 40).",
-                },
+                "task": {"type": "string", "description": "Complete task brief."},
+                "profile": {"type": "string", "description": f"One of {sorted(PROFILES)}. Default 'engineering'."},
+                "max_turns": {"type": "integer", "description": "Max agent turns (default 40)."},
             },
             "required": ["task"],
         },
     }},
+    {"type": "function", "function": {
+        "name": "check_job",
+        "description": "Check status of a dispatched job. Returns RUNNING with log tail, or DONE with exit code and output files.",
+        "parameters": {
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "list_jobs",
+        "description": "List all dispatched jobs and their status.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
 ]
 
-if internet_tool_definition:
-    TOOL_SCHEMAS.append(internet_tool_definition)
-if weather_tool_definition:
-    TOOL_SCHEMAS.append(weather_tool_definition)
-
+TOOL_SCHEMAS.extend(INTERNET_TOOL_DEFINITION_MAP.values())
 
 def _role(m) -> str:
     return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
