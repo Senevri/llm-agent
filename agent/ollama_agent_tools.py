@@ -6,6 +6,8 @@ import json
 from internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
 from bash_tools import run_bash
 
+from datetime import datetime, timezone
+
 # --- Configuration ---
 # Note: These are defaults. In a more robust system, these could be passed from the main agent.
 TOOL_TIMEOUT = int(os.getenv("AGENT_TOOL_TIMEOUT", "60"))
@@ -14,6 +16,9 @@ MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
 logger = logging.getLogger("OllamaAgentTools")
 
 # --- Tool Implementations ---
+
+def tool_now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 def read_file(path: str) -> str:
     """Read the contents of a file."""
@@ -141,7 +146,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "search_file",
-            "description": "Search for a string within a file and return matching lines.",
+            "description": "Search for a LITERAL substring (case-sensitive). No regex, no boolean operators, no 'OR'. For pattern/boolean search, use run_bash with rg.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -179,6 +184,18 @@ tools = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "now",
+            "description": "Get the current date and time in ISO 8601 format.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    }
 ]
 
 # Add internet tools to the tool definitions

@@ -1,5 +1,7 @@
 import logging
 import requests
+from urllib.parse import urlparse
+
 from ddgs import DDGS
 from bash_tools import run_bash
 
@@ -99,8 +101,13 @@ def get_weather(location: str) -> str:
         logger.error(f"Weather lookup error: {str(e)}")
         return f"Error fetching weather for {location}: {str(e)}"
 
+
 def read_web_page(url: str) -> str:
     """Read a web page and return its content as plain text using w3m."""
+
+    if urlparse(url).scheme not in ("http", "https"):
+        return "Error: only http(s) URLs are supported."
+
     logger.info(f"Reading web page: {url}")
     try:
         # PoC: curl -sL <url> | w3m -dump -T text/html

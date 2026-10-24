@@ -20,8 +20,8 @@ def run_bash(command: str) -> str:
             cwd="/workspace"
         )
         output = (result.stdout or "") + (result.stderr or "")
-        if not output:
-            return "Command executed successfully with no output."
+        if result.returncode != 0 and not output:
+            return f"exit={result.returncode} (no output)"
 
         if len(output) > MAX_OUTPUT_LENGTH:
             return f"Output truncated to {MAX_OUTPUT_LENGTH} characters:\n\n{output[:MAX_OUTPUT_LENGTH]}..."

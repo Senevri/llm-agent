@@ -45,7 +45,10 @@ except ImportError:
     def get_weather(location: str) -> str:
         return "Weather lookup is not available."
     INTERNET_TOOL_MAP = {}
-    INTERNET_TOOL_DEFINITION_MAP = {}.
+    INTERNET_TOOL_DEFINITION_MAP = {}
+
+from ollama_agent_tools import TOOL_MAP as BASE_TOOL_MAP, tools as BASE_TOOL_SCHEMAS
+from llm_utils import UsageTracker, discover_context_window
 
 
 # --- .env loader (script-relative, matching run_agent.py convention) ---
@@ -113,46 +116,9 @@ logger.addHandler(_fh)
 
 
 # --- Local tools (NOTE: duplicated from ollama_agent_tools.py; see note at bottom) ---
-def tool_run_bash(command: str) -> str:
-    try:
-        res = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
-            timeout=60, errors="replace",
-        )
-        out = (res.stdout or "") + (res.stderr or "")
-        if res.returncode != 0:
-            return f"exit={res.returncode}\n{out}" if out else f"exit={res.returncode} (no output)"
-        return out if out else "Success (no output)"
-    except Exception as e:
-        return f"Error executing command: {e}"
-
-
-def tool_read_file(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except Exception as e:
-        return f"Error reading file: {e}"
-
-def tool_write_file(path: str, content: str) -> str:
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return f"Successfully wrote to {path}"
-    except Exception as e:
-        return f"Error writing file: {e}"
-
-def tool_list_files(path: str = ".") -> str:
-    try:
-        items = os.listdir(path)
-        return "\n".join(items) if items else "(empty)"
-    except Exception as e:
-        return f"Error listing directory: {e}"
-
 # Map profile name → directory containing system_prompt.md
 PROFILES: Dict[str, Path] = {
-    "engineering": AGENT_DIR,
+    'engineering': AGENT_DIR,
     # "prose": Path("/agent/prose"),
     # "research": Path("/agent/research"),
 }
@@ -316,39 +282,16 @@ def tool_list_jobs():
         lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j['profile']})")
     return "\n".join(lines)
 
-# --- Tool registry ---
+
+# --- Tool registry (Merged with base tools) ---
 TOOL_MAP: Dict[str, Callable] = {
-    "run_bash": tool_run_bash,
-    "read_file": tool_read_file,
-    "write_file": tool_write_file,
-    "list_files": tool_list_files,
+    **BASE_TOOL_MAP,
     "dispatch_agent": tool_dispatch_agent,
     "check_job": tool_check_job,
     "list_jobs": tool_list_jobs,
-    **INTERNET_TOOL_MAP
 }
 
-TOOL_SCHEMAS = [
-    {"type": "function", "function": {
-        "name": "run_bash",
-        "description": "Execute a bash command. 60s timeout. Use for anything the other tools can't express.",
-        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
-    }},
-    {"type": "function", "function": {
-        "name": "read_file",
-        "description": "Read a file's full content.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-    }},
-    {"type": "function", "function": {
-        "name": "write_file",
-        "description": "Write content to a file. Parent dirs are created.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
-    }},
-    {"type": "function", "function": {
-        "name": "list_files",
-        "description": "List files in a directory.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": []},
-    }},
+TOOL_SCHEMAS = BASE_TOOL_SCHEMAS + [
     {"type": "function", "function": {
         "name": "dispatch_agent",
         "description": (
@@ -382,8 +325,7 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {}},
     }},
 ]
-
-TOOL_SCHEMAS.extend(INTERNET_TOOL_DEFINITION_MAP.values())
+# --- Tool registry ---
 
 def _role(m) -> str:
     return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
@@ -399,8 +341,13 @@ class LLMRepl:
             "instead of doing it one step at a time. "
             "The dispatch_agent task must be a complete brief: goal, constraints, "
             "and what 'done' looks like."
+            "The 'rich' python module is installed, so you can use markdown formatting in your responses. "
         )
         self.messages: List[Any] = [{"role": "system", "content": self.system_prompt}]
+
+        self.usage = UsageTracker()
+        self.usage.context_limit = discover_context_window(base_url, self.model)
+        logger.info(f"context window: {self.usage.context_limit} (model max may be larger)")
 
     def _trim_context(self):
         """Keep system + last N messages, never starting on an orphaned tool result."""
@@ -444,6 +391,8 @@ class LLMRepl:
                     tools=TOOL_SCHEMAS,
                     tool_choice="auto",
                 )
+                self.usage.record(response.usage, turn=len(self.messages))
+                logger.info(f"usage: {self.usage.summary()}")
             except Exception as e:
                 if not self._handle_api_error(e):
                     break
