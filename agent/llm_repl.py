@@ -44,9 +44,8 @@ except ImportError:
         return "Internet search is not available."
     def get_weather(location: str) -> str:
         return "Weather lookup is not available."
-    internet_tool_definition = None
-    weather_tool_definition = None
-
+    INTERNET_TOOL_MAP = {}
+    INTERNET_TOOL_DEFINITION_MAP = {}.
 
 
 # --- .env loader (script-relative, matching run_agent.py convention) ---
@@ -159,10 +158,6 @@ PROFILES: Dict[str, Path] = {
 }
 
 
-# At top of file, add to imports:
-import threading
-import atexit
-
 # Module-level job registry
 JOBS: Dict[str, dict] = {}
 
@@ -218,7 +213,7 @@ def tool_dispatch_agent(task, profile="engineering", max_turns=40, timeout=1800)
             f"# DISPATCH OVERRIDE — read this first\n\n"
             f"Your working directory for this run is: {workspace}\n"
             f"- Write ALL output files here, using relative paths or paths under {workspace}.\n"
-            f"- Do NOT write to /workspace.\n"
+            f"- Do NOT write to /workspace,.\n"
             f"- plan.md, memory.md, todo.md, and all deliverables live in {workspace}.\n"
             f"- Confirm with `pwd` before writing anything.\n\n---\n\n"
         )
@@ -320,128 +315,6 @@ def tool_list_jobs():
         elapsed = time.time() - j["start"]
         lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j['profile']})")
     return "\n".join(lines)
-
-def tool_dispatch_agent_sync(
-    task: str,
-    profile: str = "engineering",
-    max_turns: int = 40,
-    timeout: int = 1800,
-) -> str:
-    """Run the autonomous agent on `task` in a fresh, self-contained workspace.
-
-    Always returns a string (never None, never raises). The workspace contains
-    the exact system prompt, task prompt, and log used for this run, plus all
-    files the agent produced.
-    """
-    try:
-        # 1. Validate profile and locate prompts
-        if profile not in PROFILES:
-            return f"Error: unknown profile '{profile}'. Known: {sorted(PROFILES)}"
-
-        prompt_dir = PROFILES[profile].resolve()
-        src_prompt = prompt_dir / "system_prompt.md"
-        if not src_prompt.exists():
-            return f"Error: profile '{profile}' has no system_prompt.md at {src_prompt}"
-
-        agent_script = AGENT_DIR / "run_agent.py"
-        if not agent_script.exists():
-            return f"Error: agent script not found at {agent_script}"
-
-        # 2. Fresh workspace (isolated from /workspace and from prior dispatches)
-        workspace = Path(tempfile.mkdtemp(prefix=f"agent_run_{profile}_"))
-
-        # 3. Copy system prompt in, with a working-directory override prepended.
-        #    Prepend (not append) so the model reads it before the misleading
-        #    "Working directory: /workspace" line in the original prompt.
-        original_prompt = src_prompt.read_text(encoding="utf-8")
-        override = (
-            f"# DISPATCH OVERRIDE — read this first\n\n"
-            f"Your working directory for this run is: {workspace}\n"
-            f"- Write ALL output files here, using relative paths or paths under {workspace}.\n"
-            f"- Do NOT write to /workspace. That is the persistent volume for interactive\n"
-            f"  sessions, not for this dispatch.\n"
-            f"- plan.md, memory.md, todo.md, and all deliverables live in {workspace}.\n"
-            f"- Confirm with `pwd` before writing anything.\n\n"
-            f"---\n\n"
-        )
-        system_prompt_path = workspace / "system_prompt.md"
-        system_prompt_path.write_text(override + original_prompt, encoding="utf-8")
-
-        # 4. Write task prompt
-        task_path = workspace / "user_prompt.md"
-        task_path.write_text(task, encoding="utf-8")
-
-        log_path = workspace / "agent.log"
-
-        # 5. Build command
-        backend = os.getenv("AGENT_BACKEND", "ollama")
-        cmd = [
-            sys.executable, str(agent_script),
-            "--backend", backend,
-            "--system-prompt", str(system_prompt_path),
-            "--user-prompt", str(task_path),
-            "--max-turns", str(max_turns),
-            "--log-level", "INFO",
-        ]
-        # Optional per-dispatch model override; backend-specific env var wins
-        # over the shared AGENT_MODEL to avoid the ollama/mistral collision.
-        model_override = (
-            os.getenv(f"AGENT_MODEL_{backend.upper()}")
-            or os.getenv("AGENT_MODEL")
-        )
-        if model_override:
-            cmd.extend(["--model", model_override])
-
-        logger.info(
-            f"dispatch_agent: profile={profile} workspace={workspace} "
-            f"backend={backend} max_turns={max_turns} timeout={timeout}s"
-        )
-
-        # 6. Run
-        try:
-            with open(log_path, "w", encoding="utf-8") as logf:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=str(workspace),
-                    stdout=logf,
-                    stderr=subprocess.STDOUT,
-                    timeout=timeout,
-                )
-        except subprocess.TimeoutExpired:
-            tail = log_path.read_text(errors="replace")[-1500:]
-            return (
-                f"Agent TIMEOUT after {timeout}s (profile={profile}, backend={backend}).\n"
-                f"Workspace: {workspace}\n"
-                f"Log: {log_path}\n"
-                f"--- log tail ---\n{tail}"
-            )
-
-        # 7. Collect results
-        tail = log_path.read_text(errors="replace")[-2000:]
-        exclude = {"system_prompt.md", "user_prompt.md", "agent.log"}
-        try:
-            files = sorted(
-                str(p.relative_to(workspace))
-                for p in workspace.rglob("*")
-                if p.is_file() and p.name not in exclude
-            )
-        except Exception:
-            files = []
-        files_listing = "\n  ".join(files) if files else "(no output files)"
-
-        return (
-            f"Agent exit code: {proc.returncode} "
-            f"(profile={profile}, backend={backend})\n"
-            f"Workspace: {workspace}\n"
-            f"Output files:\n  {files_listing}\n"
-            f"Log: {log_path}\n"
-            f"--- log tail ---\n{tail}"
-        )
-
-    except Exception as e:
-        logger.exception(f"dispatch_agent failed: {e}")
-        return f"Error dispatching agent: {type(e).__name__}: {e}"
-
 
 # --- Tool registry ---
 TOOL_MAP: Dict[str, Callable] = {
@@ -560,6 +433,8 @@ class LLMRepl:
     def send_message(self, user_input: str):
         self.messages.append({"role": "user", "content": user_input})
         self._trim_context()
+        MAX_RETRIES = 5
+        retries = 0
 
         while True:
             try:
@@ -571,6 +446,10 @@ class LLMRepl:
                 )
             except Exception as e:
                 if not self._handle_api_error(e):
+                    break
+                retries += 1
+                if retries >= MAX_RETRIES:
+                    console.print(f"[bold red]Max retries reached. Aborting turn.[/bold red]")
                     break
                 continue
 

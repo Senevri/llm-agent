@@ -5,7 +5,9 @@ import logging
 import argparse
 from pathlib import Path
 from openai import OpenAI
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
+
+# load_dotenv()
 
 # Import internal modules from /agent
 import sys
@@ -42,8 +44,6 @@ def setup_logging(level, log_dir: Path | None = None) -> logging.Logger:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")).resolve()
-
 # --- Tiny .env loader (no extra dependency) ---
 def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
     if not os.path.exists(path):
@@ -59,6 +59,10 @@ def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
             )
 
 _load_dotenv()
+
+
+PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")).resolve()
+
 
 def _role(m) -> str:
     return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
@@ -169,7 +173,8 @@ def main():
 
         empty_streak = 0
         messages.append(msg)
-
+        if msg.content:
+            logger.info(msg.content)
         if msg.tool_calls:
             for tool_call in msg.tool_calls:
                 func_name = tool_call.function.name
@@ -196,8 +201,11 @@ def main():
                 else:
                     logger.warning(f"Unknown tool requested: {func_name}")
         elif msg.content:
-            logger.info(f"\n[Agent Final Response]:\n{msg.content}")
+            # logger.info(f"\n[Agent Final Response]:\n{msg.content}")
             break
+    # Max turns reached
+    else:
+        logger.error("Max turns reached. Aborting.")
 
 if __name__ == "__main__":
     main()
