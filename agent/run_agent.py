@@ -7,17 +7,53 @@ import logging
 import argparse
 from pathlib import Path
 from openai import OpenAI
-# from dotenv import load_dotenv
+from dotenv import load_dotenv
 
-# load_dotenv()
 
 # Import internal modules from /agent
 import sys
 sys.path.append('/agent')
+sys.path.append('/agent/skill_system') # Fix the import issue for skill_system internal imports
+
 from get_ip import get_gateway_ip
-from agent_tools import tools, TOOL_MAP
 from openai_error_handling import classify_api_error, Action
 from llm_utils import UsageTracker, discover_context_window
+
+# Skill System Integration
+from skill_system.tool_registry import registry as tool_registry
+from skill_system.skills_manager import SkillsManager
+from skill_system.integration import SKILLS_ROOT
+
+# Import legacy tools to register them into the new registry
+from agent_tools import (
+    read_file, read_file_lines, search_file, list_files,
+    write_file, append_file, tool_now, install_deb_package,
+    run_bash, INTERNET_TOOL_MAP, TMUX_TOOL_MAP, CONTEXT_TOOL_MAP
+)
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+load_dotenv(SCRIPT_DIR / ".env")
+
+# --- Tool Registration ---
+def register_core_tools():
+    """Registers the base tools into the ToolRegistry."""
+    core_tools = [
+        ("run_bash", "Execute a bash command. Use /tmp or /workspace for writes.", run_bash, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}),
+        ("read_file", "Read contents of a file by path. Fails if file is too large.", read_file, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+        ("read_file_lines", "Read specific lines of a file (1-indexed). Useful for large files.", read_file_lines, {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, "required": ["path"]}),
+        ("search_file", "Search for a LITERAL substring (case-sensitive).", search_file, {"type": "object", "properties": {"path": {"type": "string"}, "query": {"type": "string"}}, "required": ["path", "query"]}),
+        ("list_files", "List files and directories in a given path.", list_files, {"type": "object", "properties": {"path": {"type": "string"}}, "required": []}),
+        ("write_file", "Write content to a file by path.", write_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
+        ("append_file", "Append content to a file.", append_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
+        ("now", "Get the current date and time in ISO 8601 format.", tool_now, {"type": "object", "properties": {}, "required": []}),
+        ("install_deb_package", "Install a Debian package into ~/.local WITHOUT root.", install_deb_package, {"type": "object", "properties": {"package": {"type": "string"}, "with_deps": {"type": "boolean"}}, "required": ["package"]}),
+    ]
+    for name, desc, func, params in core_tools:
+        tool_registry.register(name, desc, func, params)
+
+    for name, func in {**INTERNET_TOOL_MAP, **TMUX_TOOL_MAP, **CONTEXT_TOOL_MAP}.items():
+        if name not in tool_registry.list_tools():
+            tool_registry.register(name, f"Tool {name}", func, {"type": "object", "properties": {}, "required": []})
 
 usage = UsageTracker()
 
@@ -26,7 +62,6 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_MAX_TURNS = 100
 DEFAULT_CONTEXT_LIMIT = 100
 
-# Setup Logging
 from datetime import datetime
 
 def setup_logging(level, log_dir: Path | None = None) -> logging.Logger:
@@ -47,9 +82,6 @@ def setup_logging(level, log_dir: Path | None = None) -> logging.Logger:
     return logger
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-
-# --- Tiny .env loader (no extra dependency) ---
 def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
     if not os.path.exists(path):
         return
@@ -65,9 +97,7 @@ def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
 
 _load_dotenv()
 
-
 PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")).resolve()
-
 
 def _role(m) -> str:
     return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
@@ -95,20 +125,18 @@ def get_client(backend):
         base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
         usage.context_limit = discover_context_window(base_url, model)
         return OpenAI(base_url=base_url, api_key="ollama"), model
-
     elif backend == "mistral":
         api_key = os.getenv("MISTRAL_API_KEY")
         if not api_key:
-            raise RuntimeError("MISTRAL_API_KEY not set. Please set it in environment variables.")
+            raise RuntimeError("MISTRAL_API_KEY not set.")
         model = os.getenv("AGENT_MODEL", "ministral-14b-latest")
         base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
         return OpenAI(base_url=base_url, api_key=api_key), model
-
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Unified LLM Agent")
+    parser = argparse.ArgumentParser(description="Unified LLM Agent with Skill System")
     parser.add_argument("--backend", choices=["ollama", "mistral"], required=True, help="LLM backend to use")
     parser.add_argument("--system-prompt", default="system_prompt.md", help="Path to system prompt file")
     parser.add_argument("--user-prompt", default="user_prompt.md", help="Path to user prompt file")
@@ -120,6 +148,14 @@ def main():
     args = parser.parse_args()
     logger = setup_logging(args.log_level, log_dir=Path(
         os.getenv("AGENT_LOG_DIR", "./log/")))
+
+    # Initialize Skill System
+    register_core_tools()
+    skills_mgr = SkillsManager(SKILLS_ROOT)
+    skills_mgr.discover_skills()
+
+    logger.info(f"Registered tools: {tool_registry.list_tools()}")
+    logger.info(f"Discovered skills: {list(skills_mgr.catalog.keys())}")
 
     try:
         client, default_model = get_client(args.backend)
@@ -138,28 +174,30 @@ def main():
         logger.error(f"Required prompt file missing: {e}")
         return
 
+    skills_summary = skills_mgr.get_catalog_summary()
+    system_prompt += "\n\n" + skills_summary
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
 
     logger.info(f"--- Starting Agent Loop via {args.backend} ({model_name}) ---")
-
     empty_streak = 0
 
     for turn in range(args.max_turns):
         if args.backend == "mistral":
-            time.sleep(1) # Avoid rate limits for Mistral
+            time.sleep(1)
 
         if usage.context_pct > 90:
-            logger.warning("context >90% — trimming or summarizing before next turn")
+            logger.warning("context >90% — trimming")
             messages = _trim_messages(messages, args.context_limit)
 
         try:
             response = client.chat.completions.create(
                 model=model_name,
                 messages=messages,
-                tools=tools,
+                tools=tool_registry.get_all_schemas(),
                 tool_choice="auto"
             )
             usage.record(response.usage, turn=len(messages))
@@ -196,34 +234,33 @@ def main():
         if msg.tool_calls:
             for tool_call in msg.tool_calls:
                 func_name = tool_call.function.name
-                if func_name in TOOL_MAP:
-                    try:
-                        args_json = json.loads(tool_call.function.arguments)
-                        result = TOOL_MAP[func_name](**args_json)
-                        logger.info(f"Tool {func_name} output: {result[:100]}...")
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                    result = tool_registry.execute(func_name, **args)
 
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": func_name,
-                            "content": result
-                        })
-                    except Exception as e:
-                        logger.error(f"Tool execution failed: {e}")
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": func_name,
-                            "content": f"Error executing tool: {str(e)}"
-                        })
-                else:
-                    logger.warning(f"Unknown tool requested: {func_name}")
+                    if result is None:
+                        logger.error("Tool %s returned None", func_name)
+                        result = "Error: tool returned no result (None)."
+                    elif not isinstance(result, str):
+                        result = str(result)
+
+                    logger.info("Tool %s output: %.100s...", func_name, result)
+
+                except Exception as e:
+                    logger.exception("Tool %s failed", func_name)
+                    result = f"Error executing tool {func_name}: {e}"
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": func_name,
+                        "content": result
+                    })
+
         elif msg.content:
-            # logger.info(f"\n[Agent Final Response]:\n{msg.content}")
             break
-    # Max turns reached
     else:
         logger.error("Max turns reached. Aborting.")
+    logger.info("--- Agent Loop Complete ---")
 
 if __name__ == "__main__":
     main()
