@@ -39,8 +39,18 @@ from dataclasses import dataclass, field
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 AGENT_DIR = Path(os.getenv("AGENT_DIR", "/agent"))
+
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
+
+PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")) / "prompts"
+if not PROMPT_DIR.exists():
+    PROMPT_DIR = Path(SCRIPT_DIR) /"prompts"
+
+# Todo: Use both /agent/prompts and curdir/prompts
+
+
+PROMPT_DIR = PROMPT_DIR.resolve()
 
 def _load_dotenv(path: Path) -> None:
     try:
@@ -49,10 +59,10 @@ def _load_dotenv(path: Path) -> None:
         with open(path, "r", encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+                if not line or not line.startswith("#") or "=" not in line:
+                    if not line.startswith("#"):
+                        key, value = line.split("=", 1)
+                        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
     except Exception as exc:
         sys.stderr.write(f"Warning: failed to load env file {path}: {exc}\n")
 
@@ -123,8 +133,9 @@ except Exception:
 
 # Skill System Integration
 from skill_system.tool_registry import registry as tool_registry
-from skill_system.skills_manager import SkillsManager
-from skill_system.integration import SKILLS_ROOT
+from skill_system.integration import SKILLS_ROOT, skills_manager as active_skills_mgr
+
+from prompt_generator import PromptGenerator
 
 def register_core_tools():
     """Registers the base tools into the ToolRegistry."""
@@ -143,6 +154,8 @@ def register_core_tools():
             tool_registry.register(name, description, func, parameters)
         else:
             _logging.info(f"Tool '{name}' is already registered. Skipping.")
+
+register_core_tools()
 
 def _role(m):
     if isinstance(m, dict): return str(m.get("role", ""))
@@ -450,14 +463,21 @@ class RichTUIChat:
             self.usage.context_limit = discover_context_window(self.base_url, self.model)
         except Exception:
             self.usage.context_limit = int(os.getenv("CHAT_CONTEXT_TOKENS", "4096"))
-        self.base_system_prompt = (
-            "You are a helpful assistant with access to local tools. "
-            "The system runs an explicit planning phase before you answer. "
-            "Use specialized helpers for .md and .json files. "
-            "Explicitly remembered facts and compressed gist are part of your context."
-        )
+
+        self.promptgen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
+
+        self.base_system_prompt = self.promptgen.generate_prompt("chat")
+
         self._state_lock = threading.RLock()
         self.messages = []
+
+        # Initialize Skill System
+        self.skills_mgr = active_skills_mgr
+        # print("Rich chat tools: %s", tool_registry.list_tools())
+        # print("Discovered skills: %s", self.skills_mgr.catalog)
+
+        # discover_skills is already called in integration.py
+
         self.system_prompt = self._build_system_prompt()
         self.messages.append({"role": "system", "content": self.system_prompt})
         self.max_tool_rounds = int(os.getenv("CHAT_MAX_TOOL_ROUNDS", "12"))
@@ -469,14 +489,26 @@ class RichTUIChat:
                 self.prompt_session = PromptSession(history=FileHistory(str(hp)) if FileHistory else None)
         except Exception:
             self.prompt_session = None
+
         self.tool_map = self._build_tool_map()
         self.tool_schemas = self._build_tool_schemas()
-        self.tool_schemas.extend(tool_registry.get_all_schemas())
+        # print("Working REPL tools: %s", list(self.tool_map.keys()))
+
         self.turn_id = self.memory.turn_counter
         console.print(f"[dim]Context window: {self.usage.context_limit} | workdir: {self.workdir}[/dim]")
+        import logging
+        logger = logging.getLogger("UnifiedAgent")
 
     def _build_system_prompt(self):
-        return (f"{self.base_system_prompt}\n\n"
+        skills_summary = self.skills_mgr.get_catalog_summary()
+        if skills_summary:
+            skills_summary = (
+                "### Available Skills\n"
+                "Use the discovered skill catalog to identify relevant capabilities "
+                "and follow the applicable skill instructions when needed.\n\n"
+                f"{skills_summary}"
+            )
+        return (f"{self.base_system_prompt}\n\n {skills_summary}\n\n"
                 f"### Conversation gist (compressed memory)\n{self.memory.gist_context_text()}\n\n"
                 f"### Explicitly remembered facts\n{self.memory.important_context_text()}\n")
 
@@ -697,8 +729,8 @@ class RichTUIChat:
             round_index += 1
             with self._state_lock:
                 augmented_system = {"role": "system", "content": self.system_prompt +
-                                    "\n\n## Internal plan for this reply (do not quote verbatim)\n" +
-                                    json.dumps(plan, indent=2, default=str)}
+                                     "\n\n## Internal plan for this reply (do not quote verbatim)\n" +
+                                     json.dumps(plan, indent=2, default=str)}
                 call_messages = [augmented_system] + [m for m in self.messages if _role(m) != "system"]
             try:
                 response = self.client.chat.completions.create(
@@ -735,9 +767,9 @@ class RichTUIChat:
                     tool_calls_made.append({"name": name, "args": args, "result": result})
                     with self._state_lock:
                         self.messages.append({"role": "tool", "tool_call_id": _call_id(tc),
-                                             "name": name, "content": result})
+                                              "name": name, "content": result})
                 self.memory.append_log("tool_round", {"turn": self.turn_id, "round": round_index,
-                                                     "calls": tool_calls_made[-len(_tool_calls(msg)): ]})
+                                                      "calls": tool_calls_made[-len(_tool_calls(msg)): ]})
                 continue
             final_content = _content(msg) or ""
             with self._state_lock:
@@ -757,15 +789,25 @@ class RichTUIChat:
         return final_content, tool_calls_made
 
     def _execute_tool(self, name, args):
+
         func = self.tool_map.get(name)
+        if func:
+            try:
+                return str(func(**args))
+            except TypeError as exc:
+                return f"Error: bad arguments for {name}: {exc}"
+            except Exception as exc:
+                return f"Error executing {name}: {exc}"
+
+        # 2. Fallback to the global tool registry (Core tools + Discovered Skills)
+        # This handles 'system-info', 'run_bash', etc.
+        result = tool_registry.execute(name, **args)
+        if not result.startswith("Error:"):
+            return result
+
         if func is None:
             return f"Error: tool '{name}' not found."
-        try:
-            return str(func(**args))
-        except TypeError as exc:
-            return f"Error: bad arguments for {name}: {exc}"
-        except Exception as exc:
-            return f"Error executing {name}: {exc}"
+
 
     def _phase_memory(self, user_input, assistant_response, plan, tool_calls):
         console.print("[bold cyan]Phase 3/4 - Memory & gist update...[/bold cyan]")
@@ -773,7 +815,7 @@ class RichTUIChat:
         messages = [
             {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
             {"role": "user", "content": (f"User request:\n{user_input}\n\nPlan:\n{json.dumps(plan, default=str)}\n\n"
-                                         f"Assistant final answer:\n{assistant_response}\n\nTool calls: {json.dumps(tool_calls, default=str)[:4000]}")},
+                                          f"Assistant final answer:\n{assistant_response}\n\nTool calls: {json.dumps(tool_calls, default=str)[:4000]}")},
         ]
         important_items = []
         gist_addition = ""
@@ -811,7 +853,7 @@ class RichTUIChat:
                 tags=tags,
                 source=f"turn {self.turn_id}",
                 retention=retention,
-)
+            )
             remembered_ids.append(entry.fact_id)
         if gist_addition.strip():
             prev = self.memory.gist
