@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     git \
     curl \
+    ddgr \
     wget \
     w3m \
     jq \
@@ -34,24 +35,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/batcat /usr/local/bin/bat \
     && rm -rf /var/lib/apt/lists/*
 
+# Create non-root user early
 RUN useradd -m -s /bin/bash sandboxuser
 
+# Install Astral uv installer globally
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# Set up workspace ownership
 WORKDIR /workspace
 RUN chown sandboxuser:sandboxuser /workspace
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
-
-# Python deps as root, before switching user. System-wide, visible to sandboxuser.
+# Python deps as root (globally visible), utilizing uv for speed
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir \
         requests pydantic openai python-dotenv \
-        pytest ipython ddgs rich
+        pytest ipython ddgs rich json-repair
 
-
+# Switch to non-root user for runtime and final preparations
 USER sandboxuser
 
-# The ENV above already adds ~/.local/bin to PATH; create it so pip --user works cleanly.
+# Create user local bin directory for user-space binaries
 RUN mkdir -p /home/sandboxuser/.local/bin
-
 
 CMD ["/bin/bash"]

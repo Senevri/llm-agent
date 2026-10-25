@@ -1,3 +1,5 @@
+#!/usr/local/bin/python
+
 import os
 import time
 import json
@@ -13,7 +15,7 @@ from openai import OpenAI
 import sys
 sys.path.append('/agent')
 from get_ip import get_gateway_ip
-from ollama_agent_tools import tools, TOOL_MAP
+from agent_tools import tools, TOOL_MAP
 from openai_error_handling import classify_api_error, Action
 from llm_utils import UsageTracker, discover_context_window
 
@@ -22,7 +24,7 @@ usage = UsageTracker()
 # --- Configuration Defaults ---
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_MAX_TURNS = 100
-DEFAULT_CONTEXT_LIMIT = 50
+DEFAULT_CONTEXT_LIMIT = 100
 
 # Setup Logging
 from datetime import datetime
@@ -84,8 +86,8 @@ def get_client(backend):
     logger = setup_logging(DEFAULT_LOG_LEVEL)
     logger.info(f"context window: {usage.context_limit} (model max may be larger)")
     if backend == "ollama":
-        #model = os.getenv("AGENT_MODEL", "gemma4:31b-cloud")
-        model = os.getenv("AGENT_MODEL", "beam:cloud")
+        model = os.getenv("AGENT_MODEL", "gemma4:31b-cloud")
+        #model = os.getenv("AGENT_MODEL", "beam:cloud")
 
         host_ip = get_gateway_ip()
         port = os.getenv("OLLAMA_PORT", "11434")
@@ -115,7 +117,8 @@ def main():
     parser.add_argument("--log-level", default=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL), help="Logging level")
 
     args = parser.parse_args()
-    logger = setup_logging(args.log_level)
+    logger = setup_logging(args.log_level, log_dir=Path(
+        os.getenv("AGENT_LOG_DIR", "./log/")))
 
     try:
         client, default_model = get_client(args.backend)
