@@ -6,6 +6,7 @@ import json
 from internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
 from agent_deb_tools import install_deb_package
 from bash_tools import run_bash
+from pathlib import Path
 try:
     from tmux_tools import TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
 except Exception:
@@ -29,6 +30,15 @@ TOOL_TIMEOUT = int(os.getenv("AGENT_TOOL_TIMEOUT", "60"))
 MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
 
 logger = logging.getLogger("OllamaAgentTools")
+
+def _is_memory_file(path: str) -> bool:
+    """Check if the given path is the protected memory file."""
+    memory_path = Path("/workspace/memory.md").resolve()
+    try:
+        return Path(path).resolve() == memory_path
+    except Exception as e:
+        logger.error(f"Error checking memory file: {e}")
+        return False
 
 # --- Tool Implementations ---
 
@@ -93,14 +103,30 @@ def list_files(path: str = ".") -> str:
         return f"Error listing files: {str(e)}"
 
 def write_file(path: str, content: str) -> str:
-    """Write content to a file."""
-    logger.info(f"Writing file: {path}")
+    """Write a file, except protected memory files."""
+    if _is_memory_file(path):
+        return (
+            "Permission denied: memory.md is protected from write_file. "
+            "Use update_memory to append an entry."
+        )
+
+    logger.info("Writing file: %s", path)
+    write_or_append_file(
+        path, content, mode="w", message="Successfully wrote {len(content)} chars to {path}")
+
+def append_file(path: str, content: str) -> str:
+    """Append content to a file."""
+    logger.info("Appending to file: %s", path)
+    write_or_append_file(
+        path, content, mode="a", message="Successfully appended {len(content)} chars to {path}")
+
+def write_or_append_file(path: str, content: str, mode: str = "a", message: str = None) -> str:
     try:
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(path, mode, encoding="utf-8") as f:
             f.write(content)
-        return f"Successfully wrote {len(content)} chars to {path}"
+        return messsage or f"Successfully wrote {len(content)} chars to {path}"
     except Exception as e:
-        return f"Error writing file: {str(e)}"
+        return f"Error appending to file: {e}"
 
 # Tool Mapping
 TOOL_MAP = {

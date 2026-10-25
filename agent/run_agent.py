@@ -83,7 +83,8 @@ def _trim_messages(messages, limit: int):
     return [system] + tail
 
 def get_client(backend):
-    logger = setup_logging(DEFAULT_LOG_LEVEL)
+    logger = setup_logging(DEFAULT_LOG_LEVEL, log_dir=Path(
+        os.getenv("AGENT_LOG_DIR", "./log/")))
     logger.info(f"context window: {usage.context_limit} (model max may be larger)")
     if backend == "ollama":
         model = os.getenv("AGENT_MODEL", "gemma4:31b-cloud")
