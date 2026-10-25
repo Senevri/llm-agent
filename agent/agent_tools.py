@@ -12,6 +12,15 @@ except Exception:
     TMUX_TOOL_MAP = {}
     TMUX_TOOL_DEFINITION_MAP = {}
 
+# Import the new context tools
+try:
+    from agent.context_tools import CONTEXT_TOOL_MAP, CONTEXT_TOOL_DEFINITION_MAP
+except ImportError:
+    # Fallback if context_tools is not in the python path
+    # In a real deployment, we'd ensure it's in the same directory or package
+    CONTEXT_TOOL_MAP = {}
+    CONTEXT_TOOL_DEFINITION_MAP = {}
+
 from datetime import datetime, timezone
 
 # --- Configuration ---
@@ -104,7 +113,8 @@ TOOL_MAP = {
     "install_deb_package": install_deb_package,
     "now": tool_now,
     **INTERNET_TOOL_MAP,
-    **TMUX_TOOL_MAP
+    **TMUX_TOOL_MAP,
+    **CONTEXT_TOOL_MAP
 }
 
 # Tool definitions for the LLM
@@ -129,7 +139,7 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
-                "required": ["path"]
+                "path": {"type": "string"}
             }
         }
     },
@@ -227,6 +237,7 @@ tools = [
     }
 ]
 
-# Add internet tools to the tool definitions
+# Add other tool definitions
 tools.extend(INTERNET_TOOL_DEFINITION_MAP.values())
 tools.extend(TMUX_TOOL_DEFINITION_MAP.values())
+tools.extend(CONTEXT_TOOL_DEFINITION_MAP.values())

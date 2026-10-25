@@ -47,7 +47,7 @@ except ImportError:
     INTERNET_TOOL_MAP = {}
     INTERNET_TOOL_DEFINITION_MAP = {}
 
-from ollama_agent_tools import TOOL_MAP as BASE_TOOL_MAP, tools as BASE_TOOL_SCHEMAS
+from agent_tools import TOOL_MAP as BASE_TOOL_MAP, tools as BASE_TOOL_SCHEMAS
 from llm_utils import UsageTracker, discover_context_window
 
 
