@@ -28,9 +28,9 @@ from skill_system.integration import SKILLS_ROOT
 
 # Import legacy tools to register them into the new registry
 from agent_tools import (
-    read_file, read_file_lines, search_file, list_files,
-    write_file, append_file, tool_now, install_deb_package,
-    run_bash, INTERNET_TOOL_MAP, TMUX_TOOL_MAP, CONTEXT_TOOL_MAP,
+    # read_file, read_file_lines, search_file, list_files,
+    # write_file, append_file, tool_now, install_deb_package,
+    # run_bash, INTERNET_TOOL_MAP, TMUX_TOOL_MAP, CONTEXT_TOOL_MAP,
     TOOL_DEFINITIONS, TOOL_MAP
 )
 
@@ -116,20 +116,17 @@ except ImportError:
 
 def _role(m) -> str:
     return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
-
 def _trim_messages(messages, limit: int):
-    if len(messages) <= limit + 1:
+    if len(messages) <= limit + 2:
         return messages
-    system = messages[0]
+    head = messages[:2]  # system + original task
     tail = messages[-limit:]
-    # drop orphaned tool results until we start on a legal message
     while tail and _role(tail[0]) == "tool":
         tail = tail[1:]
-    return [system] + tail
+    return head + tail
 
 def get_client(backend):
-    logger = setup_logging(DEFAULT_LOG_LEVEL, log_dir=Path(
-        os.getenv("AGENT_LOG_DIR", "./log/")))
+    logger = logging.getLogger("UnifiedAgent")   # was setup_logging(...)
     logger.info(f"context window: {usage.context_limit} (model max may be larger)")
     if backend == "ollama":
         model = os.getenv("AGENT_MODEL", "gemma4:31b-cloud")
@@ -150,25 +147,19 @@ def get_client(backend):
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
-tool_call_counts = Counter()
+from collections import deque
+recent_calls = deque(maxlen=6)
 MAX_IDENTICAL_CALLS = 3
+MAX_TOOL_CHARS = 12000
 
 def check_tool_call(name, arguments):
-    key = (name, json.dumps(
-        arguments, sort_keys=True, ensure_ascii=False
-    ))
-
-    tool_call_counts[key] += 1
-
-    if tool_call_counts[key] > MAX_IDENTICAL_CALLS:
-        return (
-            False,
-            f"Loop detected: {name} has been called with "
-            f"the same arguments {tool_call_counts[key]} times. "
-            "Do not repeat this call. Use a different approach "
-            "or provide the answer from the evidence already gathered."
-        )
-
+    key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+    recent_calls.append(key)
+    if recent_calls.count(key) > MAX_IDENTICAL_CALLS:
+        return (False,
+                f"Loop detected: {name} repeated with the same arguments. "
+                "Do not repeat this call. Use a different approach or answer "
+                "from the evidence already gathered.")
     return True, None
 
 def main():
@@ -180,7 +171,7 @@ def main():
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="Maximum agent turns")
     parser.add_argument("--context-limit", type=int, default=DEFAULT_CONTEXT_LIMIT, help="Context window limit")
     parser.add_argument("--log-level", default=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL), help="Logging level")
-    parser.add_argument("--role", default="general", help="Role of the agent")
+    parser.add_argument("--role", default="agent", help="Role of the agent")
 
     args = parser.parse_args()
     logger = setup_logging(args.log_level, log_dir=Path(
@@ -203,7 +194,7 @@ def main():
 
     # Load Prompts
     try:
-        current_role = args.role or "general"
+        current_role = args.role or "agent"
         if prompt_gen and not args.system_prompt:
             system_prompt = prompt_gen.generate_prompt(current_role)
         else: # fallback to hardcoded prompts
@@ -289,6 +280,10 @@ def main():
                         result = "Error: tool returned no result (None)."
                     elif not isinstance(result, str):
                         result = str(result)
+                    if len(result) > MAX_TOOL_CHARS:
+                        result = (result[:MAX_TOOL_CHARS]
+                                  + f"\n[truncated {len(result) - MAX_TOOL_CHARS} chars; "
+                                  "use read_file_lines or search_file for specific ranges]")
 
                     logger.info("Tool %s output: %.100s...", func_name, result)
 

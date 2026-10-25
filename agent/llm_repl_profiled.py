@@ -18,6 +18,20 @@ from pathlib import Path
 from typing import Dict, Any, List, Callable, NamedTuple, Optional, Union, Tuple
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
+
+from prompt_generator import PromptGenerator
+
+
+PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")) / "prompts"
+if not PROMPT_DIR.exists():
+    PROMPT_DIR = Path(SCRIPT_DIR) /"prompts"
+
+# Todo: Use both /agent/prompts and curdir/prompts
+
+
+PROMPT_DIR = PROMPT_DIR.resolve()
+
 
 from openai import OpenAI
 
@@ -32,29 +46,6 @@ JOB_CLEANUP_INTERVAL = int(os.getenv("LLM_REPL_JOB_CLEANUP_INTERVAL", "3600"))
 # Make /agent importable, mirroring run_agent.py.
 sys.path.insert(0, str(AGENT_DIR))
 
-BASE_SYSTEM_PROMPT= """
-You are a helpful assistant with access to local tools. Use tools when necessary.
-Use dispatch_agent when the task will take more than ~1 minute of your own tool calls
-(a real build, a long-running script, an iterative debugging loop), or when it should run
-in the background while you continue the conversation.
-For anything you can finish in a few calls, do it yourself — you have context the dispatched agent won't.
-The dispatch_agent task must be a complete brief: goal, constraints,
-and what 'done' looks like.
-The 'rich' module is installed, so you can use markdown formatting in your responses.
-Be analytical about the user's requests and if necessary, ask clarifying questions before committing to
-an action.
-`run_bash` runs with no stdin and no TTY. Programs that need a terminal
-(vim, less, top, tmux, screen, ssh without a command, ddgr without flags)
-will error out immediately rather than block.
-
-For interactive programs, use the tmux tools:
-  tmux_create_session → tmux_send → tmux_capture → tmux_kill
-
-For ddgr specifically, use non-interactive mode:
-  ddgr --json -n 5 "search query"
-you can read and write from /workspace and /agent, /agent is READ ONLY.
-
-"""
 
 PROFILER_PROMPT = """
 You are a profiling agent. Your task is to maintain a JSON profile of the user.
@@ -442,7 +433,15 @@ class LLMRepl:
         except Exception as e:
             raise StartupError(f"Failed to initialize user profile: {e}") from e
 
-        self.base_system_prompt = BASE_SYSTEM_PROMPT.strip()
+
+        try:
+            self.prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
+            self.current_role = "repl"
+            self.base_system_prompt = self.prompt_gen.generate_prompt(self.current_role)
+        except ImportError:
+            prompt_gen = None
+
+            self.base_system_prompt = "You are a helpful assistant. You have access to skills and tools"
 
         self.skills_manager = SkillsManager(SKILLS_ROOT)
         self.skills_manager.discover_skills()
@@ -912,6 +911,16 @@ class LLMRepl:
                                 self.system_prompt = self._build_system_prompt()
                                 self.messages = [{"role": "system", "content": self.system_prompt}] + self.messages[1:]
                             console.print("[yellow]System prompt updated.[/yellow]")
+                            continue
+
+                        if user_input.startswith("/role "):
+                            with self._state_lock:
+                                self.current_role = user_input[6:].strip()
+                                self.prompt_gen.reload_profiles()
+                                self.base_system_prompt = self.prompt_gen.generate_prompt(self.current_role)
+                                self.system_prompt = self._build_system_prompt()
+                                self.messages = [{"role": "system", "content": self.system_prompt}] + self.messages[1:]
+                            console.print(f"[yellow]Role switched to: {self.current_role}[/yellow]")
                             continue
                         if user_input.startswith("/model "):
                             self.model = user_input[7:].strip()

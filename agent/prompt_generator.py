@@ -18,6 +18,9 @@ class PromptGenerator:
             data = yaml.safe_load(f)
             return data.get("roles", {})
 
+    def reload_profiles(self):
+        self._profiles = self._load_profiles()
+
     def get_role_names(self) -> List[str]:
         return list(self._profiles.keys())
 
@@ -36,7 +39,7 @@ class PromptGenerator:
             content = snippet_path.read_text(encoding="utf-8").strip()
             prompt_parts.append(content)
 
-        return "\n\n".join(prompt_parts)
+        return "\n\n".join(prompt_parts).strip()
 
 def main():
     if len(sys.argv) < 2:
