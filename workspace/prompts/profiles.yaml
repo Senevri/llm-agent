@@ -1,0 +1,25 @@
+roles:
+  repl:
+    snippets:
+      - repl
+  general:
+    snippets:
+      - core
+      - general
+      - environment
+      - tools
+  agent:
+    snippets:
+      - agent
+      - environment
+      - tools
+  software-dev:
+    snippets:
+      - agent
+      - environment
+      - tools
+      - software_dev
+  text_maintenance:
+    snippets:
+      - core
+      - text_maintenance
