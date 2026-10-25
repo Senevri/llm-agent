@@ -54,7 +54,16 @@ class ToolRegistry:
             if missing:
                 return f"Error: Tool '{tool_name}' is missing required arguments: {missing}"
 
-            return tool.func(**kwargs)
+            result = tool.func(**kwargs)
+
+            if result is None:
+                logger.error("Tool '%s' returned None", tool_name)
+                return f"Error: tool '{tool_name}' returned None instead of a result."
+
+            if not isinstance(result, str):
+                result = str(result)
+
+            return result
         except Exception as e:
             logger.exception(f"Error executing tool '{tool_name}': {e}")
             return f"Error executing tool '{tool_name}': {str(e)}"

@@ -1,17 +1,19 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 # Add /agent to path to import harness components
+
 sys.path.append('/agent')
 # Add /workspace/agent_skills to path
 sys.path.append('/workspace/agent_skills')
 
-from tool_registry import registry as tool_registry
-from skills_manager import SkillsManager
+from skill_system.tool_registry import registry as tool_registry
+from skill_system.skills_manager import SkillsManager
 
 # Configuration
-SKILLS_ROOT = '/workspace/skills'
+SKILLS_ROOT = '/workspace/.skills'
 os.makedirs(SKILLS_ROOT, exist_ok=True)
 
 # Initialize Skills Manager
@@ -38,7 +40,7 @@ def get_skill_resource(skill_id: str, resource_path: str):
     """Get a resource for a skill."""
     return skills_manager.get_skill_resource(skill_id, resource_path)
 
-# To integrate with the actual /agent harness, we would normally 
+# To integrate with the actual /agent harness, we would normally
 # modify the dispatcher in /agent/pipeline_agent_v3.py or similar.
-# Since /agent is read-only, we provide this as a library to be used by a 
+# Since /agent is read-only, we provide this as a library to be used by a
 # runner that we can control.

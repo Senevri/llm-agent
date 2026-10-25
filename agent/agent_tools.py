@@ -1,4 +1,4 @@
-# ollama_agent_tools.py
+# agent_tools.py
 import os
 import subprocess
 import logging
@@ -45,17 +45,80 @@ def _is_memory_file(path: str) -> bool:
 def tool_now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
-def read_file(path: str) -> str:
-    """Read the contents of a file."""
-    logger.info(f"Reading file: {path}")
+DEFAULT_READ_CHARS = 12_000
+MAX_READ_CHARS = 24_000
+
+
+def read_file(
+    path: str,
+    start_line: int = 1,
+    max_lines: int = 0,
+    max_chars: int = DEFAULT_READ_CHARS,
+) -> str:
+    """Read a local UTF-8 text file with explicit paging metadata."""
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            content = f.read()
-            if len(content) > MAX_OUTPUT_LENGTH:
-                return f"File too large. Please use read_file_lines or search_file. (Size: {len(content)} chars)"
-            return content
+        p = Path(path).expanduser().resolve()
+
+        if not p.is_file():
+            return f"Error: not a regular file: {p}"
+
+        # Read text, not a fixed number of bytes.
+        with p.open("r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+
+        total_lines = len(lines)
+        if start_line < 1 or start_line > total_lines + 1:
+            return (
+                f"Error: start_line must be between 1 and "
+                f"{total_lines + 1}; file has {total_lines} lines."
+            )
+
+        max_chars = max(1, min(max_chars, MAX_READ_CHARS))
+        start_idx = start_line - 1
+        end_idx = total_lines if max_lines <= 0 else min(
+            total_lines, start_idx + max_lines
+        )
+
+        selected = []
+        chars = 0
+        next_line = None
+
+        for idx in range(start_idx, end_idx):
+            line = lines[idx]
+            if chars + len(line) > max_chars:
+                remaining = max_chars - chars
+                if remaining > 0:
+                    selected.append(line[:remaining])
+                next_line = idx + 1
+                break
+
+            selected.append(line)
+            chars += len(line)
+
+        if next_line is None and end_idx < total_lines:
+            next_line = end_idx + 1
+
+        actual_end = start_idx + len(selected)
+        header = (
+            f"File: {p}\n"
+            f"Total lines: {total_lines}\n"
+            f"Showing from line {start_line}; "
+            f"returned {len(selected)} line(s).\n"
+        )
+
+        if next_line is not None:
+            header += (
+                f"TRUNCATED: more content remains. "
+                f"Continue with start_line={next_line}.\n"
+            )
+        else:
+            header += "End of requested content reached.\n"
+
+        return header + "\n--- CONTENT ---\n" + "".join(selected)
+
     except Exception as e:
-        return f"Error reading file: {str(e)}"
+        return f"Error reading {path}: {e}"
+
 
 def read_file_lines(path: str, start_line: int = 1, end_line: int = None) -> str:
     """Read specific lines of a file (1-indexed)."""
@@ -111,20 +174,20 @@ def write_file(path: str, content: str) -> str:
         )
 
     logger.info("Writing file: %s", path)
-    write_or_append_file(
-        path, content, mode="w", message="Successfully wrote {len(content)} chars to {path}")
+    return write_or_append_file(
+        path, content, mode="w", message=f"Successfully wrote {len(content)} chars to {path}")
 
 def append_file(path: str, content: str) -> str:
     """Append content to a file."""
     logger.info("Appending to file: %s", path)
-    write_or_append_file(
-        path, content, mode="a", message="Successfully appended {len(content)} chars to {path}")
+    return write_or_append_file(
+        path, content, mode="a", message=f"Successfully appended {len(content)} chars to {path}")
 
 def write_or_append_file(path: str, content: str, mode: str = "a", message: str = None) -> str:
     try:
         with open(path, mode, encoding="utf-8") as f:
             f.write(content)
-        return messsage or f"Successfully wrote {len(content)} chars to {path}"
+        return message or f"Successfully wrote {len(content)} chars to {path}"
     except Exception as e:
         return f"Error appending to file: {e}"
 
@@ -164,8 +227,10 @@ tools = [
             "description": "Read contents of a file by path. Fails if file is too large.",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "path": {"type": "string"}
+                "properties": {
+                    "path": {"type": "string"}
+                    },
+                "required": ["path"]
             }
         }
     },
@@ -267,3 +332,5 @@ tools = [
 tools.extend(INTERNET_TOOL_DEFINITION_MAP.values())
 tools.extend(TMUX_TOOL_DEFINITION_MAP.values())
 tools.extend(CONTEXT_TOOL_DEFINITION_MAP.values())
+
+TOOL_DEFINITIONS = tools

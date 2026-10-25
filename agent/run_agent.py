@@ -6,6 +6,8 @@ import json
 import logging
 import argparse
 from pathlib import Path
+from collections import Counter
+
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -28,7 +30,8 @@ from skill_system.integration import SKILLS_ROOT
 from agent_tools import (
     read_file, read_file_lines, search_file, list_files,
     write_file, append_file, tool_now, install_deb_package,
-    run_bash, INTERNET_TOOL_MAP, TMUX_TOOL_MAP, CONTEXT_TOOL_MAP
+    run_bash, INTERNET_TOOL_MAP, TMUX_TOOL_MAP, CONTEXT_TOOL_MAP,
+    TOOL_DEFINITIONS, TOOL_MAP
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -37,23 +40,20 @@ load_dotenv(SCRIPT_DIR / ".env")
 # --- Tool Registration ---
 def register_core_tools():
     """Registers the base tools into the ToolRegistry."""
-    core_tools = [
-        ("run_bash", "Execute a bash command. Use /tmp or /workspace for writes.", run_bash, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}),
-        ("read_file", "Read contents of a file by path. Fails if file is too large.", read_file, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
-        ("read_file_lines", "Read specific lines of a file (1-indexed). Useful for large files.", read_file_lines, {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, "required": ["path"]}),
-        ("search_file", "Search for a LITERAL substring (case-sensitive).", search_file, {"type": "object", "properties": {"path": {"type": "string"}, "query": {"type": "string"}}, "required": ["path", "query"]}),
-        ("list_files", "List files and directories in a given path.", list_files, {"type": "object", "properties": {"path": {"type": "string"}}, "required": []}),
-        ("write_file", "Write content to a file by path.", write_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
-        ("append_file", "Append content to a file.", append_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
-        ("now", "Get the current date and time in ISO 8601 format.", tool_now, {"type": "object", "properties": {}, "required": []}),
-        ("install_deb_package", "Install a Debian package into ~/.local WITHOUT root.", install_deb_package, {"type": "object", "properties": {"package": {"type": "string"}, "with_deps": {"type": "boolean"}}, "required": ["package"]}),
-    ]
-    for name, desc, func, params in core_tools:
-        tool_registry.register(name, desc, func, params)
+    # Map tool definitions to their implementations
+    for tool_def in TOOL_DEFINITIONS:
+        name = tool_def["function"]["name"]
+        func = TOOL_MAP.get(name)
+        if func is None:
+            logging.warning(f"No implementation found for tool '{name}'. Skipping registration.")
+            continue
 
-    for name, func in {**INTERNET_TOOL_MAP, **TMUX_TOOL_MAP, **CONTEXT_TOOL_MAP}.items():
         if name not in tool_registry.list_tools():
-            tool_registry.register(name, f"Tool {name}", func, {"type": "object", "properties": {}, "required": []})
+            description = tool_def["function"].get("description", f"Tool {name}")
+            parameters = tool_def["function"].get("parameters", {})
+            tool_registry.register(name, description, func, parameters)
+        else:
+            logging.info(f"Tool '{name}' is already registered. Skipping.")
 
 usage = UsageTracker()
 
@@ -97,7 +97,22 @@ def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
 
 _load_dotenv()
 
-PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")).resolve()
+PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")) / "prompts"
+if not PROMPT_DIR.exists():
+    PROMPT_DIR = Path(SCRIPT_DIR) /"prompts"
+
+# Todo: Use both /agent/prompts and curdir/prompts
+
+
+PROMPT_DIR = PROMPT_DIR.resolve()
+
+try:
+    from prompt_generator import PromptGenerator
+    prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
+    current_role = "general"
+except ImportError:
+    prompt_gen = None
+
 
 def _role(m) -> str:
     return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
@@ -135,6 +150,27 @@ def get_client(backend):
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
+tool_call_counts = Counter()
+MAX_IDENTICAL_CALLS = 3
+
+def check_tool_call(name, arguments):
+    key = (name, json.dumps(
+        arguments, sort_keys=True, ensure_ascii=False
+    ))
+
+    tool_call_counts[key] += 1
+
+    if tool_call_counts[key] > MAX_IDENTICAL_CALLS:
+        return (
+            False,
+            f"Loop detected: {name} has been called with "
+            f"the same arguments {tool_call_counts[key]} times. "
+            "Do not repeat this call. Use a different approach "
+            "or provide the answer from the evidence already gathered."
+        )
+
+    return True, None
+
 def main():
     parser = argparse.ArgumentParser(description="Unified LLM Agent with Skill System")
     parser.add_argument("--backend", choices=["ollama", "mistral"], required=True, help="LLM backend to use")
@@ -144,6 +180,7 @@ def main():
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="Maximum agent turns")
     parser.add_argument("--context-limit", type=int, default=DEFAULT_CONTEXT_LIMIT, help="Context window limit")
     parser.add_argument("--log-level", default=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL), help="Logging level")
+    parser.add_argument("--role", default="general", help="Role of the agent")
 
     args = parser.parse_args()
     logger = setup_logging(args.log_level, log_dir=Path(
@@ -166,8 +203,12 @@ def main():
 
     # Load Prompts
     try:
-        with open(args.system_prompt, "r", encoding="utf-8") as f:
-            system_prompt = f.read()
+        current_role = args.role or "general"
+        if prompt_gen and not args.system_prompt:
+            system_prompt = prompt_gen.generate_prompt(current_role)
+        else: # fallback to hardcoded prompts
+            with open(args.system_prompt, "r", encoding="utf-8") as f:
+                system_prompt = f.read()
         with open(args.user_prompt, "r", encoding="utf-8") as f:
             user_prompt = f.read()
     except FileNotFoundError as e:
@@ -235,8 +276,13 @@ def main():
             for tool_call in msg.tool_calls:
                 func_name = tool_call.function.name
                 try:
-                    args = json.loads(tool_call.function.arguments)
-                    result = tool_registry.execute(func_name, **args)
+                    tool_args = json.loads(tool_call.function.arguments)
+                    tool_check = check_tool_call(func_name, tool_args)
+                    if tool_check[0] is False:
+                        logger.error(tool_check[1])
+                        result = tool_check[1]
+                    else:
+                        result = tool_registry.execute(func_name, **tool_args)
 
                     if result is None:
                         logger.error("Tool %s returned None", func_name)
@@ -249,18 +295,21 @@ def main():
                 except Exception as e:
                     logger.exception("Tool %s failed", func_name)
                     result = f"Error executing tool {func_name}: {e}"
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": func_name,
-                        "content": result
-                    })
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": func_name,
+                    "content": result
+                })
 
         elif msg.content:
             break
     else:
         logger.error("Max turns reached. Aborting.")
     logger.info("--- Agent Loop Complete ---")
+
+
 
 if __name__ == "__main__":
     main()

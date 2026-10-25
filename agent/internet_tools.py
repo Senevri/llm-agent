@@ -1,3 +1,4 @@
+# Internet tools
 import logging
 import requests
 from urllib.parse import urlparse
@@ -163,7 +164,7 @@ read_web_page_tool_definition = {
     "type": "function",
     "function": {
         "name": "read_web_page",
-        "description": "Read a web page and return its content as plain text using w3m.",
+        "description": "Fetch and extract readable text from a web URL. Use only when the required content is not already available locally or when the user explicitly requests the online version.",
         "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string", "description": "The URL of the web page to read"}},

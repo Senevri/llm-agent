@@ -1,3 +1,4 @@
+# context_tools.py
 import os
 import logging
 import shutil
@@ -163,8 +164,8 @@ def update_todo(content: str, mode: str = "append") -> str:
 CONTEXT_TOOL_MAP = {
     "update_memory": update_memory,
     "update_plan": update_plan,
-    "update_todo": update_todo
-    "compress_memory": compress_memory,
+    "update_todo": update_todo,
+    "compress_memory": compress_memory
 }
 
 # --- Tool Definitions ---

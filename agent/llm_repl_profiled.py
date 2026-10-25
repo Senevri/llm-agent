@@ -38,7 +38,6 @@ Use dispatch_agent when the task will take more than ~1 minute of your own tool 
 (a real build, a long-running script, an iterative debugging loop), or when it should run
 in the background while you continue the conversation.
 For anything you can finish in a few calls, do it yourself — you have context the dispatched agent won't.
-instead of doing it one step at a time.
 The dispatch_agent task must be a complete brief: goal, constraints,
 and what 'done' looks like.
 The 'rich' module is installed, so you can use markdown formatting in your responses.
@@ -53,6 +52,8 @@ For interactive programs, use the tmux tools:
 
 For ddgr specifically, use non-interactive mode:
   ddgr --json -n 5 "search query"
+you can read and write from /workspace and /agent, /agent is READ ONLY.
+
 """
 
 PROFILER_PROMPT = """
@@ -71,9 +72,7 @@ goals, expertise, constraints, recurring context).
 - Never use credential language ('expert', 'mastery', 'authority',
 'principal') unless the user used it about themselves.
 - If the user's message contains nothing that updates the profile
-(e.g. 'mm', 'thanks', 'ok', a question, or agreement), return
-exactly: {{\"changed\": false}}
-)
+(e.g. 'mm', 'thanks', 'ok', a question, or agreement), do not change the profile.)
 """
 
 def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
@@ -141,6 +140,10 @@ try:
 except Exception:
     BASE_TOOL_MAP = {}
     BASE_TOOL_SCHEMAS = []
+
+from skill_system.tool_registry import ToolRegistry
+from skill_system.skills_manager import SkillsManager
+from skill_system.integration import SKILLS_ROOT
 
 DEFAULT_MODEL = os.getenv("LLM_REPL_MODEL", "gemma4:e4b")
 DEFAULT_BASE_URL = os.getenv(
@@ -441,6 +444,13 @@ class LLMRepl:
 
         self.base_system_prompt = BASE_SYSTEM_PROMPT.strip()
 
+        self.skills_manager = SkillsManager(SKILLS_ROOT)
+        self.skills_manager.discover_skills()
+
+        with self._state_lock:
+            self.system_prompt = self._build_system_prompt()
+            self.messages = [{"role": "system", "content": self.system_prompt}]
+
         with self._state_lock:
             self.system_prompt = self._build_system_prompt()
             self.messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
@@ -448,8 +458,16 @@ class LLMRepl:
         self.profile_queue = queue.Queue()
         self.worker = ProfileWorker(self, self.profile_queue)
         self.worker.start()
-        self.tool_map: Dict[str, Callable] = create_tool_map(self)
-        self.tool_schemas: List[Dict[str, Any]] = list(TOOL_SCHEMAS)
+        self.tool_registry = create_tool_registry(self)
+
+        self.tool_schemas = self.tool_registry.get_all_schemas()
+
+        logger.info(
+            "Registered %d tools: %s",
+            len(self.tool_schemas),
+            self.tool_registry.list_tools(),
+        )
+        logger.info("Discovered skills: %s", self.skills_manager.catalog)
 
         atexit.register(self.shutdown)
 
@@ -492,12 +510,25 @@ class LLMRepl:
 
     def _build_system_prompt(self) -> str:
         profile_str = self.profile_manager.get_profile_string()
-        return (
-            f"{self.base_system_prompt}\n\n"
-            f"### User Profile\n"
-            f"The following is what is known about the user. Use this to personalize responses:\n"
-            f"{profile_str}"
-        )
+
+        sections = [
+            self.base_system_prompt,
+            "### User Profile\n"
+            "The following is what is known about the user. Use this to personalize responses:\n"
+            f"{profile_str}",
+        ]
+
+        skills_summary = self.skills_manager.get_catalog_summary()
+        if skills_summary:
+            sections.append(
+                "### Available Skills\n"
+                "Use the discovered skill catalog to identify relevant capabilities "
+                "and follow the applicable skill instructions when needed.\n\n"
+                f"{skills_summary}"
+            )
+
+        return "\n\n".join(sections)
+
 
     def _trim_context(self) -> None:
         # Safe to call with or without holding _state_lock (RLock).
@@ -520,27 +551,36 @@ class LLMRepl:
 
     def _execute_tools(self, tool_calls: List[Any]) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
-        func_map = getattr(self, "tool_map", None) or (TOOL_MAP if "TOOL_MAP" in globals() else {})
+
         for tc in tool_calls:
             name = getattr(tc.function, "name", "")
+
             try:
-                args = json.loads(tc.function.arguments)
+                args = json.loads(tc.function.arguments or "{}")
+                if not isinstance(args, dict):
+                    raise ValueError("Tool arguments must be a JSON object.")
+
+                logger.info("Executing tool %s with %s", name, args)
+
+                result = self.tool_registry.execute(name, **args)
+
+                if result is None:
+                    result = "Error: tool returned no result (None)."
+
+                content = result if isinstance(result, str) else str(result)
+
             except Exception as e:
-                logger.exception(f"Bad tool arguments for {name}")
-                results.append({"role": "tool", "tool_call_id": tc.id, "name": name,
-                                "content": f"Error: malformed JSON arguments ({e})."})
-                continue
-            logger.info(f"Executing tool {name} with {args}")
-            try:
-                func = func_map.get(name) if isinstance(func_map, dict) else None
-                if func is None:
-                    res = f"Error: tool {name} not found."
-                else:
-                    res = func(**args)
-                results.append({"role": "tool", "tool_call_id": tc.id, "name": name, "content": str(res)})
-            except Exception as e:
-                logger.exception(f"Tool {name} failed")
-                results.append({"role": "tool", "tool_call_id": tc.id, "name": name, "content": f"Error: {e}"})
+                logger.exception("Tool %s failed", name)
+                content = f"Error executing tool {name}: {e}"
+
+            # Always return a result, including for malformed arguments and errors.
+            results.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "name": name,
+                "content": content,
+            })
+
         return results
 
     def send_message(self, user_input: str) -> str:
@@ -553,11 +593,12 @@ class LLMRepl:
             try:
                 response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
                 msg = response.choices[0].message
+                assistant_msg = msg.model_dump(exclude_none=True)
 
                 if msg.tool_calls:
                     with self._state_lock:
-                        self.messages.append(msg)
-                    current_messages.append(msg)
+                        self.messages.append(assistant_msg)
+                    current_messages.append(assistant_msg)
                     tool_results = self._execute_tools(msg.tool_calls)
                     with self._state_lock:
                         self.messages.extend(tool_results)
@@ -918,62 +959,119 @@ def _role(m: Any) -> str:
 
 
 # --- Module-level tool helpers ----------------------------------------------------
-def create_tool_map(repl: LLMRepl) -> Dict[str, Callable]:
-    result: Dict[str, Callable] = {}
-    result.update(BASE_TOOL_MAP or {})
-    result.update(INTERNET_TOOL_MAP or {})
-    result.update({
-        "dispatch_agent": lambda **kwargs: repl._dispatch_agent_job(**kwargs),
-        "check_job": lambda **kwargs: repl._check_job(kwargs.get("job_id", "")),
-        "list_jobs": lambda **kwargs: repl._list_jobs(),
-    })
-    return result
+# --- Unified skill/tool registry -----------------------------------------------
 
-
-TOOL_SCHEMAS: List[Dict[str, Any]] = []
-
-
-def create_tool_schemas() -> List[Dict[str, Any]]:
-    schemas: List[Dict[str, Any]] = []
-    try:
-        schemas.extend(BASE_TOOL_SCHEMAS or [])
-    except Exception:
-        pass
-    try:
-        schemas.extend(list((INTERNET_TOOL_DEFINITION_MAP or {}).values()))
-    except Exception:
-        pass
-    schemas.extend([
-        {"type": "function", "function": {
+REPL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
             "name": "dispatch_agent",
-            "description": "Dispatch an autonomous agent to run a multi-step task in a fresh, isolated workspace.",
+            "description": (
+                "Dispatch an autonomous agent to run a multi-step task "
+                "in a fresh, isolated workspace."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Complete task brief."},
-                    "profile": {"type": "string", "description": "Profile name. Default 'engineering'."},
-                    "max_turns": {"type": "integer", "description": "Max agent turns."},
+                    "task": {
+                        "type": "string",
+                        "description": "Complete task brief: goal, constraints, and definition of done.",
+                    },
+                    "profile": {
+                        "type": "string",
+                        "description": "Agent profile. Defaults to engineering.",
+                    },
+                    "max_turns": {
+                        "type": "integer",
+                        "description": "Maximum agent turns.",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Maximum runtime in seconds.",
+                    },
                 },
                 "required": ["task"],
             },
-        }},
-        {"type": "function", "function": {
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "check_job",
-            "description": "Check status of a dispatched job.",
-            "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
-        }},
-        {"type": "function", "function": {
+            "description": "Check the status and recent logs of a dispatched agent job.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_jobs",
-            "description": "List all dispatched jobs.",
-            "parameters": {"type": "object", "properties": {}},
-        }},
-    ])
-    return schemas
+            "description": "List dispatched agent jobs and their statuses.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+]
 
 
-TOOL_SCHEMAS = create_tool_schemas()
-# Backwards-compatible alias (populated per-instance via LLMRepl.tool_map).
-TOOL_MAP: Dict[str, Callable] = {}
+def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
+    """Build a per-REPL registry from existing tool definitions and callables."""
+    registry = ToolRegistry()
+
+    # The definitions in agent_tools are the source of truth for the
+    # core, internet, tmux, and context tools.
+    definitions = list(BASE_TOOL_SCHEMAS or [])
+
+    # Bind REPL-specific functions to this instance.
+    repl_functions = {
+        "dispatch_agent": lambda **kwargs: repl._dispatch_agent_job(**kwargs),
+        "check_job": lambda job_id, **kwargs: repl._check_job(job_id),
+        "list_jobs": lambda **kwargs: repl._list_jobs(),
+    }
+
+    definitions.extend(REPL_TOOL_DEFINITIONS)
+
+    # Use the existing implementation map; the definitions supply schemas.
+    implementations = dict(BASE_TOOL_MAP or {})
+    implementations.update(INTERNET_TOOL_MAP or {})
+    implementations.update(repl_functions)
+
+    registered = set()
+
+    for definition in definitions:
+        function_def = definition.get("function", {})
+        name = function_def.get("name")
+
+        if not name or name in registered:
+            if name in registered:
+                logger.warning("Duplicate tool definition ignored: %s", name)
+            continue
+
+        func = implementations.get(name)
+        if func is None:
+            logger.warning(
+                "No implementation found for tool '%s'; skipping registration.",
+                name,
+            )
+            continue
+
+        registry.register(
+            name=name,
+            description=function_def.get("description", f"Tool {name}"),
+            func=func,
+            parameters=function_def.get("parameters", {}),
+        )
+        registered.add(name)
+
+    return registry
 
 
 # Job manager facade retaining a simple API without changing LLMRepl internals.
