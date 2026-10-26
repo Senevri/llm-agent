@@ -20,20 +20,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 
-from prompt_generator import PromptGenerator
-
-
-PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")) / "prompts"
-if not PROMPT_DIR.exists():
-    PROMPT_DIR = Path(SCRIPT_DIR) /"prompts"
-
-# Todo: Use both /agent/prompts and curdir/prompts
-
-
-PROMPT_DIR = PROMPT_DIR.resolve()
-
+from prompt_generator import PromptGenerator, find_prompt_dir
+from agent_dispatcher import AgentDispatcher
 
 from openai import OpenAI
+
+PROMPT_DIR = find_prompt_dir()
 
 # --- Paths / environment discovery -------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -484,18 +476,16 @@ class LLMRepl:
         self._shutdown_done = True
 
         logger.info("Shutting down LLMRepl...")
+
+        # Stop all jobs cleanly using the new dispatcher
+        if hasattr(self, 'dispatcher'):
+            self.dispatcher.shutdown(stop_owned_jobs=True)
+
         try:
             self.worker.stop()
             self.worker.join(timeout=5.0)
         except Exception as e:
             logger.error(f"Error stopping profile worker: {e}")
-
-        with self._jobs_lock:
-            for jid in list(self._jobs.keys()):
-                try:
-                    self._kill_job_internal(jid)
-                except Exception as e:
-                    logger.error(f"Error killing job {jid}: {e}")
 
         try:
             self.profile_manager.save_profile()
@@ -507,6 +497,7 @@ class LLMRepl:
             if _active_repls == 0:
                 _stop_log_listener()
 
+        logger.info("LLMRepl shutdown complete.")
     def _build_system_prompt(self) -> str:
         profile_str = self.profile_manager.get_profile_string()
 
@@ -723,7 +714,38 @@ class LLMRepl:
             for s in self.tool_schemas
     )
 
-    def _dispatch_agent_job(self, task: str, profile: str = "software-dev", max_turns: int = 40, timeout: int = 1800) -> str:
+    def _dispatch_agent_job(self, task: str, profile: str = "software-dev", backend="ollama", max_turns: int = 40, timeout: int = 1800) -> str:
+        # use AgentDispatcher
+        if not hasattr(self, 'dispatcher'):
+            self.dispatcher = AgentDispatcher(
+                agent_dir=str(AGENT_DIR),
+                prompt_gen=self.prompt_gen,
+            )
+
+        model_override = os.getenv(f"AGENT_MODEL_{backend.upper()}") or os.getenv("AGENT_MODEL")
+        if model_override:
+            self.dispatcher.model = model_override
+
+
+        job_id, job = self.dispatcher.dispatch_agent_job(task, profile=profile, max_turns=max_turns, timeout=timeout)
+        with self._jobs_lock:
+            self._jobs[job_id] = job
+
+        logger.info(f"Job {job_id} dispatched.")
+
+        # return job_id
+        return (
+            f"Dispatched {job_id} (profile={profile}). Running in background.\n"
+            f"Workspace: {job['workspace']}\nLog: {job['log']}\n"
+            f"Poll with check_job('{job_id}') or list_jobs()."
+        )
+
+        # dispatcher.active_jobs is a dict
+
+
+
+
+    def _old_dispatch_agent_job(self, task: str, profile: str = "software-dev", max_turns: int = 40, timeout: int = 1800) -> str:
         #load profiles from prompt_generator
         profiles = self.prompt_gen.get_role_names()
 
@@ -802,11 +824,26 @@ class LLMRepl:
         time.sleep(timeout)
         with self._jobs_lock:
             job = self._jobs.get(job_id)
+
+            # if job and job["proc"].poll() is None: #NO PROC IN JOB
+            if job:
+                logger.warning(f"Job {job_id} timed out after {timeout}s. Killing.")
+                self._kill_job_internal(job_id)
+
+    def _old_job_watchdog(self, job_id: str, timeout: int) -> None:
+        time.sleep(timeout)
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
             if job and job["proc"].poll() is None:
                 logger.warning(f"Job {job_id} timed out after {timeout}s. Killing.")
                 self._kill_job_internal(job_id)
 
     def _kill_job_internal(self, job_id: str) -> None:
+        if hasattr(self, 'dispatcher'):
+            self.dispatcher.stop_job(job_id)
+
+
+    def _old_kill_job_internal(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
         if not job:
             return
@@ -824,7 +861,22 @@ class LLMRepl:
         except Exception:
             pass
 
-    def _check_job(self, job_id: str) -> str:
+    def _check_job(self, job_id:str) -> str:
+        try:
+            log_text = self.dispatcher.get_job_output(job_id, tail_chars=1500)
+            tail = log_text[-1500:]
+        except Exception as e:
+            tail = f"(log error: {e})"
+
+        job_status = self.dispatcher.get_job_status(job_id)
+        return (
+            f"{job_id} {job_status['status']} (exit: {job_status['exit_code']})\n"
+            f"Workspace: {job_status['workspace']}\n"
+            f"--- log tail ---\n{tail}"
+        )
+
+
+    def _old_check_job(self, job_id: str) -> str:
         with self._jobs_lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -860,6 +912,21 @@ class LLMRepl:
             )
 
     def _list_jobs(self) -> str:
+        with self._jobs_lock:
+            self._jobs = self.dispatcher.active_jobs
+
+            if not self._jobs:
+                return "No jobs dispatched."
+
+            lines = []
+            for jid, j in self._jobs.items():
+            # use dispatch there is no proc
+                status = j["status"]
+                elapsed = time.time() - j["start"]
+                lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j['profile']})")
+            return "\n".join(lines)
+
+    def _old_list_jobs(self) -> str:
         with self._jobs_lock:
             if not self._jobs:
                 return "No jobs dispatched."

@@ -4,6 +4,32 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+def find_prompt_dir(paths:Optional[List[Path]] = None) -> Path:
+    PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")) / "prompts"
+    if not PROMPT_DIR.exists():
+
+        potential_paths = [
+            Path.cwd() / "prompts",
+            Path(SCRIPT_DIR) /"prompts",
+            Path("/workspace/prompts")
+            ]
+
+        potential_paths.extend(paths or [])
+        for path in potential_paths:
+            if path.exists():
+                PROMPT_DIR = path
+                break
+        else:
+            raise FileNotFoundError(
+                "Failed to find prompts directory. "
+                "Please set the AGENT_PROMPT_DIR environment variable or "
+                "create a 'prompts' directory in the current working directory.")
+
+    return PROMPT_DIR.resolve()
+
+
 class PromptGenerator:
     def __init__(self, prompts_dir: str = "prompts"):
         self.prompts_dir = Path(prompts_dir).resolve()

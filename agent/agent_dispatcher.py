@@ -6,14 +6,16 @@ import logging
 import tempfile
 import subprocess
 import time
-import datetime
+from datetime import datetime, date
 import uuid
 import errno
+import string
 import signal
 import threading
 from pathlib import Path
+from enum import StrEnum
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Literal
 
 logger = logging.getLogger("AgentDispatcher")
 
@@ -40,7 +42,21 @@ def _tmux(*args: str) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(["tmux", *args], -1, "",
                                            f"tmux timed out: {e}")
 def _get_timestamp() -> str:
-    return datetime.date.fromtimestamp(time.time()).isoformat()
+    return date.fromtimestamp(time.time()).isoformat()
+
+
+class Status(StrEnum):
+    RUNNING="RUNNING"
+    COMPLETED="COMPLETED"
+    FAILED="FAILED"
+    STOPPED="STOPPED"
+    KILLED="KILLED"
+    UNKNOWN="UNKNOWN"
+    NOT_FOUND="NOT_FOUND"
+
+    def __str__(self):
+        return self.value
+
 
 class AgentDispatcher:
     def __init__(self, agent_dir: Optional[str] = None, prompt_gen=None):
@@ -48,6 +64,7 @@ class AgentDispatcher:
         self.prompt_gen = prompt_gen
         self.backend = os.getenv("AGENT_BACKEND", "mistral")
         self.active_jobs: Dict[str, Dict[str, Any]] = {}
+        self.model = None
 
     # ---------- launching ----------
 
@@ -130,6 +147,9 @@ class AgentDispatcher:
             "--user-prompt", str(task_path),
             "--max-turns", str(max_turns),
         ]
+        if self.model is not None:
+            cmd += ["--model", self.model]
+
         session_name = session_name or f"agent-{uuid.uuid4().hex[:8]}"
         wrapper = self._write_wrapper(workspace, cmd, timeout)
         self._start_session(session_name, workspace, wrapper)
@@ -137,6 +157,9 @@ class AgentDispatcher:
         job_id = f"job_{uuid.uuid4().hex[:8]}"
         job = {
             "job_id": job_id,
+            "start": datetime.now(),
+            "timeout": timeout,
+            "status": Status.RUNNING,
             "session_name": session_name,
             "workspace": workspace,
             "log": workspace / "agent.log",
@@ -166,24 +189,27 @@ class AgentDispatcher:
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
         job = self.active_jobs.get(job_id)
         if not job:
-            return {"job_id": job_id, "status": "not_found"}
+            return {"job_id": job_id, "status": Status.NOT_FOUND}
 
-        if job.get("stopped"):
-            status = "stopped"
-
+        stopped = job.get("stopped")
         running = self.is_running(job)
         code = self.exit_code(job)
 
+        # TODO: figure out correct logic
         if running:
-            status = "running"
+            status = Status.RUNNING
+        elif stopped:
+            status = Status.STOPPED
         elif code is not None:
-            status = "completed" if code == 0 else "failed"
+            status = Status.COMPLETED if code == 0 else Status.FAILED
         else:
-            status = "finished_unknown"
+            status = Status.UNKNOWN
 
         return {
             "job_id": job_id,
             "session_name": job["session_name"],
+            "start": job["start"],
+            "timeout": job["timeout"],
             "status": status,
             "exit_code": code,
             "workspace": str(job["workspace"]),
