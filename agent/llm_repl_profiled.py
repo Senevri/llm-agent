@@ -466,7 +466,7 @@ class LLMRepl:
             len(self.tool_schemas),
             self.tool_registry.list_tools(),
         )
-        logger.info("Discovered skills: %s", self.skills_manager.catalog)
+        logger.info("Discovered skills: %s", self.skills_manager.catalog.keys())
 
         atexit.register(self.shutdown)
 
