@@ -6,10 +6,13 @@ import logging
 import tempfile
 import subprocess
 import time
+import datetime
 import uuid
 import errno
 import signal
+import threading
 from pathlib import Path
+
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("AgentDispatcher")
@@ -22,12 +25,22 @@ FORWARD_ENV = (
 )
 SESSION_RE = re.compile(r"[A-Za-z0-9_-]+")  # tmux dislikes '.' and ':' in names
 
+AGENT_DIR = os.environ.get("AGENT_DIR", "/agent")
+
+if AGENT_DIR not in sys.path:
+    sys.path.insert(0, AGENT_DIR)
+
+import tmux_tools
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=15)
-
+    try:
+        return subprocess.run(["tmux", *args], capture_output=True,
+                              text=True, timeout=15)
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(["tmux", *args], -1, "",
+                                           f"tmux timed out: {e}")
 def _get_timestamp() -> str:
-    return time.strftime("%Y%m%d_%H%M%S")
+    return datetime.date.fromtimestamp(time.time()).isoformat()
 
 class AgentDispatcher:
     def __init__(self, agent_dir: Optional[str] = None, prompt_gen=None):
@@ -37,6 +50,18 @@ class AgentDispatcher:
         self.active_jobs: Dict[str, Dict[str, Any]] = {}
 
     # ---------- launching ----------
+
+    @staticmethod
+    def _pgid_is_ours(pgid: int, workspace: Path) -> bool:
+        if pgid <= 1:
+            return False                # killpg(1) == kill(-1) == "everyone"
+        if pgid == os.getpgrp():
+            return False                # never signal ourselves
+        try:
+            cmdline = Path(f"/proc/{pgid}/cmdline").read_bytes()
+        except OSError:
+            return False
+        return str(workspace).encode() in cmdline
 
     @staticmethod
     def _write_wrapper(workspace: Path, cmd: list[str], timeout: int) -> Path:
@@ -60,7 +85,7 @@ class AgentDispatcher:
         return path
 
     @staticmethod
-    def _start_session(session: str, workspace: Path, wrapper: Path) -> None:
+    def  _start_session(session: str, workspace: Path, wrapper: Path) -> None:
         if not SESSION_RE.fullmatch(session):
             raise ValueError(f"Bad tmux session name: {session!r}")
         env_args = []
@@ -74,7 +99,7 @@ class AgentDispatcher:
             "-s", session,
             "-c", str(workspace),
             *env_args,
-            "setsid", "bash", str(wrapper),
+            "setsid", "-f", "-w", "bash", str(wrapper),
         )
         if res.returncode != 0:
             raise RuntimeError(
@@ -125,7 +150,7 @@ class AgentDispatcher:
 
     @staticmethod
     def is_running(job: Dict[str, Any]) -> bool:
-        return _tmux("has-session", "-t", job["session_name"]).returncode == 0
+        return _tmux("has-session", "-t", f"={job['session_name']}").returncode == 0
 
     @staticmethod
     def exit_code(job: Dict[str, Any]) -> Optional[int]:
@@ -135,12 +160,16 @@ class AgentDispatcher:
             return None
 
     def is_working(self) -> bool:
+
         return any(self.is_running(j) for j in self.active_jobs.values())
 
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
         job = self.active_jobs.get(job_id)
         if not job:
             return {"job_id": job_id, "status": "not_found"}
+
+        if job.get("stopped"):
+            status = "stopped"
 
         running = self.is_running(job)
         code = self.exit_code(job)
@@ -173,81 +202,89 @@ class AgentDispatcher:
         return log.read_text(errors="replace")[-tail_chars:]
 
     # ---------- stopping ----------
+    def _wait_gone(self, pgid: int, workspace: Path, seconds: float) -> bool:
+        """Return True once the pgid is gone *or* no longer ours."""
+        deadline = time.monotonic() + seconds
+        while True:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass                       # something owns it — check identity
+            # Owned and still ours → still our workload.
+            if not self._pgid_is_ours(pgid, workspace):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
 
-    def stop_job(
-        self,
-        job_id: str,
-        grace_seconds: float = 5.0,
-    ) -> bool:
+    def _resolve_pgid(self, job: Dict[str, Any]) -> Optional[int]:
+        """pgid written by the wrapper, falling back to the tmux pane pid."""
+        try:
+            pgid = int((job["workspace"] / "process_group_id").read_text().strip())
+            if pgid > 1 and pgid != os.getpgrp():
+                return pgid
+            return None
+        except (OSError, ValueError):
+            pass
+
+        res = _tmux("display-message", "-p",
+                    "-t", f"={job['session_name']}", "#{pane_pid}")
+        if res.returncode != 0:
+            return None
+        try:
+            pgid = int(res.stdout.strip())
+        except ValueError:
+            return None
+        if pgid <= 1 or pgid == os.getpgrp():
+            return None
+        # `setsid` execs in place when not a group leader, so pane_pid == pgid.
+        return pgid
+
+    def stop_job(self, job_id, grace_seconds=5.0):
         job = self.active_jobs.get(job_id)
         if job is None:
             return False
-
-        # The exit file is authoritative: don't kill an already-finished job.
-        if self.exit_code(job) is not None:
+        if job.get("stopped") or self.exit_code(job) is not None:
+            job["stopped"] = True
             return True
 
-        try:
-            pgid = int(
-                (job["workspace"] / "process_group_id")
-                .read_text()
-                .strip()
-            )
-        except (OSError, ValueError):
-            logger.error("Cannot determine process group for %s", job_id)
-            return False
+        with job.setdefault("_stop_lock", threading.Lock()):
+            if job.get("stopped"):
+                return True
+            pgid = self._resolve_pgid(job)      # file, else tmux pane_pid
+            if pgid is None or not self._pgid_is_ours(pgid, job["workspace"]):
+                _tmux("kill-session", "-t", f"={job['session_name']}")
+                job["stopped"] = not self.is_running(job)
+                return job["stopped"]
 
-        def group_exists() -> bool:
             try:
-                os.killpg(pgid, 0)
-                return True
+                os.killpg(pgid, signal.SIGTERM)
             except ProcessLookupError:
+                pass
+            except OSError:
+                logger.exception("SIGTERM failed for %s", job_id)
                 return False
-            except PermissionError:
-                return True
 
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            logger.exception("Failed to signal process group for %s", job_id)
-            return False
+            if self._wait_gone(pgid, job["workspace"], grace_seconds):
+                return self._finish_stop(job, pgid, "SIGTERM")
 
-        deadline = time.monotonic() + grace_seconds
-        while group_exists() and time.monotonic() < deadline:
-            time.sleep(0.1)
-
-        if group_exists():
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            except OSError:
-                logger.exception(
-                    "Failed to kill process group for %s", job_id
-                )
-                return False
+            if self._wait_gone(pgid, job["workspace"], 2.0):
+                return self._finish_stop(job, pgid, "SIGKILL")
 
-        # Wait briefly for the group to disappear after SIGKILL.
-        deadline = time.monotonic() + 2.0
-        while group_exists() and time.monotonic() < deadline:
-            time.sleep(0.1)
-
-        if group_exists():
-            logger.error("Process group %s survived cancellation", pgid)
+            logger.error("pgid %s survived SIGKILL or was reused", pgid)
+            _tmux("kill-session", "-t", f"={job['session_name']}")
             return False
 
-        # Only clean up tmux after the workload is gone.
-        result = _tmux("kill-session", "-t", job["session_name"])
-        if result.returncode != 0:
-            logger.warning(
-                "Workload stopped, but tmux cleanup failed for %s: %s",
-                job_id,
-                result.stderr.strip(),
-            )
-
-        # Deliberately retain active_jobs[job_id] for later inspection.
+    def _finish_stop(self, job, pgid, how):
+        job["stopped"] = True
+        job["stop_signal"] = how
+        _tmux("kill-session", "-t", f"={job['session_name']}")
         return True
 
     def shutdown(self, stop_owned_jobs: bool = False) -> None:
@@ -292,5 +329,5 @@ if __name__ == "__main__":
             if not running or time.time() > deadline:
                 break
             time.sleep(1)
-        print(f"\n[{_get_timestamp}] Final: {'running' if running else 'exit ' + str(dispatcher.exit_code(info))}")
+        print(f"\n[{_get_timestamp()}] Final: {'running' if running else 'exit ' + str(dispatcher.exit_code(info))}")
         # dispatcher.shutdown(stop_owned_jobs=True)

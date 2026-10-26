@@ -39,7 +39,9 @@ class PromptGenerator:
             content = snippet_path.read_text(encoding="utf-8").strip()
             prompt_parts.append(content)
 
-        return "\n\n".join(prompt_parts).strip()
+        prompt = "\n\n".join(prompt_parts).strip()
+
+        return f"{prompt}\n" ##make sure we end in newline
 
 def main():
     if len(sys.argv) < 2:

@@ -99,14 +99,18 @@ _load_dotenv()
 
 # Find prompt directory
 PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")) / "prompts"
-while not PROMPT_DIR.exists():
+if not PROMPT_DIR.exists():
+
     potential_paths = [
         Path.cwd() / "prompts",
         Path(SCRIPT_DIR) /"prompts",
         Path("/workspace/prompts")
         ]
-    PROMPT_DIR = potential_paths.pop(0)
-    if len(potential_paths) == 0:
+    for path in potential_paths:
+        if path.exists():
+            PROMPT_DIR = path
+            break
+    else:
         raise FileNotFoundError(
             "Failed to find prompts directory. "
             "Please set the AGENT_PROMPT_DIR environment variable or "
@@ -180,6 +184,7 @@ def main():
     parser.add_argument("--context-limit", type=int, default=DEFAULT_CONTEXT_LIMIT, help="Context window limit")
     parser.add_argument("--log-level", default=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL), help="Logging level")
     parser.add_argument("--role", default="agent", help="Role of the agent")
+    parser.add_argument("--task", default=None, help="Task to perform")
 
     args = parser.parse_args()
     logger = setup_logging(args.log_level, log_dir=Path(
@@ -208,8 +213,12 @@ def main():
         else: # fallback to hardcoded prompts
             with open(args.system_prompt, "r", encoding="utf-8") as f:
                 system_prompt = f.read()
-        with open(args.user_prompt, "r", encoding="utf-8") as f:
-            user_prompt = f.read()
+        if args.user_prompt and not args.task:
+            with open(args.user_prompt, "r", encoding="utf-8") as f:
+                user_prompt = f.read()
+        elif args.task:
+            logger.info(f"Using task: {args.task}")
+            user_prompt = args.task
     except FileNotFoundError as e:
         logger.error(f"Required prompt file missing: {e}")
         return
