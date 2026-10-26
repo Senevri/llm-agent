@@ -97,12 +97,20 @@ def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
 
 _load_dotenv()
 
+# Find prompt directory
 PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")) / "prompts"
-if not PROMPT_DIR.exists():
-    PROMPT_DIR = Path(SCRIPT_DIR) /"prompts"
-
-# Todo: Use both /agent/prompts and curdir/prompts
-
+while not PROMPT_DIR.exists():
+    potential_paths = [
+        Path.cwd() / "prompts",
+        Path(SCRIPT_DIR) /"prompts",
+        Path("/workspace/prompts")
+        ]
+    PROMPT_DIR = potential_paths.pop(0)
+    if len(potential_paths) == 0:
+        raise FileNotFoundError(
+            "Failed to find prompts directory. "
+            "Please set the AGENT_PROMPT_DIR environment variable or "
+            "create a 'prompts' directory in the current working directory.")
 
 PROMPT_DIR = PROMPT_DIR.resolve()
 
