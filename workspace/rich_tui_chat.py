@@ -1,3 +1,5 @@
+#!/usr/local/bin/python
+
 """Rich TUI chat interface for LLM APIs with multi-phase processing.
 
 Overview
@@ -33,6 +35,7 @@ runs all four phases and returns the final answer string.
 """
 
 import os, sys, json, time, re, uuid, threading
+from textwrap import dedent
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -502,12 +505,11 @@ class RichTUIChat:
     def _build_system_prompt(self):
         skills_summary = self.skills_mgr.get_catalog_summary()
         if skills_summary:
-            skills_summary = (
-                "### Available Skills\n"
-                "Use the discovered skill catalog to identify relevant capabilities "
-                "and follow the applicable skill instructions when needed.\n\n"
-                f"{skills_summary}"
-            )
+
+            skills_summary = dedent("""### Available skills are reusable instruction packages, not callable tools.
+                When a skill is relevant, activate it to retrieve its instructions.
+                Then follow those instructions using the available tools.""") + f"{skills_summary}"
+
         return (f"{self.base_system_prompt}\n\n {skills_summary}\n\n"
                 f"### Conversation gist (compressed memory)\n{self.memory.gist_context_text()}\n\n"
                 f"### Explicitly remembered facts\n{self.memory.important_context_text()}\n")

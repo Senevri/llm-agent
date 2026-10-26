@@ -1,4 +1,8 @@
 roles:
+  chat:
+    snippets:
+      - core
+      # - skills
   repl:
     snippets:
       - repl

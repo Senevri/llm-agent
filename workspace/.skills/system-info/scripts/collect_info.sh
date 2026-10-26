@@ -1,0 +1,15 @@
+#!/bin/bash
+
+echo "--- System Information Report ---"
+echo "Date: $(date)"
+echo "OS: $(uname -a)"
+echo "--------------------------------"
+echo "Memory Usage:"
+free -h | grep -E "Mem|Total" || echo "Memory info unavailable"
+echo "--------------------------------"
+echo "Disk Usage:"
+df -h / | grep -E "Filesystem|/" || echo "Disk info unavailable"
+echo "--------------------------------"
+echo "CPU Load:"
+uptime | awk -F'load average:' '{ print $2 }' || echo "CPU load unavailable"
+echo "--------------------------------"
