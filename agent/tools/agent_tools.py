@@ -1,21 +1,35 @@
 # agent_tools.py
 import os
+import sys
 import subprocess
 import logging
 import json
-from internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
-from agent_deb_tools import install_deb_package
-from bash_tools import run_bash
 from pathlib import Path
+
 try:
-    from tmux_tools import TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
+    import tools
+except ImportError:
+    # Fallback if tools is not in the python path
+    # In a real deployment, we'd ensure it's in the same directory or package
+    if Path(__file__).parent.parent not in sys.path:
+        sys.path.append(str(Path(__file__).parent.parent))
+from tools import AGENT_DIR, TOOLS_DIR
+from tools.internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
+from tools.agent_deb_tools import install_deb_package
+from tools.bash_tools import run_bash
+from tools.cloud_image_gen import CLOUD_IMAGE_GEN_TOOL_DEFINITION, generate_cloud_image
+
+
+
+try:
+    from tools.tmux_tools import TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
 except Exception:
     TMUX_TOOL_MAP = {}
     TMUX_TOOL_DEFINITION_MAP = {}
 
 # Import the new context tools
 try:
-    from agent.context_tools import CONTEXT_TOOL_MAP, CONTEXT_TOOL_DEFINITION_MAP
+    from tools.context_tools import CONTEXT_TOOL_MAP, CONTEXT_TOOL_DEFINITION_MAP
 except ImportError:
     # Fallback if context_tools is not in the python path
     # In a real deployment, we'd ensure it's in the same directory or package
@@ -203,7 +217,8 @@ TOOL_MAP = {
     "now": tool_now,
     **INTERNET_TOOL_MAP,
     **TMUX_TOOL_MAP,
-    **CONTEXT_TOOL_MAP
+    **CONTEXT_TOOL_MAP,
+    "generate_cloud_image": generate_cloud_image
 }
 
 # Tool definitions for the LLM
@@ -332,5 +347,10 @@ tools = [
 tools.extend(INTERNET_TOOL_DEFINITION_MAP.values())
 tools.extend(TMUX_TOOL_DEFINITION_MAP.values())
 tools.extend(CONTEXT_TOOL_DEFINITION_MAP.values())
+tools.append(CLOUD_IMAGE_GEN_TOOL_DEFINITION)
 
 TOOL_DEFINITIONS = tools
+
+if __name__=="__main__":
+    from pprint import pprint, pformat
+    pprint(TOOL_DEFINITIONS, indent=0, width=100)

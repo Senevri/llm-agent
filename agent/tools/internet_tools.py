@@ -4,7 +4,10 @@ import requests
 from urllib.parse import urlparse
 
 from ddgs import DDGS
-from bash_tools import run_bash
+try:
+    from tools.bash_tools import run_bash
+except ImportError:
+    from bash_tools import run_bash
 
 logger = logging.getLogger("InternetTools")
 

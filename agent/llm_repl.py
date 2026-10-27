@@ -22,6 +22,7 @@ from functools import partial
 
 from prompt_generator import PromptGenerator, find_prompt_dir
 from agent_dispatcher import AgentDispatcher
+from backend import LLMBackend
 
 from openai import OpenAI
 
@@ -107,7 +108,7 @@ except Exception:
         return Action.ABORT, 0.0
 
 try:
-    from internet_tools import (
+    from tools.internet_tools import (
         INTERNET_TOOL_DEFINITION_MAP, INTERNET_TOOL_MAP
     )
 except Exception:
@@ -119,7 +120,7 @@ except Exception:
         return "Weather lookup is not available."
 
 try:
-    from agent_tools import TOOL_MAP as BASE_TOOL_MAP, tools as BASE_TOOL_SCHEMAS
+    from tools.agent_tools import TOOL_MAP as BASE_TOOL_MAP, tools as BASE_TOOL_SCHEMAS
 except Exception:
     BASE_TOOL_MAP = {}
     BASE_TOOL_SCHEMAS = []
@@ -415,7 +416,10 @@ class LLMRepl:
             _active_repls += 1
 
         try:
-            self.client = OpenAI(base_url=base_url, api_key=api_key)
+            api = LLMBackend(backend="ollama")
+            api.model = model
+
+            self.client, _ = api.get_client()
         except Exception as e:
             raise StartupError(f"Failed to create OpenAI client: {e}") from e
 
@@ -579,6 +583,9 @@ class LLMRepl:
             self._trim_context()
             current_messages = list(self.messages)
 
+        # Start timing the entire turn (includes tool calls and retries)
+        start_time = time.time()
+
         while True:
             try:
                 response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
@@ -598,10 +605,18 @@ class LLMRepl:
                 content = msg.content or ""
                 with self._state_lock:
                     self.messages.append({"role": "assistant", "content": content})
+
+                # Calculate elapsed time
+                elapsed = time.time() - start_time
+
                 if content:
                     console.print(Panel(Markdown(content), title="Assistant"))
                 else:
                     console.print("[bold red]Assistant: (No response)[/bold red]")
+
+                # Only print time if it exceeds 5 seconds
+                if elapsed > 5.0:
+                    console.print(f"[dim]⏱️  Turn completed in {elapsed:.2f}s[/dim]")
 
                 self._enqueue_profile_snapshot(user_input, content)
                 return content
@@ -1010,6 +1025,9 @@ class LLMRepl:
                                 table.add_row(role, content)
                             console.print(table)
                             continue
+
+                        # Let's mark that the message was sent
+                        console.print("---")
 
                         response = self.send_message(user_input)
                         # if response:

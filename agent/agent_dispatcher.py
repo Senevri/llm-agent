@@ -32,7 +32,7 @@ AGENT_DIR = os.environ.get("AGENT_DIR", "/agent")
 if AGENT_DIR not in sys.path:
     sys.path.insert(0, AGENT_DIR)
 
-import tmux_tools
+import tools.tmux_tools as tmux_tools
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
     try:

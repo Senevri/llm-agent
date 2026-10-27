@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     iproute2 \
     iputils-ping \
-    vim-tiny \
+    vim \
     tree \
     tmux \
     ripgrep \
@@ -34,6 +34,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && ln -sf /usr/bin/batcat /usr/local/bin/bat \
     && rm -rf /var/lib/apt/lists/*
+
+# NOTE: vi-tiny is noncompatible trash
 
 # Create non-root user early
 RUN useradd -m -s /bin/bash sandboxuser
