@@ -10,93 +10,99 @@ load_dotenv(f"{AGENT_DIR}/.env")
 
 logger = setup_logging("INFO")
 
-class APIEndpoint:
-    def __init__(self, api_key=None, model=None):
-        self.base_url = None
-        self.api_key = api_key
-        self.model = model
-        self.base_url = None
-        self.port=""
-        self.ctx_size=4096
 
-    def get_client(self):
-        raise NotImplementedError
+class APIEndpoint:
+    """Base class for LLM API endpoints."""
+    def __init__(self, model: str = ""):
+        self.model = model
+        self.base_url = ""
+        self.api_key = ""
+        self.ctx_size = 4096  # Sensible default fallback
+
+    def get_client(self) -> tuple[OpenAI, str]:
+        raise NotImplementedError("Subclasses must implement get_client()")
 
 
 class OllamaApiEndpoint(APIEndpoint):
-    def __init__(self, api_key=None, model=None):
-
-        super().__init__(api_key, model)
+    def __init__(self, model: str = ""):
+        super().__init__(model)
         host_ip = get_gateway_ip()
-        self.port = os.getenv("OLLAMA_PORT", "11434")
-        self.base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1")
-
-    def get_client(self):
+        port = os.getenv("OLLAMA_PORT", "11434")
+        self.base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
+        self.api_key = "ollama"
+        self.ctx_size = 8192  # Ollama default, but will be overwritten by discovery
         self.model = self.model or "gemma4:31b-cloud"
-        #model = os.getenv("AGENT_MODEL", "beam:cloud")
-        return OpenAI(base_url=self.base_url, api_key="ollama"), self.model
+
+    def get_client(self) -> tuple[OpenAI, str]:
+        # Resolve default model at the last possible moment
+        return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
+
 
 class MistralAPIEndpoint(APIEndpoint):
-    def __init__(self,api_key=None, model=None):
-        super().__init__(api_key, model)
+    def __init__(self, model: str = ""):
+        super().__init__(model)
         self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
-        self.ctx_size=32000
-
-    def get_client(self):
-        api_key = os.getenv("MISTRAL_API_KEY", self.api_key)
-        if not api_key:
-            raise RuntimeError("MISTRAL_API_KEY not set.")
+        self.ctx_size = 32000
         self.model = self.model or "ministral-14b-latest"
-        logger.info (f"mistral model: {model}")
-        return OpenAI(base_url=self.base_url, api_key=api_key), self.model
+        self.api_key = os.getenv("MISTRAL_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("MISTRAL_API_KEY not set.")
+
+
+    def get_client(self) -> tuple[OpenAI, str]:
+        logger.info(f"Mistral model resolved to: {self.model}")
+        return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
 
 
 class LLMBackend:
-    def __init__(self, backend="mistral"):
+    def __init__(self, backend: str = "mistral"):
         self.backend = backend
         self.usage = UsageTracker()
         self.model = os.getenv("AGENT_MODEL", "")
-        logger.info(f"Backend: {backend}, Model: {self.model}")
+        logger.info(f"Backend: {backend}, Model: {self.model or '(default)'}")
 
-    def set_model(self, model):
+    def set_model(self, model: str):
         self.model = model
 
-    def select_backend(self, backend):
-        self.backend = backend
+    def get_client(self) -> tuple[OpenAI, str]:
+        """Initializes the correct endpoint, discovers context, and returns the client."""
         backend_map = {
             "ollama": OllamaApiEndpoint,
             "mistral": MistralAPIEndpoint
         }
-        try:
-            return backend_map[backend]
-        except KeyError:
-            raise ValueError(f"Unsupported backend: {backend}")
 
-    def get_client(self) -> tuple[OpenAI, str]:
-        usage = self.usage
-        # logger = logging.getLogger("UnifiedAgent")   # was setup_logging(...)
-        logger.info(f"context window: {usage.context_limit} (model max may be larger)")
-        try:
-            endpoint = self.select_backend(self.backend)(None, self.model)
-            context_size = endpoint.ctx_size
-            usage.context_limit = discover_context_window(
-                endpoint.base_url, model=self.model, default=context_size, backend=self.backend)
-            return endpoint(base_url=None, api_key="ollama", model=self.model).get_client()
-        except KeyError:
+        endpoint_cls = backend_map.get(self.backend)
+        if not endpoint_cls:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
+        # 1. Instantiate the specific endpoint with the current model state
+        endpoint = endpoint_cls(model=self.model)
+        self.model = endpoint.model
+        # 2. Discover context window (this updates the usage tracker)
+        # Note: Removed `backend=self.backend` kwarg unless your discover_context_window explicitly requires it
+        self.usage.context_limit = discover_context_window(
+            endpoint.base_url,
+            model=endpoint.model,
+            default=endpoint.ctx_size
+        )
+        logger.info(f"Context window set to: {self.usage.context_limit}")
 
-if __name__=="__main__":
+        # 3. Return the configured client and the fully-resolved model name
+        return endpoint.get_client()
+
+
+if __name__ == "__main__":
     from pprint import pprint
+
     llm_backend = LLMBackend(backend="mistral")
     llm_backend.set_model("ministral-14b-latest")
-    client, model = llm_backend.get_client()
-    print(model)
+
+    client, resolved_model = llm_backend.get_client()
+    print(f"Using model: {resolved_model}")
+
     response = client.chat.completions.create(
-        model=llm_backend.model,
-        messages=[
-            {"role": "user", "content": "What is Mistral AI?"}
-            ],
+        model=resolved_model,
+        messages=[{"role": "user", "content": "What is Mistral AI?"}],
         tools=[],
         tool_choice="auto"
     )
