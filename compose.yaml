@@ -6,11 +6,20 @@ services:
     image: agent-sandbox:latest
     container_name: agent-sandbox-session
     network_mode: "host"
+    # Todo: bridge is safer
+    # network_mode: bridge
+    # ports:
+    #   - "3000-3010:3000-3010"
+    working_dir: /workspace
+    init: true
     cap_drop:
       - ALL
     security_opt:
       - seccomp=unconfined
       - no-new-privileges:true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "reikon.lan:192.168.1.109"
     # pids_limit: 100
     # deploy:
     #   resources:

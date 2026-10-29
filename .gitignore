@@ -3,3 +3,4 @@
 __pycache__/
 # Add other boilerplate:
 .env
+*.log

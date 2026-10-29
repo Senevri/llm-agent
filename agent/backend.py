@@ -1,9 +1,11 @@
 import os
+import requests
 from openai import OpenAI
 from get_ip import get_gateway_ip
 from llm_utils import UsageTracker, discover_context_window
 from custom_logger import setup_logging
 from dotenv import load_dotenv
+
 
 AGENT_DIR = os.getenv("AGENT_DIR", "/agent")
 load_dotenv(f"{AGENT_DIR}/.env")
@@ -22,6 +24,35 @@ class APIEndpoint:
     def get_client(self) -> tuple[OpenAI, str]:
         raise NotImplementedError("Subclasses must implement get_client()")
 
+class KoboldCppApiendpoint(APIEndpoint):
+    def __init__(self, model: str = ""):
+        super().__init__(model)
+        host_ip = get_gateway_ip()
+        self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:5001/")
+        self.ctx_size = 8192
+        self.api_key = "kobold"
+        try:
+            self.model = self.get_kobold_model()
+            self.ctx_size = self.get_kobold_ctx()
+        except Exception as e:
+            logger.error(f"Failed to get Kobold model: {e}")
+            self.model = ""
+
+    def get_kobold_ctx(self):
+        # /api/extra/true_max_context_length
+        current_ctx = requests.get(self.base_url + "/api/extra/true_max_context_length")
+        return current_ctx.json()["value"]
+
+    def get_kobold_model(self):
+        # /api/v1/model
+        current_model = requests.get(self.base_url + "/api/v1/model")
+        # format: {"result": "<model_name>"}
+        return current_model.json()["result"]
+
+
+    def get_client(self) -> tuple[OpenAI, str]:
+        # Return openapi compatible way for now
+        return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
 
 class OllamaApiEndpoint(APIEndpoint):
     def __init__(self, model: str = ""):
@@ -38,7 +69,7 @@ class OllamaApiEndpoint(APIEndpoint):
         return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
 
 
-class MistralAPIEndpoint(APIEndpoint):
+class MistralApiEndpoint(APIEndpoint):
     def __init__(self, model: str = ""):
         super().__init__(model)
         self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
@@ -68,7 +99,8 @@ class LLMBackend:
         """Initializes the correct endpoint, discovers context, and returns the client."""
         backend_map = {
             "ollama": OllamaApiEndpoint,
-            "mistral": MistralAPIEndpoint
+            "mistral": MistralApiEndpoint,
+            "koboldcpp": KoboldCppApiendpoint
         }
 
         endpoint_cls = backend_map.get(self.backend)
@@ -94,15 +126,23 @@ class LLMBackend:
 if __name__ == "__main__":
     from pprint import pprint
 
-    llm_backend = LLMBackend(backend="mistral")
-    llm_backend.set_model("ministral-14b-latest")
+
+    # backend="mistral"
+    # model="ministral-14b-latest"
+    backend="koboldcpp"
+    model=""
+
+    llm_backend = LLMBackend(backend=backend)
+    llm_backend.set_model(model)
 
     client, resolved_model = llm_backend.get_client()
     print(f"Using model: {resolved_model}")
+    # msg = "What is Mistral AI?"
+    msg = "What is Kobold AI?"
 
     response = client.chat.completions.create(
         model=resolved_model,
-        messages=[{"role": "user", "content": "What is Mistral AI?"}],
+        messages=[{"role": "user", "content": msg}],
         tools=[],
         tool_choice="auto"
     )
