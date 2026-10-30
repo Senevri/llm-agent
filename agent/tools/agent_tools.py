@@ -243,7 +243,10 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"}
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer", "description": "Start line (inclusive), default 1"},
+                    "max_lines": {"type": "integer", "description": "Maximum number of lines to read, default 0 (unlimited)"},
+                    "max_chars": {"type": "integer", "description": "Maximum number of characters to read"}
                     },
                 "required": ["path"]
             }

@@ -18,18 +18,19 @@ for path in "/agent", "/agent/skill_system":
     if path not in sys.path:
         sys.path.append(path)
 # Fix the import issue for skill_system internal imports
+if Path(__file__).parent not in sys.path:
+    sys.path.append(str(Path(__file__).parent))
 
 from openai_error_handling import classify_api_error, Action
 from llm_utils import UsageTracker
 from custom_logger import setup_logging
-from backend import LLMBackend
+from backend import LLMBackend, BACKEND_MAP
 
 
 # Skill System Integration
 from skill_system.tool_registry import registry as tool_registry
 from skill_system.skills_manager import SkillsManager
-from skill_system.integration import SKILLS_ROOT
-
+#
 # Import legacy tools to register them into the new registry
 from tools.agent_tools import (
     # read_file, read_file_lines, search_file, list_files,
@@ -84,7 +85,6 @@ def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
 
 _load_dotenv()
 
-
 try:
     from prompt_generator import PromptGenerator, find_prompt_dir
     # Find prompt directory
@@ -92,7 +92,8 @@ try:
 
     prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
     current_role = "general"
-except ImportError:
+except ImportError as e:
+    logging.warning(f"Failed to import prompt_generator: {e}")
     prompt_gen = None
 
 
@@ -219,7 +220,7 @@ def run_turns(
 
 def main():
     parser = argparse.ArgumentParser(description="Unified LLM Agent with Skill System")
-    parser.add_argument("--backend", choices=["ollama", "mistral"], required=True, help="LLM backend to use")
+    parser.add_argument("--backend", choices=BACKEND_MAP.keys(), required=True, help="LLM backend to use")
     parser.add_argument("--system-prompt", default="system_prompt.md", help="Path to system prompt file")
     parser.add_argument("--user-prompt", default="user_prompt.md", help="Path to user prompt file")
     parser.add_argument("--model", help="Override model name")
@@ -228,52 +229,89 @@ def main():
     parser.add_argument("--log-level", default=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL), help="Logging level")
     parser.add_argument("--role", default="agent", help="Role of the agent")
     parser.add_argument("--task", default=None, help="Task to perform")
+    parser.add_argument("--port", default=None, type=int, help="port override for backend")
+    parser.add_argument("--test", action="store_true", help="Run in test mode")
+    parser.add_argument("--skills", default=None, help="Path to skills directory")
+    parser.add_argument("--notools", action="store_true", help="Disable tools")
 
     args = parser.parse_args()
-
-    # Initialize Skill System
-    register_core_tools()
-    skills_mgr = SkillsManager(SKILLS_ROOT)
-    skills_mgr.discover_skills()
 
     logger = setup_logging(args.log_level, log_dir=Path(
         os.getenv("AGENT_LOG_DIR", "./log/")))
 
+
+    # Initialize Skill System
+    if args.notools:
+        logger.info("Disabling tools")
+    else:
+        register_core_tools()
+    if args.skills:
+        logger.info(f"Loading skills from {args.skills}")
+        SKILLS_ROOT = args.skills
+
+    else:
+        from skill_system.integration import SKILLS_ROOT
+
+
+
+
+
     logger.info(f"Registered tools: {tool_registry.list_tools()}")
-    logger.info(f"Discovered skills: {list(skills_mgr.catalog.keys())}")
+
+    skills_summary = ""
+
+    logger.info(SKILLS_ROOT)
+    if SKILLS_ROOT:
+        skills_mgr = SkillsManager(SKILLS_ROOT)
+        skills_mgr.discover_skills()
+        logger.info(f"Discovered skills: {list(skills_mgr.catalog.keys())}")
+        skills_summary = skills_mgr.get_catalog_summary()
 
     api = LLMBackend(backend=args.backend)
     if args.model:
         api.model = args.model
 
     try:
+        if args.port:
+            logger.info(f"Using port override: {args.port}")
+            api.port = str(args.port)
 
         client, default_model = api.get_client()
     except Exception as e:
         logger.error(f"Client initialization failed: {e}")
         return
 
-    skills_summary = skills_mgr.get_catalog_summary()
-
     # Load Prompts
     try:
         current_role = args.role or "agent"
-        if prompt_gen and args.role:
+        if args.role:
+            prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
+        if prompt_gen:
             system_prompt = prompt_gen.generate_prompt(current_role)
+            enabled_skills = prompt_gen.enabled_skills
+            if not enabled_skills:
+                SKILLS_ROOT = None
         elif args.system_prompt: # fallback to hardcoded prompts
             with open(args.system_prompt, "r", encoding="utf-8") as f:
                 system_prompt = f.read()
+
         if args.user_prompt and not args.task:
             with open(args.user_prompt, "r", encoding="utf-8") as f:
                 user_prompt = f.read()
         elif args.task:
             logger.info(f"Using task: {args.task}")
             user_prompt = args.task
-        system_prompt += "\n\n" + skills_summary
+        system_prompt = "\n\n".join([system_prompt, skills_summary]).strip()
     except FileNotFoundError as e:
         logger.error(f"Required prompt file missing: {e}")
         return
 
+    logger.info(f"Using system prompt: \n{system_prompt}\n")
+    logger.info(f"current role: {current_role}")
+
+
+
+    # raise Exception("debug")
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -281,6 +319,10 @@ def main():
     ]
 
     sleep_time = 1 if api.backend == "mistral" else 0
+
+    if args.test:
+        logger.info("Test run mode enabled. Exiting...")
+        exit(0)
 
     logger.info(f"--- Starting Agent Loop via {args.backend} ({api.model}) ---")
     run_turns(client, api, messages, max_turns=args.max_turns, logger=logger, sleep_time=sleep_time)

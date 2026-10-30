@@ -20,6 +20,14 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "reikon.lan:192.168.1.109"
+
+    environment:
+      - TERM=xterm-256color
+      # Add your API keys here or in a .env file:
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - OLLAMA_HOST=http://reikon.lan:11434
     # pids_limit: 100
     # deploy:
     #   resources:
@@ -30,8 +38,13 @@ services:
     tmpfs:
       - /tmp:rw,nosuid,size=100m
     volumes:
-      - ./workspace:/workspace:rw,Z
+      - llmagent-workspace:/workspace
+      - ./workspace:/mnt/workspace:rw,Z
       - ./agent:/agent:ro,Z
     stdin_open: true
     tty: true
     command: ["/bin/bash"]
+
+volumes:
+  llmagent-workspace:
+    driver: local

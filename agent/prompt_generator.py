@@ -36,6 +36,7 @@ class PromptGenerator:
         self.profiles_path = self.prompts_dir / "profiles.yaml"
         self.snippets_dir = self.prompts_dir / "snippets"
         self._profiles = self._load_profiles()
+        self.enabled_skills = ["all"]
 
     def _load_profiles(self) -> Dict:
         if not self.profiles_path.exists():
@@ -46,6 +47,13 @@ class PromptGenerator:
 
     def reload_profiles(self):
         self._profiles = self._load_profiles()
+
+    def _get_enabled_skills(self, role_name: str) -> List[str]:
+        if role_name not in self._profiles:
+            raise ValueError(f"Unknown role: {role_name}")
+
+        profile = self._profiles[role_name]
+        return profile.get("skills", [])
 
     def get_role_names(self) -> List[str]:
         return list(self._profiles.keys())
@@ -66,6 +74,7 @@ class PromptGenerator:
             prompt_parts.append(content)
 
         prompt = "\n\n".join(prompt_parts).strip()
+        self.enabled_skills = self._get_enabled_skills(role_name)
 
         return f"{prompt}\n" ##make sure we end in newline
 
