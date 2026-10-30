@@ -797,82 +797,6 @@ class LLMRepl:
 
 
 
-
-    def _old_dispatch_agent_job(self, task: str, profile: str = "software-dev", max_turns: int = 40, timeout: int = 1800) -> str:
-        #load profiles from prompt_generator
-        profiles = self.prompt_gen.get_role_names()
-
-        if profile not in profiles:
-            return f"Error: unknown profile '{profile}'. Known: {sorted(profiles)}"
-
-        src_prompt = self.prompt_gen.generate_prompt(profile)
-
-        agent_script = AGENT_DIR / "run_agent.py"
-        if not agent_script.exists():
-            return f"Error: agent script not found at {agent_script}"
-
-        try:
-            workspace = Path(tempfile.mkdtemp(prefix=f"agent_run_{profile}_"))
-            original_prompt = src_prompt
-            override = (
-                f"# DISPATCH OVERRIDE — read this first\n\n"
-                f"Your working directory for this run is: {workspace}\n"
-                f"- Write ALL output files here, using relative paths or paths under {workspace}.\n"
-                f"- Do NOT write to /workspace,.\n"
-                f"- plan.md, memory.md, todo.md, and all deliverables live in {workspace}.\n"
-                f"- Confirm with `pwd` before writing anything.\n\n---\n\n"
-            )
-            system_prompt_path = workspace / "system_prompt.md"
-            system_prompt_path.write_text(override + original_prompt, encoding="utf-8")
-
-            task_path = workspace / "user_prompt.md"
-            task_path.write_text(task, encoding="utf-8")
-            log_path = workspace / "agent.log"
-
-            backend = os.getenv("AGENT_BACKEND", "ollama")
-            cmd = [sys.executable, str(agent_script), "--backend", backend,
-                   "--system-prompt", str(system_prompt_path), "--user-prompt", str(task_path),
-                   "--max-turns", str(max_turns), "--log-level", "INFO"]
-            model_override = os.getenv(f"AGENT_MODEL_{backend.upper()}") or os.getenv("AGENT_MODEL")
-            if model_override:
-                cmd.extend(["--model", model_override])
-
-            # Parent file descriptor is closed by the ``with`` block once it has
-            # been inherited by the child process, avoiding descriptor leaks.
-            try:
-                with open(log_path, "w", encoding="utf-8") as log_f:
-                    proc = subprocess.Popen(
-                        cmd, cwd=str(workspace), stdout=log_f, stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                    )
-            except Exception as e:
-                shutil.rmtree(workspace, ignore_errors=True)
-                raise JobError(f"Failed to spawn agent process: {e}") from e
-
-            job_id = f"job_{uuid.uuid4().hex[:8]}"
-            with self._jobs_lock:
-                self._jobs[job_id] = {
-                    "proc": proc,
-                    "workspace": workspace,
-                    "log": log_path,
-                    "start": time.time(),
-                    "timeout": timeout,
-                    "profile": profile,
-                    "backend": backend,
-                }
-        except JobError:
-            raise
-        except Exception as e:
-            raise JobError(f"Failed to dispatch agent job: {e}") from e
-
-        threading.Thread(target=self._job_watchdog, args=(job_id, timeout), daemon=True, name=f"watchdog-{job_id}").start()
-        logger.info(f"Job {job_id} dispatched.")
-        return (
-            f"Dispatched {job_id} (profile={profile}). Running in background.\n"
-            f"Workspace: {workspace}\nLog: {log_path}\n"
-            f"Poll with check_job('{job_id}') or list_jobs()."
-        )
-
     def _job_watchdog(self, job_id: str, timeout: int) -> None:
         time.sleep(timeout)
         with self._jobs_lock:
@@ -883,36 +807,10 @@ class LLMRepl:
                 logger.warning(f"Job {job_id} timed out after {timeout}s. Killing.")
                 self._kill_job_internal(job_id)
 
-    def _old_job_watchdog(self, job_id: str, timeout: int) -> None:
-        time.sleep(timeout)
-        with self._jobs_lock:
-            job = self._jobs.get(job_id)
-            if job and job["proc"].poll() is None:
-                logger.warning(f"Job {job_id} timed out after {timeout}s. Killing.")
-                self._kill_job_internal(job_id)
-
     def _kill_job_internal(self, job_id: str) -> None:
         if hasattr(self, 'dispatcher'):
             self.dispatcher.stop_job(job_id)
 
-
-    def _old_kill_job_internal(self, job_id: str) -> None:
-        job = self._jobs.get(job_id)
-        if not job:
-            return
-        proc = job["proc"]
-        if proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(proc.pid), 9)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        try:
-            proc.wait(timeout=5.0)
-        except Exception:
-            pass
 
     def _check_job(self, job_id:str) -> str:
         try:
@@ -929,41 +827,6 @@ class LLMRepl:
         )
 
 
-    def _old_check_job(self, job_id: str) -> str:
-        with self._jobs_lock:
-            job = self._jobs.get(job_id)
-            if not job:
-                return f"Error: unknown job '{job_id}'. Known: {sorted(self._jobs)}"
-
-            proc = job["proc"]
-            rc = proc.poll()
-            elapsed = time.time() - job["start"]
-
-            try:
-                log_text = job["log"].read_text(encoding="utf-8", errors="replace")
-                tail = log_text[-1500:]
-            except Exception as e:
-                tail = f"(log error: {e})"
-
-            if rc is None:
-                return f"{job_id} RUNNING ({elapsed:.0f}s)\nWorkspace: {job['workspace']}\n--- log tail ---\n{tail}"
-
-            self._kill_job_internal(job_id)
-            try:
-                files = sorted(
-                    str(p.relative_to(job["workspace"]))
-                    for p in job["workspace"].rglob("*")
-                    if p.is_file() and p.name not in {"system_prompt.md", "user_prompt.md", "agent.log"}
-                )
-            except Exception:
-                files = []
-
-            return (
-                f"{job_id} DONE rc={rc} ({elapsed:.0f}s)\n"
-                f"Workspace: {job['workspace']}\nFiles:\n  " + ("\n  ".join(files) if files else "(no output files)") +
-                f"\n--- log tail ---\n{tail}"
-            )
-
     def _list_jobs(self) -> str:
         with self._jobs_lock:
             self._jobs = self.dispatcher.active_jobs
@@ -979,17 +842,6 @@ class LLMRepl:
                 lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j['profile']})")
             return "\n".join(lines)
 
-    def _old_list_jobs(self) -> str:
-        with self._jobs_lock:
-            if not self._jobs:
-                return "No jobs dispatched."
-            lines = []
-            for jid, j in self._jobs.items():
-                rc = j["proc"].poll()
-                status = "RUNNING" if rc is None else f"DONE rc={rc}"
-                elapsed = time.time() - j["start"]
-                lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j['profile']})")
-            return "\n".join(lines)
 
     def load_commands(self):
 
