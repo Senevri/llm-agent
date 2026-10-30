@@ -344,7 +344,9 @@ class LogQueueListener(threading.Thread):
 
 
 logger = logging.getLogger("LLMReplV2")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
+#logger.setLevel(logging.WARNING)
+logger.propagate = False
 _fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 try:
     _fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
@@ -389,6 +391,8 @@ class ProfileWorker(threading.Thread):
         self.time_threshold = time_threshold
         self._stop_event = threading.Event()
         self.batch: List[ContextSnapshot] = []
+        self.api=None
+        self.console=None
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -423,6 +427,129 @@ class ProfileWorker(threading.Thread):
         self.repl._apply_profile_update(latest.user_input, latest.assistant_response)
         self.batch = []
 
+# --- CommandDispatcher -------------------------------------------------------------
+class CommandDispatcher:
+    def __init__(self, repl):
+        self.repl = repl
+        self.commands = {}
+
+    def register(self, name, handler, help="", aliases=()):
+        entry = {
+            "handler": handler,
+            "help": help,
+        }
+        self.commands[name] = entry
+
+        for alias in aliases:
+            self.commands[alias] = entry
+
+    def dispatch(self, name, args, kwargs):
+        entry = self.commands.get(name)
+
+        if entry is None:
+            return None
+
+        return entry["handler"](self.repl, *args, **kwargs)
+
+    def load(self, commands_dict: Dict[str, Callable], command_definitions: Dict[str, Dict[str, Any]]):
+        for name, handler in commands_dict.items():
+            help_text = command_definitions[name].get("help", "")
+            aliases = command_definitions[name].get("aliases", [])
+            self.register(name, handler, help_text, aliases)
+
+    def get_help(self):
+        # Generate help from unique command entries.
+        ...
+
+def clear_command(repl, *args, **kwargs):
+    with repl._state_lock:
+        repl.messages = [
+            {"role": "system", "content": repl.system_prompt}
+        ]
+    console.print("[yellow]Conversation history cleared.[/yellow]")
+
+def profile_command(repl, *args, **kwargs):
+    console.print(Panel(repl.profile_manager.get_profile_string(), title="User Profile"))
+    console.print("[yellow]Profile saved.[/yellow]")
+
+def quit_command(repl, *args, **kwargs):
+    console.print("[yellow]Goodbye![/yellow]")
+    repl.shutdown()
+    return "quit"
+
+def stub(repl, *args, **kwargs):
+            return "stub"
+
+def help(repl, *args, **kwargs):
+    _, command_definitions = repl.load_commands()
+    cmd_help = "\n".join([f"    /{k}: {v['help']}" for k, v in command_definitions.items()])
+    help_text = textwrap.dedent(f"""
+        Commands:
+            /help - show this help
+            /backend <backend> port=<port> model=<model> - switch backend
+        """)
+    console.print(help_text + cmd_help)
+
+def system_prompt_command(repl, *args, **kwargs):
+    with repl._state_lock:
+        repl.base_system_prompt = args[0].strip()
+        repl.system_prompt = repl._build_system_prompt()
+        repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
+    console.print("[yellow]System prompt updated.[/yellow]")
+
+def backend(repl, *args, **kwargs):
+
+    if len(args) < 1:
+        console.print(f"availabe backends: {', '.join(BACKEND_MAP.keys())} (default: {repl.backend})")
+        return
+    with repl._state_lock:
+        if args[0] not in BACKEND_MAP.keys():
+            console.print(f"[red]Backend {args} not found in {BACKEND_MAP.keys()}[/red]")
+            return
+        repl.backend = args[0]
+
+        api = LLMBackend(backend=repl.backend)
+        api.port = kwargs.get("port", api.port)
+        api.model = kwargs.get("model", api.model)
+        repl.client, repl.model = api.get_client()
+
+        repl.prompt_gen.reload_profiles()
+        repl.base_system_prompt = repl.prompt_gen.generate_prompt(repl.current_role)
+        repl.system_prompt = repl._build_system_prompt()
+        repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
+
+    console.print(f"[yellow]Backend switched to: {repl.backend}[/yellow]")
+
+def history(repl, *args, **kwargs):
+    table = Table(title="Conversation History")
+    table.add_column("Role", style="cyan")
+    table.add_column("Content", style="white")
+    with repl._state_lock:
+        snapshot = list(repl.messages)
+    for m in snapshot:
+        role = _role(m)
+        content = m["content"] if isinstance(m, dict) else (getattr(m, "content", "") or "")
+        content = str(content or "")
+        if len(content) > 100:
+            content = content[:100] + "..."
+        table.add_row(role, content)
+    console.print(table)
+
+def role(repl, *args, **kwargs):
+    with repl._state_lock:
+        repl.current_role = args[0]
+        repl.prompt_gen.reload_profiles()
+        repl.base_system_prompt = repl.prompt_gen.generate_prompt(repl.current_role)
+        repl.system_prompt = repl._build_system_prompt()
+        repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
+    console.print(f"[yellow]Role switched to: {repl.current_role}[/yellow]")
+
+def model(repl, *args, **kwargs):
+    if len(args) < 1:
+        console.print(f"availabe models: {', '.join(repl.api.endpoint.list_models())} (default: {repl.model})")
+        return
+    repl.model = args[0].strip()
+    console.print(f"[yellow]Model switched to: {repl.model}[/yellow]")
 
 
 # --- Main REPL --------------------------------------------------------------------
@@ -441,10 +568,10 @@ class LLMRepl:
             _active_repls += 1
 
         try:
-            api = LLMBackend(backend=self.backend)
-            api.model = model
+            self.api = LLMBackend(backend=self.backend)
+            self.api.model = model
 
-            self.client, _ = api.get_client()
+            self.client, _ = self.api.get_client()
         except Exception as e:
             raise StartupError(f"Failed to create OpenAI client: {e}") from e
 
@@ -477,10 +604,11 @@ class LLMRepl:
 
         self.profile_queue = queue.Queue()
         self.worker = ProfileWorker(self, self.profile_queue)
-        self.worker.start()
-        self.tool_registry = create_tool_registry(self)
 
+        self.tool_registry = create_tool_registry(self)
         self.tool_schemas = self.tool_registry.get_all_schemas()
+
+        self.worker.start()
 
         logger.info(
             "Registered %d tools: %s",
@@ -767,7 +895,7 @@ class LLMRepl:
             for s in self.tool_schemas
     )
 
-    def _dispatch_agent_job(self, task: str, profile: str = "software-dev", backend="ollama", max_turns: int = 40, timeout: int = 1800) -> str:
+    def _dispatch_agent_job(self, task: str, profile: str = "software-dev", backend="ollama", model: Optional[str] = None, max_turns: int = 40, timeout: int = 1800) -> str:
         # use AgentDispatcher
         if not hasattr(self, 'dispatcher'):
             self.dispatcher = AgentDispatcher(
@@ -778,6 +906,9 @@ class LLMRepl:
         model_override = os.getenv(f"AGENT_MODEL_{backend.upper()}") or os.getenv("AGENT_MODEL")
         if model_override:
             self.dispatcher.model = model_override
+
+        if model:
+            self.dispatcher.model = model
 
 
         job_id, job = self.dispatcher.dispatch_agent_job(task, profile=profile, max_turns=max_turns, timeout=timeout)
@@ -877,87 +1008,20 @@ class LLMRepl:
             }
         }
 
-        def stub(*args, **kwargs):
-            return "stub"
 
-        def help(*args, **kwargs):
-
-            cmd_help = "\n".join([f"    /{k}: {v['help']}" for k, v in command_definitions.items()])
-            help_text = textwrap.dedent(f"""
-                Commands:
-                    /help - show this help
-                    /backend <backend> port=<port> model=<model> - switch backend
-                """)
-            console.print(help_text + cmd_help)
-
-        def sys(*args, **kwargs):
-            with self._state_lock:
-                self.base_system_prompt = args[0].strip()
-                self.system_prompt = self._build_system_prompt()
-                self.messages = [{"role": "system", "content": self.system_prompt}] + self.messages[1:]
-            console.print("[yellow]System prompt updated.[/yellow]")
-
-        def backend(*args, **kwargs):
-
-            if len(args) < 2:
-                console.print(f"availabe backends: {', '.join(BACKEND_MAP.keys())} (default: {self.backend})")
-                return
-            with self._state_lock:
-                if args[1] not in BACKEND_MAP.keys():
-                    console.print(f"[red]Backend {args} not found in {BACKEND_MAP.keys()}[/red]")
-                    return
-                self.backend = args[1]
-
-                api = LLMBackend(backend=self.backend)
-                api.port = kwargs.get("port", api.port)
-                api.model = kwargs.get("model", api.model)
-                self.client, self.model = api.get_client()
-
-                self.prompt_gen.reload_profiles()
-                self.base_system_prompt = self.prompt_gen.generate_prompt(self.current_role)
-                self.system_prompt = self._build_system_prompt()
-                self.messages = [{"role": "system", "content": self.system_prompt}] + self.messages[1:]
-
-            console.print(f"[yellow]Backend switched to: {self.backend}[/yellow]")
-
-        def history(*args, **kwargs):
-            table = Table(title="Conversation History")
-            table.add_column("Role", style="cyan")
-            table.add_column("Content", style="white")
-            with self._state_lock:
-                snapshot = list(self.messages)
-            for m in snapshot:
-                role = _role(m)
-                content = m["content"] if isinstance(m, dict) else (getattr(m, "content", "") or "")
-                content = str(content or "")
-                if len(content) > 100:
-                    content = content[:100] + "..."
-                table.add_row(role, content)
-            console.print(table)
-
-        def role(*args, **kwargs):
-            with self._state_lock:
-                self.current_role = args[0]
-                self.prompt_gen.reload_profiles()
-                self.base_system_prompt = self.prompt_gen.generate_prompt(self.current_role)
-                self.system_prompt = self._build_system_prompt()
-                self.messages = [{"role": "system", "content": self.system_prompt}] + self.messages[1:]
-            console.print(f"[yellow]Role switched to: {self.current_role}[/yellow]")
         # ---
 
         commands = {
-            "quit": lambda x: "quit",
-            "clear": lambda x: "clear",
-            "sys": sys,
-            "model": stub,
+            "quit": quit_command,
+            "clear": clear_command,
+            "sys": system_prompt_command,
+            "model": model,
             "history": history,
-            "profile": stub,
+            "profile": profile_command,
             "role": role,
             "backend": backend,
             "help" : help
         }
-
-
 
         # let's get unique commoands:
         return commands, command_definitions
@@ -966,10 +1030,11 @@ class LLMRepl:
     def run(self) -> None:
         try:
             commands, command_definitions = self.load_commands()
-            # Load aliases
-            for k, v in command_definitions.items():
-                for alias in v.get("aliases", []):
-                    commands[alias] = commands[k]
+
+            self.cmd_dispatcher = CommandDispatcher(self)
+
+            self.cmd_dispatcher.load(commands, command_definitions)
+
 
             command_help = ",".join(
                 f'[bold]/{k}[/bold] {v.get("help", "")}'
@@ -1000,30 +1065,17 @@ class LLMRepl:
                         # TODO: Migrate from if/else to commands[command](self, *args, **params)
                         if not user_input:
                             continue
-                        if user_input == "/q":
-                            console.print("[bold red]Goodbye![/bold red]")
-                            break
-                        if user_input == "/clear":
-                            with self._state_lock:
-                                self.messages = [{"role": "system", "content": self.system_prompt}]
-                            console.print("[yellow]Conversation history cleared.[/yellow]")
-                            continue
-                        if user_input.startswith("/model "):
-                            self.model = user_input[7:].strip()
-                            console.print(f"[yellow]Model switched to: {self.model}[/yellow]")
-                            continue
-                        if user_input == "/profile":
-                            console.print(Panel(self.profile_manager.get_profile_string(), title="User Profile"))
-                            continue
-                        if command in commands:
-                            status = commands[command](self, *args, **params)
-                            if status == "quit":
-                                console.print("[bold red]Goodbye![/bold red]")
-                                break
+
+                        if command in self.cmd_dispatcher.commands:
+                            status = self.cmd_dispatcher.dispatch(command, args, params)
+                            if status:
+                                logger.info(f"Command status: {status}")
+                                if status == "quit":
+                                    break
                             continue
 
                         # Let's mark that the message was sent
-                        console.print("---")
+                        console.print(Markdown("---"))
 
                         response = self.send_message(user_input)
                         # if response:
@@ -1199,6 +1251,7 @@ def main() -> int:
         except Exception:
             sys.stderr.write(f"Failed to start REPL: {e}\n")
         return 1
+
 
     try:
         with repl:

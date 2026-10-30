@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-def setup_logging(level, log_dir: Path | None = None) -> logging.Logger:
+def setup_logging(name="UnifiedAgent", level="INFO", log_dir: Path | None = None) -> logging.Logger:
     log_dir = log_dir or Path.cwd()
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -15,6 +15,6 @@ def setup_logging(level, log_dir: Path | None = None) -> logging.Logger:
     fileh.setFormatter(fmt)
 
     logging.basicConfig(level=level, handlers=[stream, fileh], force=True)
-    logger = logging.getLogger("UnifiedAgent")
+    logger = logging.getLogger(name)
     logger.info(f"Logging to {log_path}")
     return logger

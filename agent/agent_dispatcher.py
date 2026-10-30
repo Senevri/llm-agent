@@ -64,7 +64,7 @@ class AgentDispatcher:
         self.prompt_gen = prompt_gen
         self.backend = os.getenv("AGENT_BACKEND", "mistral")
         self.active_jobs: Dict[str, Dict[str, Any]] = {}
-        self.model = None
+        self.model: Optional[str] = None
 
     # ---------- launching ----------
 

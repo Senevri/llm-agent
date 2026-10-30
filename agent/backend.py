@@ -168,6 +168,7 @@ class LLMBackend:
         logger.info(f"Backend: {backend}, Model: {self.model or '(default)'}")
         self.backends = BACKEND_MAP.keys()
         self.port: Optional[int] = None
+        self.endpoint: Optional[APIEndpoint] = None
 
     def set_model(self, model: str):
         self.model = model
@@ -180,26 +181,26 @@ class LLMBackend:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
         # 1. Instantiate the specific endpoint with the current model state
-        endpoint = endpoint_cls(model=self.model)
+        self.endpoint = endpoint_cls(model=self.model)
 
         if self.port:
             # print(dict(endpoint_cls))
-            endpoint.set_base_url(endpoint.base_url, self.port)
-            logger.info(f"Adjusted base URL to: {endpoint.base_url}")
+            self.endpoint.set_base_url(self.endpoint.base_url, self.port)
+            logger.info(f"Adjusted base URL to: {self.endpoint.base_url}")
 
 
-        self.model = endpoint.model
+        self.model = self.endpoint.model
         # 2. Discover context window (this updates the usage tracker)
         # Note: Removed `backend=self.backend` kwarg unless your discover_context_window explicitly requires it
         self.usage.context_limit = discover_context_window(
-            endpoint.base_url,
-            model=endpoint.model,
-            default=endpoint.ctx_size
+            self.endpoint.base_url,
+            model=self.endpoint.model,
+            default=self.endpoint.ctx_size
         )
         logger.info(f"Context window set to: {self.usage.context_limit}")
 
         # 3. Return the configured client and the fully-resolved model name
-        client, resolved_model = endpoint.get_client()
+        client, resolved_model = self.endpoint.get_client()
         # print(resolved_model)
         self.model = resolved_model
 
