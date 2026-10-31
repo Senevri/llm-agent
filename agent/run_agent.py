@@ -136,8 +136,9 @@ def run_turns(
             time.sleep(sleep_time)
 
         if api.usage.context_pct > 90:
-            logger.warning("context >90% — trimming")
-            messages = _trim_messages(messages, args.context_limit)
+            logger.warning(f"context >90% — trimming to {api.context_limit}")
+            # fixed bug: was args.context_limit.
+            messages = _trim_messages(messages, api.context_limit)
 
         try:
             response = client.chat.completions.create(
@@ -270,6 +271,9 @@ def main():
     api = LLMBackend(backend=args.backend)
     if args.model:
         api.model = args.model
+
+    if args.context_limit:
+        api.context_limit = args.context_limit
 
     try:
         if args.port:

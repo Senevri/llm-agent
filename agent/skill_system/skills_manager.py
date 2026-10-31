@@ -3,6 +3,7 @@ import os
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SkillsManager")
 
 @dataclass
@@ -44,7 +45,7 @@ class SkillsManager:
         """Parse the SKILL.md file for basic metadata."""
         with open(path, 'r', encoding='utf-8') as f:
             content = f.read()
-        
+
         metadata = {}
         for line in content.splitlines():
             if ':' in line:
@@ -52,10 +53,10 @@ class SkillsManager:
                 key = key.strip().lower()
                 if key in ['name', 'description', 'version', 'author', 'category', 'dependencies']:
                     metadata[key] = value.strip()
-        
+
         if 'name' not in metadata or 'description' not in metadata:
             return None
-            
+
         return SkillMetadata(
             name=metadata.get('name'),
             description=metadata.get('description'),
@@ -70,7 +71,7 @@ class SkillsManager:
         skill_path = os.path.join(self.skills_root, skill_id, "SKILL.md")
         if not os.path.exists(skill_path):
             return None
-        
+
         with open(skill_path, 'r', encoding='utf-8') as f:
             return f.read()
 
@@ -80,10 +81,10 @@ class SkillsManager:
         if not full_path.startswith(os.path.join(self.skills_root, skill_id)):
             logger.warning(f"Attempted out-of-bounds resource access: {full_path}")
             return None
-            
+
         if not os.path.exists(full_path):
             return None
-            
+
         try:
             with open(full_path, 'r', encoding='utf-8') as f:
                 return f.read()
@@ -95,7 +96,7 @@ class SkillsManager:
         """Return a summary of available skills for the LLM."""
         if not self.catalog:
             return "No skills discovered."
-        
+
         summary = ["Available Agent Skills:"]
         for skill_id, meta in self.catalog.items():
             summary.append(f"- {skill_id} ({meta.name}): {meta.description} (Category: {meta.category})")

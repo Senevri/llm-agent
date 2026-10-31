@@ -65,6 +65,7 @@ class AgentDispatcher:
         self.backend = os.getenv("AGENT_BACKEND", "mistral")
         self.active_jobs: Dict[str, Dict[str, Any]] = {}
         self.model: Optional[str] = None
+        self.port = None
 
     # ---------- launching ----------
 
@@ -147,6 +148,10 @@ class AgentDispatcher:
             "--user-prompt", str(task_path),
             "--max-turns", str(max_turns),
         ]
+
+        if self.port is not None:
+            cmd += ["--port", str(self.port)]
+
         if self.model is not None:
             cmd += ["--model", self.model]
 

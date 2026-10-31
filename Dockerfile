@@ -39,7 +39,7 @@ tmux \
 hyperfine \
 tree \
 unzip \
-vim \
+neovim \
 w3m \
 wget \
 xz-utils \
@@ -64,6 +64,13 @@ RUN bun install -g @oh-my-pi/pi-coding-agent \
 
 # Install Astral uv installer globally
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# Install Cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/home/sandboxuser/.cargo/bin:${PATH}"
+
+# Install Go
+# RUN curl -LsSf https://go.dev/dl/go1.21.0.linux-amd64.tar.gz | tar -C /usr/local -xzf -
 
 # Set up workspace ownership
 WORKDIR /workspace

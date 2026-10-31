@@ -16,9 +16,14 @@ from skill_system.skills_manager import SkillsManager
 SKILLS_ROOT = '/workspace/.skills'
 os.makedirs(SKILLS_ROOT, exist_ok=True)
 
-# Initialize Skills Manager
-skills_manager = SkillsManager(SKILLS_ROOT)
-skills_manager.discover_skills()
+skills_manager=None
+
+def initialize():
+    # Initialize Skills Manager
+    global skills_manager
+    skills_manager = SkillsManager(SKILLS_ROOT)
+    skills_manager.discover_skills()
+    return skills_manager
 
 def get_all_tools_schema():
     """Return all registered tools as OpenAI schemas."""
@@ -30,14 +35,20 @@ def execute_tool(name: str, **kwargs):
 
 def get_skills_summary():
     """Get a summary of available skills."""
+    if not skills_manager:
+        skills_manager = initialize()
     return skills_manager.get_catalog_summary()
 
 def activate_skill(skill_id: str):
     """Load and return instructions for a skill."""
+    if not skills_manager:
+        skills_manager = initialize()
     return skills_manager.get_skill_instructions(skill_id)
 
 def get_skill_resource(skill_id: str, resource_path: str):
     """Get a resource for a skill."""
+    if not skills_manager:
+        skills_manager = initialize()
     return skills_manager.get_skill_resource(skill_id, resource_path)
 
 # To integrate with the actual /agent harness, we would normally

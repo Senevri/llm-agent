@@ -80,21 +80,35 @@ class KoboldCppApiendpoint(APIEndpoint):
         return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
 
 class LlamaApiEndpoint(APIEndpoint):
-
     def __init__(self, model: str = ""):
         super().__init__(model)
         host_ip = get_gateway_ip()
         port = os.getenv("LLAMA_PORT", "9964")
-        self.base_url = os.getenv("LLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
+        self.base_url = os.getenv(
+            "LLAMA_BASE_URL",
+            f"http://{host_ip}:{port}/v1"
+        ).rstrip("/")
         self.api_key = "llama"
-        self.ctx_size = 8192  # Llama default, but will be overwritten by discovery
-        self.model = self.model or "llama-7b"
+        # Can be overwritten by args
+        self.ctx_size = self.get_context_size()
+        # Empty means resolve the model from the server.
+        self.model = model
+
+    def get_context_size(self) -> int:
+        url = self.base_url.removesuffix("/v1") + "/props"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        props = response.json()
+        return props["default_generation_settings"]["n_ctx"]
 
     def get_client(self) -> tuple[OpenAI, str]:
-        # Resolve default model at the last possible moment
         self.set_default_model()
 
-        return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
+        return OpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+        ), self.model
 
     def get_model(self):
         return self.model
@@ -108,7 +122,7 @@ class LlamaApiEndpoint(APIEndpoint):
 
     def get_llama_models(self):
         # /api/v1/model
-        available_models = requests.get(self.base_url + "/v1/models")
+        available_models = requests.get(self.base_url + "/models")
         # format: {"result": "<model_name
         return available_models.json()["models"]
 
@@ -130,7 +144,7 @@ class OllamaApiEndpoint(APIEndpoint):
         self.model = self.get_ollama_model()
 
     def get_ollama_model(self):
-        # /api/v1/model
+        # /apimodel
         current_model = requests.get(self.base_url + "/api/v1/model")
         # format: {"result": "<model_name>"}
         return current_model.json()["result"]
@@ -169,6 +183,7 @@ class LLMBackend:
         self.backends = BACKEND_MAP.keys()
         self.port: Optional[int] = None
         self.endpoint: Optional[APIEndpoint] = None
+        self.context_limit = -1
 
     def set_model(self, model: str):
         self.model = model

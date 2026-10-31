@@ -6,6 +6,7 @@ import shlex
 import json
 import logging
 import tempfile
+from datetime import timedelta, datetime
 import subprocess
 import textwrap
 import time
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 from functools import partial
 
 from prompt_generator import PromptGenerator, find_prompt_dir
-from agent_dispatcher import AgentDispatcher
+from agent_dispatcher import AgentDispatcher, Status as AgentStatus
 from backend import LLMBackend, BACKEND_MAP
 
 from openai import OpenAI
@@ -393,6 +394,7 @@ class ProfileWorker(threading.Thread):
         self.batch: List[ContextSnapshot] = []
         self.api=None
         self.console=None
+        self.dispatcher = None
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -551,6 +553,162 @@ def model(repl, *args, **kwargs):
     repl.model = args[0].strip()
     console.print(f"[yellow]Model switched to: {repl.model}[/yellow]")
 
+class LoopTask:
+    import threading
+    def __init__(self, repl, task):
+        self.repl: LLMRepl = repl
+        self.started_at = None
+        self.ends_at = None
+        self.task = task
+        self.commands = queue.Queue()
+        self.pause_event = threading.Event()
+        self.stop_event = threading.Event()
+        self.agent = None
+        self.backend_settings = {
+            "backend": self.repl.backend,
+            "port": self.repl.api.port,
+            "model": self.repl.model,
+        }
+        self.thread = None
+
+
+    def start(self):
+        self.started_at = datetime.now()
+        self.repl.loop_task = self
+        self.thread = threading.Thread(
+            target=self.run,
+            kwargs={"stop_event": self.stop_event},
+            daemon=True)
+        self.thread.start()
+        return self
+
+    def get_output(self):
+        if not self.agent:
+            return
+        dispatcher, jid, info = self.agent
+        return dispatcher.get_job_output(jid)
+
+    def _run_loop(self):
+        while not self.stop_event.is_set():
+            if self.pause_event.wait(timeout=0.5):
+                continue
+
+            if self.agent:
+                dispatcher, jid, info = self.agent
+                if dispatcher.get_job_status(jid) in [AgentStatus.COMPLETED, AgentStatus.FAILED]:
+                    with self.repl._state_lock:
+                        output = dispatcher.get_job_output(jid)
+                        console.print(Markdown(output))
+                        #self.repl.messages += [{"role": "assistant", "content": output}]
+
+                    if self.check_timeout():
+
+                        dispatcher.shutdown(stop_owned_jobs=True)
+                        break
+                    else:
+                        jid, info = dispatcher.dispatch_agent_job(self.task, session_name=info["session_name"])
+                        with self.repl._jobs_lock:
+                            self.repl._jobs[jid] = info
+                        self.agent = (dispatcher, jid, info)
+            else:
+                dispatcher = AgentDispatcher(prompt_gen=self.repl.prompt_gen)
+                dispatcher.backend="mistral"
+                # dispatcher.backend = self.backend_settings.get("backend", "mistral")
+                # dispatcher.port = self.backend_settings.get("port")
+                # dispatcher.model = self.backend_settings.get("model")
+
+                session_name=f"agent-loop-{uuid.uuid4().hex[:8]}"
+                jid, info = dispatcher.dispatch_agent_job(self.task, session_name=session_name)
+                self.agent = (dispatcher, jid, info)
+
+            if self.ends_at and datetime.now() > self.ends_at:
+                output = dispatcher.get_job_output(jid)
+                console.print(output)
+                self.stop()
+
+    def run(self, *args, **kwargs):
+        logger.info(f"Starting LoopTask... {args} {kwargs}")
+        try:
+            self._run_loop()
+        except Exception as e:
+            logger.error(f"LoopTask error: {e}")
+        finally:
+            self.cleanup()
+
+    def cleanup(self):
+        if self.agent:
+            dispatcher, jid, info = self.agent
+            dispatcher.shutdown(stop_owned_jobs=True)
+        self.repl.loop_task = None
+        self.agent = None
+        self.thread = None
+
+
+    def check_timeout(self):
+        if self.ends_at and datetime.now() > self.ends_at:
+            self.stop()
+            return True
+        return False
+
+    def stop(self):
+        self.stop_event.set()
+        self.started_at=None
+
+    def set_end(self, end):
+        self.ends_at = end
+
+    def pause(self):
+        self.pause_event.set()
+
+    def resume(self):
+        self.pause_event.clear()
+
+
+
+def loop (repl, *args, **kwargs):
+
+    if "start" in args:
+        task_prompt = kwargs.get("task", None)
+        if not task_prompt:
+            console.print("[red]No task prompt provided[/red]")
+            return
+
+        if repl.loop_task and repl.loop_task.is_running():
+            console.print("[red]Loop task already running[/red]")
+            return
+
+
+        loop_task = LoopTask(repl, task_prompt)
+        loop_task.started_at = datetime.now()
+        # add parsing of timedelta
+        hours = int(kwargs.get("hours", 0))
+        minutes = int(kwargs.get("minutes", 0))
+        seconds = int(kwargs.get("seconds", 0))
+        # form a time delta
+
+        # add the delta to the current time
+        delta = timedelta(hours=hours, minutes=minutes, seconds=seconds)
+        loop_task.set_end(loop_task.started_at + delta)
+        loop_task.start()
+        return loop_task
+
+    elif "stop" in args:
+        if repl.loop_task:
+            # get output from any agents
+            console.print(repl.loop_task.get_output())
+            repl.loop_task.stop()
+            repl.loop_task.cleanup()
+        else:
+            console.print("[red]No loop task running[/red]")
+
+    elif "check" in args:
+        if repl.loop_task:
+            console.print(repl.loop_task.get_output())
+        else:
+            console.print("[red]No loop task running[/red]")
+    return None
+
+
 
 # --- Main REPL --------------------------------------------------------------------
 class LLMRepl:
@@ -563,6 +721,7 @@ class LLMRepl:
         self._shutdown_done = False
         self._profile_path = Path(profile_path)
         self.backend="ollama"
+        self.loop_task=None
 
         with _active_repls_lock:
             _active_repls += 1
@@ -637,6 +796,10 @@ class LLMRepl:
         # Stop all jobs cleanly using the new dispatcher
         if hasattr(self, 'dispatcher'):
             self.dispatcher.shutdown(stop_owned_jobs=True)
+
+        if self.loop_task:
+            self.loop_task.stop()
+            self.loop_task.cleanup()
 
         try:
             self.worker.stop()
@@ -1005,6 +1168,9 @@ class LLMRepl:
             },
             "help": {
                 "help": "show help",
+            },
+            "loop": {
+                "help": "<start|stop> hours=0 minutes=0 seconds=0 task=<prompt> loop task",
             }
         }
 
@@ -1020,7 +1186,8 @@ class LLMRepl:
             "profile": profile_command,
             "role": role,
             "backend": backend,
-            "help" : help
+            "help" : help,
+            "loop": loop
         }
 
         # let's get unique commoands:
@@ -1050,6 +1217,8 @@ class LLMRepl:
             except ImportError:
                 from contextlib import nullcontext as patch_stdout
 
+            self.loop_task = None
+
             with patch_stdout(True):
                 while True:
                     try:
@@ -1061,23 +1230,23 @@ class LLMRepl:
 
                         command, args, params, errors = parse_command(user_input)
 
-
-                        # TODO: Migrate from if/else to commands[command](self, *args, **params)
                         if not user_input:
                             continue
 
+                        status = None
                         if command in self.cmd_dispatcher.commands:
                             status = self.cmd_dispatcher.dispatch(command, args, params)
                             if status:
                                 logger.info(f"Command status: {status}")
                                 if status == "quit":
                                     break
+                                if isinstance(status, LoopTask):
+                                    self.loop_task = status
                             continue
-
                         # Let's mark that the message was sent
                         console.print(Markdown("---"))
-
                         response = self.send_message(user_input)
+
                         # if response:
                         #     console.print(Panel(Markdown(response), title="Assistant"))
                     except EOFError:
