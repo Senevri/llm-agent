@@ -26,6 +26,9 @@ from functools import partial
 from prompt_generator import PromptGenerator, find_prompt_dir
 from agent_dispatcher import AgentDispatcher, Status as AgentStatus
 from backend import LLMBackend, BACKEND_MAP
+from loop_task import LoopTask, loop
+from command_dispatcher import CommandDispatcher
+from user_profile_manager import UserProfileManager, ContextSnapshot
 
 from openai import OpenAI
 
@@ -41,26 +44,6 @@ JOB_CLEANUP_INTERVAL = int(os.getenv("LLM_REPL_JOB_CLEANUP_INTERVAL", "3600"))
 
 # Make /agent importable, mirroring run_agent.py.
 sys.path.insert(0, str(AGENT_DIR))
-
-
-PROFILER_PROMPT = """
-You are a profiling agent. Your task is to maintain a JSON profile of the user.
-You maintain a JSON profile of the user.
-Current profile:\n{profile_json}\n
-User message this turn (the ONLY evidence you may use):
-<<<
-{user_input}
->>>
-Rules:
-- Do NOT infer anything from the assistant's reply. The assistant's
-text is not evidence about the user.
-- Record what the user stated about themselves (preferences,
-goals, expertise, constraints, recurring context).
-- Never use credential language ('expert', 'mastery', 'authority',
-'principal') unless the user used it about themselves.
-- If the user's message contains nothing that updates the profile
-(e.g. 'mm', 'thanks', 'ok', a question, or agreement), do not change the profile.)
-"""
 
 def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
     """Load simple KEY=VALUE env files without overriding existing vars."""
@@ -227,80 +210,6 @@ class StartupError(REPLError):
     pass
 
 
-# --- Helper classes ---------------------------------------------------------------
-@dataclass
-class ContextSnapshot:
-    """State packaging for the profiling worker."""
-    user_input: str
-    assistant_response: str
-    history: List[Any]
-    timestamp: float = field(default_factory=time.time)
-    event_type: str = "turn_complete"
-
-
-class UserProfileManager:
-    """Thread-safe manager for user preferences and profile data."""
-
-    def __init__(self, profile_path: Path = PROFILE_PATH):
-        self.profile_path = Path(profile_path)
-        self._lock = threading.RLock()
-        with self._lock:
-            self._profile_data: Dict[str, Any] = self._load_profile()
-
-    def _load_profile(self) -> Dict[str, Any]:
-        if self.profile_path.exists():
-            try:
-                with open(self.profile_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-                logging.error("Profile file did not contain a JSON object; ignoring.")
-                return {}
-            except Exception as e:
-                logging.error(f"Failed to load profile: {e}")
-                return {}
-        return {}
-
-    def save_profile(self) -> None:
-        with self._lock:
-            try:
-                self.profile_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.profile_path, "w", encoding="utf-8") as f:
-                    json.dump(self._profile_data, f, indent=2)
-            except Exception as e:
-                logging.error(f"Error saving profile: {e}")
-
-    def get_profile_string(self) -> str:
-        with self._lock:
-            if not self._profile_data:
-                return "No user profile available."
-            return json.dumps(self._profile_data, indent=2)
-
-    def update_profile(self, updates: Dict[str, Any]) -> None:
-        with self._lock:
-            self._profile_data.update(updates)
-            self.save_profile()
-
-    def set_profile_data(self, data: Dict[str, Any]) -> None:
-        with self._lock:
-            if not isinstance(data, dict):
-                raise ProfileError(f"Expected dict for profile data, got {type(data)}")
-            self._profile_data = data
-            self.save_profile()
-
-    @property
-    def profile_data(self) -> Dict[str, Any]:
-        with self._lock:
-            return self._profile_data.copy()
-
-    def __enter__(self) -> "UserProfileManager":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        self.save_profile()
-        return False
-
-
 # --- Logging setup (queue-decoupled) ---------------------------------------------
 class LogQueueHandler(logging.Handler):
     def __init__(self, log_queue: queue.Queue):
@@ -402,6 +311,7 @@ class ProfileWorker(threading.Thread):
             self.queue.put(None)
         except Exception:
             pass
+        self.repl._consolidate_profile()
 
     def run(self) -> None:
         logger.info("ProfileWorker thread started.")
@@ -426,42 +336,12 @@ class ProfileWorker(threading.Thread):
         if not self.batch:
             return
         latest = self.batch[-1]
-        self.repl._apply_profile_update(latest.user_input, latest.assistant_response)
+        prompt = self.repl.prompt_gen.generate_prompt("profiler")
+        self.repl._apply_profile_update(latest.user_input, latest.assistant_response, prompt=prompt)
         self.batch = []
 
-# --- CommandDispatcher -------------------------------------------------------------
-class CommandDispatcher:
-    def __init__(self, repl):
-        self.repl = repl
-        self.commands = {}
+# --- Commands for CommandDispatcher -------------------------------------------------------------
 
-    def register(self, name, handler, help="", aliases=()):
-        entry = {
-            "handler": handler,
-            "help": help,
-        }
-        self.commands[name] = entry
-
-        for alias in aliases:
-            self.commands[alias] = entry
-
-    def dispatch(self, name, args, kwargs):
-        entry = self.commands.get(name)
-
-        if entry is None:
-            return None
-
-        return entry["handler"](self.repl, *args, **kwargs)
-
-    def load(self, commands_dict: Dict[str, Callable], command_definitions: Dict[str, Dict[str, Any]]):
-        for name, handler in commands_dict.items():
-            help_text = command_definitions[name].get("help", "")
-            aliases = command_definitions[name].get("aliases", [])
-            self.register(name, handler, help_text, aliases)
-
-    def get_help(self):
-        # Generate help from unique command entries.
-        ...
 
 def clear_command(repl, *args, **kwargs):
     with repl._state_lock:
@@ -493,6 +373,9 @@ def help(repl, *args, **kwargs):
     console.print(help_text + cmd_help)
 
 def system_prompt_command(repl, *args, **kwargs):
+    if len(args) < 1:
+        console.print(f"Current system prompt: {repl.system_prompt}")
+        return
     with repl._state_lock:
         repl.base_system_prompt = args[0].strip()
         repl.system_prompt = repl._build_system_prompt()
@@ -553,162 +436,20 @@ def model(repl, *args, **kwargs):
     repl.model = args[0].strip()
     console.print(f"[yellow]Model switched to: {repl.model}[/yellow]")
 
-class LoopTask:
-    import threading
-    def __init__(self, repl, task):
-        self.repl: LLMRepl = repl
-        self.started_at = None
-        self.ends_at = None
-        self.task = task
-        self.commands = queue.Queue()
-        self.pause_event = threading.Event()
-        self.stop_event = threading.Event()
-        self.agent = None
-        self.backend_settings = {
-            "backend": self.repl.backend,
-            "port": self.repl.api.port,
-            "model": self.repl.model,
-        }
-        self.thread = None
-
-
-    def start(self):
-        self.started_at = datetime.now()
-        self.repl.loop_task = self
-        self.thread = threading.Thread(
-            target=self.run,
-            kwargs={"stop_event": self.stop_event},
-            daemon=True)
-        self.thread.start()
-        return self
-
-    def get_output(self):
-        if not self.agent:
-            return
-        dispatcher, jid, info = self.agent
-        return dispatcher.get_job_output(jid)
-
-    def _run_loop(self):
-        while not self.stop_event.is_set():
-            if self.pause_event.wait(timeout=0.5):
-                continue
-
-            if self.agent:
-                dispatcher, jid, info = self.agent
-                if dispatcher.get_job_status(jid) in [AgentStatus.COMPLETED, AgentStatus.FAILED]:
-                    with self.repl._state_lock:
-                        output = dispatcher.get_job_output(jid)
-                        console.print(Markdown(output))
-                        #self.repl.messages += [{"role": "assistant", "content": output}]
-
-                    if self.check_timeout():
-
-                        dispatcher.shutdown(stop_owned_jobs=True)
-                        break
-                    else:
-                        jid, info = dispatcher.dispatch_agent_job(self.task, session_name=info["session_name"])
-                        with self.repl._jobs_lock:
-                            self.repl._jobs[jid] = info
-                        self.agent = (dispatcher, jid, info)
-            else:
-                dispatcher = AgentDispatcher(prompt_gen=self.repl.prompt_gen)
-                dispatcher.backend="mistral"
-                # dispatcher.backend = self.backend_settings.get("backend", "mistral")
-                # dispatcher.port = self.backend_settings.get("port")
-                # dispatcher.model = self.backend_settings.get("model")
-
-                session_name=f"agent-loop-{uuid.uuid4().hex[:8]}"
-                jid, info = dispatcher.dispatch_agent_job(self.task, session_name=session_name)
-                self.agent = (dispatcher, jid, info)
-
-            if self.ends_at and datetime.now() > self.ends_at:
-                output = dispatcher.get_job_output(jid)
-                console.print(output)
-                self.stop()
-
-    def run(self, *args, **kwargs):
-        logger.info(f"Starting LoopTask... {args} {kwargs}")
-        try:
-            self._run_loop()
-        except Exception as e:
-            logger.error(f"LoopTask error: {e}")
-        finally:
-            self.cleanup()
-
-    def cleanup(self):
-        if self.agent:
-            dispatcher, jid, info = self.agent
-            dispatcher.shutdown(stop_owned_jobs=True)
-        self.repl.loop_task = None
-        self.agent = None
-        self.thread = None
-
-
-    def check_timeout(self):
-        if self.ends_at and datetime.now() > self.ends_at:
-            self.stop()
-            return True
-        return False
-
-    def stop(self):
-        self.stop_event.set()
-        self.started_at=None
-
-    def set_end(self, end):
-        self.ends_at = end
-
-    def pause(self):
-        self.pause_event.set()
-
-    def resume(self):
-        self.pause_event.clear()
-
-
-
-def loop (repl, *args, **kwargs):
-
-    if "start" in args:
-        task_prompt = kwargs.get("task", None)
-        if not task_prompt:
-            console.print("[red]No task prompt provided[/red]")
-            return
-
-        if repl.loop_task and repl.loop_task.is_running():
-            console.print("[red]Loop task already running[/red]")
-            return
-
-
-        loop_task = LoopTask(repl, task_prompt)
-        loop_task.started_at = datetime.now()
-        # add parsing of timedelta
-        hours = int(kwargs.get("hours", 0))
-        minutes = int(kwargs.get("minutes", 0))
-        seconds = int(kwargs.get("seconds", 0))
-        # form a time delta
-
-        # add the delta to the current time
-        delta = timedelta(hours=hours, minutes=minutes, seconds=seconds)
-        loop_task.set_end(loop_task.started_at + delta)
-        loop_task.start()
-        return loop_task
-
-    elif "stop" in args:
-        if repl.loop_task:
-            # get output from any agents
-            console.print(repl.loop_task.get_output())
-            repl.loop_task.stop()
-            repl.loop_task.cleanup()
-        else:
-            console.print("[red]No loop task running[/red]")
-
-    elif "check" in args:
-        if repl.loop_task:
-            console.print(repl.loop_task.get_output())
-        else:
-            console.print("[red]No loop task running[/red]")
-    return None
-
-
+def read(repl, *args, **kwargs):
+    if len(args) < 1:
+        cwd = Path.cwd()
+        console.print("current directory: " + str(cwd))
+        console.print(f"available files: {', '.join([str(p) for p in cwd.glob('*')])}")
+        return
+    try:
+        if Path(args[0]).is_file():
+            with open(args[0], "r") as f:
+                contents = f.read()
+                console.print(contents)
+                return
+    except Exception as e:
+        console.print(f"[red]Failed to read file: {e}[/red]")
 
 # --- Main REPL --------------------------------------------------------------------
 class LLMRepl:
@@ -883,7 +624,14 @@ class LLMRepl:
                 if not isinstance(args, dict):
                     raise ValueError("Tool arguments must be a JSON object.")
 
-                logger.info("Executing tool %s with %s", name, args)
+
+                log_args = str(args)
+                #let's not print all the args...
+                if len(log_args) > 240:
+                    log_args = log_args[:249] + "[...]"
+
+                logger.info("Executing tool %s with %s", name, log_args)
+                logger.debug("full args: %s", args)
 
                 result = self.tool_registry.execute(name, **args)
 
@@ -894,7 +642,7 @@ class LLMRepl:
 
             except Exception as e:
                 logger.exception("Tool %s failed", name)
-                content = f"Error executing tool {name}: {e}"
+                content = f"Error executing tool {name} with args {args}: {e}"
 
             # Always return a result, including for malformed arguments and errors.
             results.append({
@@ -906,6 +654,8 @@ class LLMRepl:
 
         return results
 
+
+
     def send_message(self, user_input: str) -> str:
         with self._state_lock:
             self.messages.append({"role": "user", "content": user_input})
@@ -915,12 +665,18 @@ class LLMRepl:
         # Start timing the entire turn (includes tool calls and retries)
         start_time = time.time()
 
+        SEND_TIMEOUT = 60
+
         while True:
             try:
                 response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
                 msg = response.choices[0].message
+                # console.print(Panel(Markdown(msg.content), title="DEBUG"))
+                # console.print(f"FINISH: {response.choices[0].finish_reason}")
+                # console.print(f"TOOL CALLS: {msg.tool_calls}")
                 assistant_msg = msg.model_dump(exclude_none=True)
-
+                from pprint import pformat
+                # console.print((pformat(str(assistant_msg))))
                 if msg.tool_calls:
                     with self._state_lock:
                         self.messages.append(assistant_msg)
@@ -929,6 +685,8 @@ class LLMRepl:
                     with self._state_lock:
                         self.messages.extend(tool_results)
                     current_messages.extend(tool_results)
+                    # DEBUG: line below
+                    #console.print(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
                     continue
 
                 content = msg.content or ""
@@ -951,6 +709,10 @@ class LLMRepl:
                 return content
 
             except Exception as e:
+                elapsed = time.time() - start_time
+                if elapsed > SEND_TIMEOUT:
+                    raise APIError(f"Response timed out after {elapsed:.2f}s")
+
                 if not self._handle_api_error(e):
                     return f"API Error: {e}"
 
@@ -975,6 +737,7 @@ class LLMRepl:
     def _enqueue_profile_snapshot(self, user_input: str, assistant_response: str) -> None:
         with self._state_lock:
             history = list(self.messages)
+
         snapshot = ContextSnapshot(
             user_input=user_input,
             assistant_response=assistant_response,
@@ -984,10 +747,17 @@ class LLMRepl:
         )
         self.profile_queue.put(snapshot)
 
-    def _apply_profile_update(self, user_input: str, assistant_response: str) -> None:
+    def _consolidate_profile(self) -> None:
+        self.prompt_gen.reload_profiles()
+        consolidation_prompt = self.prompt_gen.generate_prompt("profile_consolidation")
+        self._apply_profile_update("", "", prompt = consolidation_prompt)
+        console.print("[faded]Profile consolidated.[/faded]")
+
+    def _apply_profile_update(self, user_input: str, assistant_response: str, prompt=PROFILER_PROMPT) -> None:
         try:
             profile_data = self.profile_manager.profile_data
-            prompt = PROFILER_PROMPT.replace("{profile_json}", json.dumps(profile_data, indent=2)).replace("{user_input}", user_input)
+            prompt = prompt.replace(
+                    "{profile_json}", json.dumps(profile_data, indent=2)).replace("{user_input}", user_input)
             response = self._request_chat_completion(
                 [{"role": "system", "content": "You are a helpful assistant that outputs ONLY JSON."},
                  {"role": "user", "content": prompt}],
@@ -995,7 +765,9 @@ class LLMRepl:
                 tool_choice=None,
             )
             content = response.choices[0].message.content
-            updated_json = self._robust_json_extract(content)
+            updated_json=None
+            if content:
+                updated_json = self._robust_json_extract(content)
             if updated_json is not None:
                 with self._state_lock:
                     self.profile_manager.set_profile_data(updated_json)
@@ -1141,14 +913,14 @@ class LLMRepl:
 
         command_definitions = {
             "quit": {
-                "aliases":  ["quit", "q", "exit"],
+                "aliases":  ["quit", "q", "exit", "bye"],
                 "help": "",
             },
             "clear": {
                 "help": "reset"
             },
             "sys": {
-                "help": "<prompt> set system prompt",
+                "help": "display current system prompt or <prompt> set system prompt",
             },
             "model": {
                 "help": "<name> change model",
@@ -1171,6 +943,9 @@ class LLMRepl:
             },
             "loop": {
                 "help": "<start|stop> hours=0 minutes=0 seconds=0 task=<prompt> loop task",
+            },
+            "read": {
+                "help": "<file> read file without sending it to LLM",
             }
         }
 
@@ -1187,7 +962,8 @@ class LLMRepl:
             "role": role,
             "backend": backend,
             "help" : help,
-            "loop": loop
+            "loop": loop,
+            "read": read
         }
 
         # let's get unique commoands:
@@ -1235,6 +1011,7 @@ class LLMRepl:
 
                         status = None
                         if command in self.cmd_dispatcher.commands:
+                            logger.info(("COMMAND:", command, args, params))
                             status = self.cmd_dispatcher.dispatch(command, args, params)
                             if status:
                                 logger.info(f"Command status: {status}")

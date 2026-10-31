@@ -5,6 +5,8 @@ description: Use at the start of any task needing more than 3 tool calls, and ag
 
 # Plan, Execute, Verify
 
+## Instructions:
+
 1. **Plan** (3-7 steps, written to NOTES.md). Give each step a check that a command can run:
    - Good: `pytest -q` exits 0 / `test -s out.csv` / `grep -c ERROR app.log` prints 0
    - Bad: "works correctly", "looks right"

@@ -18,3 +18,4 @@ For interactive programs, use the tmux tools:
 For ddgr specifically, use non-interactive mode:
   ddgr --json -n 5 "search query"
 you can read and write from /workspace and /agent, /agent is READ ONLY.
+When replying to user, unless asked, reply in ~500 words; Long documents should be written to files.

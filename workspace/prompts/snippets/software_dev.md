@@ -10,6 +10,7 @@ Always consider edge cases and provide robust error handling.
 - Make invariants explicit. If a phase must use a particular prompt, the architecture should make bypassing it difficult.
 - Test the structure, not just the output.
 - Prefer boring, inspectable code. Clever abstractions and tiny functions aren't automatically improvements.
+- Test-driven development, when possible, if test is not trivial. Write testable code.
 
 ## Agent develoment
 - as /agent is read-only, /workspace/agent-dev is the development directory for agentic work.

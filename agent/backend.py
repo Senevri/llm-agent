@@ -7,11 +7,14 @@ from llm_utils import UsageTracker, discover_context_window
 from custom_logger import setup_logging
 from dotenv import load_dotenv
 from typing import Optional
+from pathlib import Path
 
 AGENT_DIR = os.getenv("AGENT_DIR", "/agent")
 load_dotenv(f"{AGENT_DIR}/.env")
 
-logger = setup_logging("INFO")
+LOG_DIR = os.getenv("LOG_DIR", "/workspace/logs/")
+
+logger = setup_logging("Backend", level="INFO", log_dir=Path(LOG_DIR))
 
 
 class APIEndpoint:
@@ -90,7 +93,7 @@ class LlamaApiEndpoint(APIEndpoint):
         ).rstrip("/")
         self.api_key = "llama"
         # Can be overwritten by args
-        self.ctx_size = self.get_context_size()
+        self.ctx_size = 8192
         # Empty means resolve the model from the server.
         self.model = model
 
@@ -104,7 +107,7 @@ class LlamaApiEndpoint(APIEndpoint):
 
     def get_client(self) -> tuple[OpenAI, str]:
         self.set_default_model()
-
+        self.ctx_size = self.get_context_size()
         return OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,

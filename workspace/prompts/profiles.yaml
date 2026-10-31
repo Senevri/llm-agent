@@ -12,18 +12,43 @@ roles:
       - general
       - environment
       - tools
+      - skills
+      - user-postfix
   agent:
     snippets:
       - agent
       - environment
       - tools
+      - skills
+      - user-postfix
+  designer:
+    snippets:
+      - agent
+      - environment
+      - tools
+      - skills
+      - user-postfix
   software-dev:
     snippets:
       - agent
       - environment
       - tools
       - software_dev
+      - skills
+      - user-postfix
   text_maintenance:
     snippets:
       - core
       - text_maintenance
+  research:
+    snippets:
+      - mars
+      - environment
+      - tools
+      - skills
+  profiler:
+    snippets:
+      - profiler
+  profile_consolidation:
+    snippets:
+      - profile_consolidation

@@ -8,7 +8,8 @@ compatibility: Requires ripgrep (rg).
 
 This skill transforms a vague information need into a targeted retrieval process using `ripgrep`. Instead of reading entire files, use a multi-stage retrieval pipeline.
 
-## Retrieval Pipeline
+
+## Instructions
 
 ### Stage 1: Broad Discovery
 Find which files are likely to contain the answer.
@@ -40,5 +41,7 @@ Extract the exact block needed.
 - When you already know the exact file path.
 - When the codebase is so small that reading all files is faster.
 - When you need semantic search (meaning-based) and textual keywords are insufficient.
+
+## Resouces
 
 For detailed ripgrep flags, see [ripgrep reference](references/RIPGREP_FLAGS.md).

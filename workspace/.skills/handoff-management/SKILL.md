@@ -7,6 +7,8 @@ description: Keeps task state in NOTES.md so work survives context trimming. Use
 
 Your conversation history can be trimmed at any time. NOTES.md is the source of truth.
 
+## Instructions
+
 1. At task start: if NOTES.md exists, read it and continue from "Next". Otherwise create it with:
    `# Goal` / `# Done` / `# Next` / `# Decisions and dead ends`
 2. After each completed step: update Done and Next. One line each.

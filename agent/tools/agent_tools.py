@@ -230,7 +230,9 @@ tools = [
             "description": "Execute a bash command. Use /tmp or /workspace for writes.",
             "parameters": {
                 "type": "object",
-                "properties": {"command": {"type": "string"}},
+                "properties": {"command": {"type": "string"},
+                               "executable": {"type": "string", "description": "default: bash"},
+                               "cwd": {"type": "string", "description": "default: /workspace"}},
                 "required": ["command"]
             }
         }

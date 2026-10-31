@@ -36,6 +36,8 @@ description: {desc}
 
 ## Resources
 - `scripts/`: <Add helper scripts here if needed>
+- `references/`: <Add links to resources here if needed>
+- `examples/`: <Add examples here if needed>
 """
 
 def frontmatter(text):

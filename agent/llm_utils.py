@@ -47,35 +47,63 @@ def discover_context_window(base_url: str, model: str, default: int = 4096, back
     /api/show (model max) then to the server default. base_url is the
     OpenAI-compat URL, e.g. http://host:11434/v1; we strip /v1."""
     if backend == "ollama":
-        root = base_url.rstrip("/")
-        if root.endswith("/v1"):
-            root = root[:-3]
-
-        # 1. Live served value — the one that actually matters.
-        try:
-            r = requests.get(f"{root}/api/ps", timeout=5)
-            r.raise_for_status()
-            for m in r.json().get("models", []):
-                if m.get("name") == model or m.get("model") == model:
-                    return int(m["context_length"])
-        except Exception:
-            pass
-
-        # 2. Model max, even if not loaded. Scan arch-prefixed keys.
-        try:
-            r = requests.post(f"{root}/api/show", json={"model": model}, timeout=5)
-            r.raise_for_status()
-            info = r.json().get("model_info", {})
-            for k, v in info.items():
-                if k.endswith(".context_length") and isinstance(v, int):
-                    return v
-        except Exception:
-            pass
-
-        # 3. Server default. 4096 on recent builds, 2048 on older ones.
-        return default
-    else:
+        return discover_ollama_context_window(base_url, model, default)
+    elif backend == "openai":
         return discover_openai_context_window(base_url, model, default)
+    elif backend == "mistral":
+        return discover_mistral_context_window(base_url, model, default)
+    elif backend == "llamacpp":
+        return discover_llama_context_window(base_url, model, default)
+
+def discover_ollama_context_window(base_url, model, default=4096):
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+
+    # 1. Live served value — the one that actually matters.
+    try:
+        r = requests.get(f"{root}/api/ps", timeout=5)
+        r.raise_for_status()
+        for m in r.json().get("models", []):
+            if m.get("name") == model or m.get("model") == model:
+                return int(m["context_length"])
+    except Exception:
+        pass
+
+    # 2. Model max, even if not loaded. Scan arch-prefixed keys.
+    try:
+        r = requests.post(f"{root}/api/show", json={"model": model}, timeout=5)
+        r.raise_for_status()
+        info = r.json().get("model_info", {})
+        for k, v in info.items():
+            if k.endswith(".context_length") and isinstance(v, int):
+                return v
+    except Exception:
+        pass
+
+    # 3. Server default. 4096 on recent builds, 2048 on older ones.
+    return default
+
+
+
+def discover_llama_context_window(base_url, model, default=4096):
+    # todo: not implemented
+    url = base_url.removesuffix("/v1") + "/props"
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    props = response.json()
+
+    ctx_size = props["default_generation_settings"]["n_ctx"]
+
+    from logging import getLogger
+    logger = getLogger(__name__)
+    logger.info("LLaMA context window size: %s", response.json())
+    return ctx_size or default
+
+
+def discover_mistral_context_window(base_url, model, default=4096):
+    # todo: not implemented
+    return default
 
 
 def discover_openai_context_window(
