@@ -34,6 +34,14 @@ roles:
       - environment
       - tools
       - software_dev
+      - library_use
+      - skills
+      - user-postfix
+  engineering:
+    snippets:
+      - agent
+      - environment
+      - tools
       - skills
       - user-postfix
   text_maintenance:

@@ -1,2 +1,5 @@
 workspace/
 workspace_bak/
+**/.venv/
+**/venv/
+__pycache__/

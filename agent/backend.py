@@ -6,7 +6,7 @@ from get_ip import get_gateway_ip
 from llm_utils import UsageTracker, discover_context_window
 from custom_logger import setup_logging
 from dotenv import load_dotenv
-from typing import Optional
+from typing import Optional, Dict, Type
 from pathlib import Path
 
 AGENT_DIR = os.getenv("AGENT_DIR", "/agent")
@@ -33,6 +33,7 @@ class APIEndpoint:
 
     def set_base_url(self, base_url, port=None):
         #parsed = urlsplit(base_url)
+        print (f"Setting base URL to {base_url} with port {port}")
         parsed = urlparse(base_url)
 
         if not port:
@@ -46,9 +47,19 @@ class APIEndpoint:
         logger.info (f"Set base url to {self.base_url}")
         # raise Exception("debugging")
 
-class RawEndpoint:
+class RawEndpoint(APIEndpoint):
+
+    def __init__(self, model: str = ""):
+        super().__init__(model)
+        self.base_url = "http://localhost"
+        self.api_key = "00000000"
+        self.ctx_size = 4096  # Sensible default fallback
+
     def get_client(self) -> tuple[OpenAI, str]:
-        raise NotImplementedError("Subclasses must implement get_client()")
+        return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
+
+    def get_models(self) -> list[str]:
+        raise NotImplementedError("Subclasses must implement get_models()")
 
 class KoboldCppApiendpoint(APIEndpoint):
     def __init__(self, model: str = ""):
@@ -91,9 +102,11 @@ class LlamaApiEndpoint(APIEndpoint):
             "LLAMA_BASE_URL",
             f"http://{host_ip}:{port}/v1"
         ).rstrip("/")
+        if os.getenv("DEBUG", "false").lower() == "true":
+            print(self.base_url)
         self.api_key = "llama"
         # Can be overwritten by args
-        self.ctx_size = 8192
+        self.ctx_size = 32768
         # Empty means resolve the model from the server.
         self.model = model
 
@@ -169,11 +182,12 @@ class MistralApiEndpoint(APIEndpoint):
         return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
 
 
-BACKEND_MAP = {
+BACKEND_MAP: Dict[str, Type[APIEndpoint]] = {
             "ollama": OllamaApiEndpoint,
             "mistral": MistralApiEndpoint,
             "koboldcpp": KoboldCppApiendpoint,
-            "llamacpp": LlamaApiEndpoint
+            "llamacpp": LlamaApiEndpoint,
+            "raw": RawEndpoint
         }
 
 
@@ -191,10 +205,9 @@ class LLMBackend:
     def set_model(self, model: str):
         self.model = model
 
-    def get_client(self) -> tuple[OpenAI, str]:
-        """Initializes the correct endpoint, discovers context, and returns the client."""
+    def _get_endpoint(self):
 
-        endpoint_cls: APIEndpoint = BACKEND_MAP.get(self.backend)
+        endpoint_cls: Optional[Type[APIEndpoint]] = BACKEND_MAP.get(self.backend)
         if not endpoint_cls:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
@@ -205,17 +218,24 @@ class LLMBackend:
             # print(dict(endpoint_cls))
             self.endpoint.set_base_url(self.endpoint.base_url, self.port)
             logger.info(f"Adjusted base URL to: {self.endpoint.base_url}")
+        return self.endpoint
 
 
+    def get_client(self) -> tuple[OpenAI, str]:
+        """Initializes the correct endpoint, discovers context, and returns the client."""
+
+        endpoint = self._get_endpoint()
         self.model = self.endpoint.model
         # 2. Discover context window (this updates the usage tracker)
         # Note: Removed `backend=self.backend` kwarg unless your discover_context_window explicitly requires it
         self.usage.context_limit = discover_context_window(
             self.endpoint.base_url,
             model=self.endpoint.model,
-            default=self.endpoint.ctx_size
+            default=self.endpoint.ctx_size,
+            backend=self.backend
         )
         logger.info(f"Context window set to: {self.usage.context_limit}")
+        self.context_limit = self.usage.context_limit
 
         # 3. Return the configured client and the fully-resolved model name
         client, resolved_model = self.endpoint.get_client()
@@ -228,20 +248,38 @@ class LLMBackend:
 
 if __name__ == "__main__":
     from pprint import pprint
+    from argparse import ArgumentParser
 
+    parser = ArgumentParser()
+    parser.add_argument("--backend", type=str, default="koboldcpp", help="LLM backend to use (ollama, mistral, koboldcpp, llamacpp)")
+    parser.add_argument("--model", type=str, default="", help="Model name to use (if applicable)")
+    parser.add_argument("--port", type=int, default="5001", help="Port for the backend service (if applicable)")
+    args=parser.parse_args()
 
     # backend="mistral"
     # model="ministral-14b-latest"
-    backend="koboldcpp"
-    model=""
 
-    llm_backend = LLMBackend(backend=backend)
-    llm_backend.set_model(model)
+    llm_backend = LLMBackend(backend=args.backend)
+    llm_backend.port = args.port
 
+
+    if args.model:
+        llm_backend.set_model(args.model)
+
+    llm_backend._get_endpoint()
+    print(f"Context window: {llm_backend.context_limit} tokens")
+    llm_backend.context_limit = discover_context_window(
+        llm_backend.endpoint.base_url,
+        model=llm_backend.endpoint.model,
+        default=llm_backend.endpoint.ctx_size,
+        backend=llm_backend.backend)
     client, resolved_model = llm_backend.get_client()
     print(f"Using model: {resolved_model}")
+    print(f"Base URL: {str(llm_backend.endpoint.base_url)}")
+    print(f"Context window: {llm_backend.context_limit} tokens")
+    exit(0)
     # msg = "What is Mistral AI?"
-    msg = "What is Kobold AI?"
+    msg = "Tell me about yourself concisely in tweet length."
 
     response = client.chat.completions.create(
         model=resolved_model,

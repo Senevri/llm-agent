@@ -3,6 +3,7 @@
 import os
 import time
 import json
+import yaml
 import logging
 import argparse
 from pathlib import Path
@@ -218,6 +219,7 @@ def run_turns(
             break
     else:
         logger.error("Max turns reached. Aborting.")
+    return messages
 
 def main():
     parser = argparse.ArgumentParser(description="Unified LLM Agent with Skill System")
@@ -234,11 +236,25 @@ def main():
     parser.add_argument("--test", action="store_true", help="Run in test mode")
     parser.add_argument("--skills", default=None, help="Path to skills directory")
     parser.add_argument("--notools", action="store_true", help="Disable tools")
+    parser.add_argument("--project", default=None, help="Project name")
 
     args = parser.parse_args()
 
     logger = setup_logging(args.log_level, log_dir=Path(
         os.getenv("AGENT_LOG_DIR", "./log/")))
+
+
+    if args.project:
+        logger.info(f"Project: {args.project}")
+        config = Path.cwd() / "agent_config.yaml"
+        if config.exists():
+            with open(config, "r", encoding="utf-8") as f:
+                config_data = yaml.safe_load(f)
+            # if config_data.get("project") != args.project:
+            #     logger.warning(f"Project mismatch: {config_data.get('project')} vs {args.project}")
+            for key in ["role", "system_prompt", "user_prompt", "backend", "model", "port", "max_turns", "context_limit", "task"]:
+                if key in config_data:
+                    setattr(args, key, config_data[key])
 
 
     # Initialize Skill System
@@ -331,7 +347,21 @@ def main():
     logger.info(f"--- Starting Agent Loop via {args.backend} ({api.model}) ---")
     run_turns(client, api, messages, max_turns=args.max_turns, logger=logger, sleep_time=sleep_time)
     logger.info("--- Agent Loop Complete ---")
-
+    path = Path.cwd() / "agent_config.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump({
+            "project": args.project,
+            "role": current_role,
+            "system_prompt": args.system_prompt,
+            "user_prompt": args.user_prompt,
+            "task": args.task,
+            "backend": args.backend,
+            "model": api.model,
+            "port": api.port,
+            "max_turns": args.max_turns,
+            "context_limit": args.context_limit,
+        }, f, default_flow_style=False, allow_unicode=True)
+    logger.info(f"Config saved to {path}")
 
 
 if __name__ == "__main__":

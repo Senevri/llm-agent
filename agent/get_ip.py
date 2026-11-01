@@ -10,7 +10,7 @@ def get_gateway_ip():
                     gateway_ip = '.'.join([str(int(gateway_hex[i:i+2], 16)) for i in (6, 4, 2, 0)])
                     return gateway_ip
     except Exception as e:
-        return f"Error reading route: {e}"
+        raise f"Error reading route: {e}"
     return "Gateway not found"
 
 if __name__ == "__main__":

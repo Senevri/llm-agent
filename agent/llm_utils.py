@@ -52,7 +52,7 @@ def discover_context_window(base_url: str, model: str, default: int = 4096, back
         return discover_openai_context_window(base_url, model, default)
     elif backend == "mistral":
         return discover_mistral_context_window(base_url, model, default)
-    elif backend == "llamacpp":
+    elif backend in ["raw", "koboldcpp", "llamacpp"]:
         return discover_llama_context_window(base_url, model, default)
 
 def discover_ollama_context_window(base_url, model, default=4096):
@@ -87,7 +87,7 @@ def discover_ollama_context_window(base_url, model, default=4096):
 
 
 def discover_llama_context_window(base_url, model, default=4096):
-    # todo: not implemented
+    # NOTE: also  curl -s localhost:5001/props | jq -r .default_generation_settings.n_ctx
     url = base_url.removesuffix("/v1") + "/props"
     response = requests.get(url, timeout=10)
     response.raise_for_status()
@@ -97,7 +97,7 @@ def discover_llama_context_window(base_url, model, default=4096):
 
     from logging import getLogger
     logger = getLogger(__name__)
-    logger.info("LLaMA context window size: %s", response.json())
+    logger.info("LLaMA context window size: %s", ctx_size)
     return ctx_size or default
 
 
@@ -160,3 +160,11 @@ def discover_openai_context_window(
         pass
 
     return default
+
+
+if __name__ == "__main__":
+    # Example usage of discover_context_window for different backends
+    print("Ollama context window:", discover_context_window("http://localhost:11434/v1", "mistral-small-latest", backend="ollama"))
+    print("OpenAI context window:", discover_context_window("https://api.openai.com/v1", "gpt-4", backend="openai"))
+    print("Mistral context window:", discover_context_window("https://api.mistral.ai/v1", "mistral-small-latest", backend="mistral"))
+    print("LLaMA context window:", discover_context_window("http://localhost:5001/v1", "llama-2-7b-chat", backend="llamacpp"))

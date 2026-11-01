@@ -1,0 +1,15 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "source": "test_suite",
+    "id": "test-123"
+  },
+  "user": {
+    "name": "Developer",
+    "email": "dev@example.com",
+    "settings": {
+      "theme": "dark-mode",
+      "notifications": true
+    }
+  }
+}

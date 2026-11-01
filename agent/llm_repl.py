@@ -13,9 +13,11 @@ import time
 import queue
 import threading
 import atexit
+import yaml
 import re
 import uuid
 import shutil
+from requests.exceptions import HTTPError
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Any, List, Callable, NamedTuple, Optional, Union, Tuple
@@ -26,7 +28,7 @@ from functools import partial
 from prompt_generator import PromptGenerator, find_prompt_dir
 from agent_dispatcher import AgentDispatcher, Status as AgentStatus
 from backend import LLMBackend, BACKEND_MAP
-from loop_task import LoopTask, loop
+from loop_task import LoopTask, SimpleLoopTask, loop
 from command_dispatcher import CommandDispatcher
 from user_profile_manager import UserProfileManager, ContextSnapshot
 
@@ -254,8 +256,8 @@ class LogQueueListener(threading.Thread):
 
 
 logger = logging.getLogger("LLMReplV2")
-logger.setLevel(logging.DEBUG)
-#logger.setLevel(logging.WARNING)
+#logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARNING)
 logger.propagate = False
 _fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 try:
@@ -384,6 +386,7 @@ def system_prompt_command(repl, *args, **kwargs):
 
 def backend(repl, *args, **kwargs):
 
+    old_backend = [repl.backend, repl.api.port, repl.api.model, repl.client]
     if len(args) < 1:
         console.print(f"availabe backends: {', '.join(BACKEND_MAP.keys())} (default: {repl.backend})")
         return
@@ -392,17 +395,23 @@ def backend(repl, *args, **kwargs):
             console.print(f"[red]Backend {args} not found in {BACKEND_MAP.keys()}[/red]")
             return
         repl.backend = args[0]
-
-        api = LLMBackend(backend=repl.backend)
-        api.port = kwargs.get("port", api.port)
-        api.model = kwargs.get("model", api.model)
-        repl.client, repl.model = api.get_client()
+        try:
+            api = LLMBackend(backend=repl.backend)
+            api.port = kwargs.get("port", api.port)
+            api.model = kwargs.get("model", api.model)
+            repl.client, repl.model = api.get_client()
+        except HTTPError as e:
+            console.print(f"[red]Failed to switch backend: {e}[/red]")
+            repl.backend, repl.api.port, repl.api.model, repl.client = old_backend
+            return
 
         repl.prompt_gen.reload_profiles()
         repl.base_system_prompt = repl.prompt_gen.generate_prompt(repl.current_role)
         repl.system_prompt = repl._build_system_prompt()
         repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
-
+    # save conf
+    with open(Path.cwd() / "llm_repl.yaml", "w") as f:
+        yaml.dump({"backend": repl.backend, "port": api.port, "model": api.model}, f)
     console.print(f"[yellow]Backend switched to: {repl.backend}[/yellow]")
 
 def history(repl, *args, **kwargs):
@@ -440,14 +449,20 @@ def read(repl, *args, **kwargs):
     if len(args) < 1:
         cwd = Path.cwd()
         console.print("current directory: " + str(cwd))
-        console.print(f"available files: {', '.join([str(p) for p in cwd.glob('*')])}")
+        files = '\n\t'.join([str(p) for p in cwd.glob('*')])
+        console.print(f"available files: \n{files}")
         return
     try:
-        if Path(args[0]).is_file():
+        fname = args[0].strip()
+        if Path(fname).is_file():
             with open(args[0], "r") as f:
                 contents = f.read()
                 console.print(contents)
-                return
+        if kwargs.get("load", False):
+            with repl._state_lock:
+                message = f"Contents of {fname}:\n```\n{contents}\n```"
+                repl.send_message({"role": "user", "content": message})
+        return
     except Exception as e:
         console.print(f"[red]Failed to read file: {e}[/red]")
 
@@ -463,13 +478,21 @@ class LLMRepl:
         self._profile_path = Path(profile_path)
         self.backend="ollama"
         self.loop_task=None
+        self.dispatcher=None
 
         with _active_repls_lock:
             _active_repls += 1
 
         try:
-            self.api = LLMBackend(backend=self.backend)
-            self.api.model = model
+            conf_path = Path(Path.cwd() / "llm_repl.yaml")
+            conf = {}
+            if conf_path.is_file():
+                with open(conf_path, "r") as f:
+                    conf = yaml.safe_load(f)
+            self.api = LLMBackend(backend=conf.get("backend", self.backend))
+            self.api.model = conf.get("model", model)
+            self.api.port = conf.get("port", self.api.port)
+            self.backend = self.api.backend
 
             self.client, _ = self.api.get_client()
         except Exception as e:
@@ -535,12 +558,14 @@ class LLMRepl:
         logger.info("Shutting down LLMRepl...")
 
         # Stop all jobs cleanly using the new dispatcher
-        if hasattr(self, 'dispatcher'):
+        if hasattr(self, 'dispatcher') and self.dispatcher:
             self.dispatcher.shutdown(stop_owned_jobs=True)
 
         if self.loop_task:
             self.loop_task.stop()
-            self.loop_task.cleanup()
+            if isinstance(self.loop_task, LoopTask):
+                self.loop_task.cleanup()
+
 
         try:
             self.worker.stop()
@@ -616,6 +641,9 @@ class LLMRepl:
     def _execute_tools(self, tool_calls: List[Any]) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
 
+        console.print(
+            f"[bold blue][*] Model requested {len(tool_calls)} tool call(s).[/bold blue]")
+
         for tc in tool_calls:
             name = getattr(tc.function, "name", "")
 
@@ -633,12 +661,20 @@ class LLMRepl:
                 logger.info("Executing tool %s with %s", name, log_args)
                 logger.debug("full args: %s", args)
 
+                preview = str(args)
+
+                if len(preview) > 200:
+                    preview = preview[:200] + "..."
+                console.print(f"  [blue]tool:[/blue] {name}({preview})")
+
+
                 result = self.tool_registry.execute(name, **args)
 
                 if result is None:
                     result = "Error: tool returned no result (None)."
 
                 content = result if isinstance(result, str) else str(result)
+                console.print(f"  [green]result:[/green] {content}")
 
             except Exception as e:
                 logger.exception("Tool %s failed", name)
@@ -681,6 +717,8 @@ class LLMRepl:
                     with self._state_lock:
                         self.messages.append(assistant_msg)
                     current_messages.append(assistant_msg)
+                    self.api.usage.record(response.usage, turn=len(self.messages))
+                    console.print(f"[dim]{self.api.usage.summary()}[/dim]")
                     tool_results = self._execute_tools(msg.tool_calls)
                     with self._state_lock:
                         self.messages.extend(tool_results)
@@ -748,12 +786,23 @@ class LLMRepl:
         self.profile_queue.put(snapshot)
 
     def _consolidate_profile(self) -> None:
+        # test if consolidation is needed
+        if not self.profile_manager.needs_consolidation():
+            console.print("[faded]Profile already consolidated.[/faded]")
+            return
         self.prompt_gen.reload_profiles()
         consolidation_prompt = self.prompt_gen.generate_prompt("profile_consolidation")
         self._apply_profile_update("", "", prompt = consolidation_prompt)
         console.print("[faded]Profile consolidated.[/faded]")
 
-    def _apply_profile_update(self, user_input: str, assistant_response: str, prompt=PROFILER_PROMPT) -> None:
+    def _apply_profile_update(self, user_input: str, assistant_response: str, prompt="") -> None:
+        """_summary_
+
+        Args:
+            user_input (str): _description_
+            assistant_response (str): _description_
+            prompt (str, optional): _description_. Defaults to "". Not actually optional
+        """
         try:
             profile_data = self.profile_manager.profile_data
             prompt = prompt.replace(
@@ -830,26 +879,42 @@ class LLMRepl:
             for s in self.tool_schemas
     )
 
-    def _dispatch_agent_job(self, task: str, profile: str = "software-dev", backend="ollama", model: Optional[str] = None, max_turns: int = 40, timeout: int = 1800) -> str:
-        # use AgentDispatcher
-        if not hasattr(self, 'dispatcher'):
+    def _dispatch_agent_job(
+        self,
+        task: str,
+        profile: str = "software-dev",
+        backend: str = "ollama",
+        model: Optional[str] = None,
+        port: Optional[int] = None,
+        max_turns: int = 40,
+        timeout: int = 1800,
+    ) -> str:
+        if (
+            not hasattr(self, "dispatcher")
+            or not self.dispatcher
+        ):
             self.dispatcher = AgentDispatcher(
                 agent_dir=str(AGENT_DIR),
                 prompt_gen=self.prompt_gen,
             )
 
-        model_override = os.getenv(f"AGENT_MODEL_{backend.upper()}") or os.getenv("AGENT_MODEL")
-        if model_override:
-            self.dispatcher.model = model_override
 
-        if model:
-            self.dispatcher.model = model
+        self.dispatcher.backend = backend
+        self.dispatcher.model = (
+            model
+            or os.getenv(f"AGENT_MODEL_{backend.upper()}")
+            or os.getenv("AGENT_MODEL")
+        )
+        self.dispatcher.port = port
 
-
-        job_id, job = self.dispatcher.dispatch_agent_job(task, profile=profile, max_turns=max_turns, timeout=timeout)
+        job_id, job = self.dispatcher.dispatch_agent_job(
+            task,
+            profile=profile,
+            max_turns=max_turns,
+            timeout=timeout,
+        )
         with self._jobs_lock:
             self._jobs[job_id] = job
-
         logger.info(f"Job {job_id} dispatched.")
 
         # return job_id
@@ -879,9 +944,11 @@ class LLMRepl:
 
 
     def _check_job(self, job_id:str) -> str:
+        if not self.dispatcher:
+            return f"Job {job_id} not found."
         try:
-            log_text = self.dispatcher.get_job_output(job_id, tail_chars=1500)
-            tail = log_text[-1500:]
+            log_text = self.dispatcher.get_job_output(job_id, tail_chars=2000)
+            tail = log_text[-2000:]
         except Exception as e:
             tail = f"(log error: {e})"
 
@@ -895,7 +962,7 @@ class LLMRepl:
 
     def _list_jobs(self) -> str:
         with self._jobs_lock:
-            self._jobs = self.dispatcher.active_jobs
+            self._jobs = self.dispatcher.active_jobs or {}
 
             if not self._jobs:
                 return "No jobs dispatched."
@@ -904,8 +971,10 @@ class LLMRepl:
             for jid, j in self._jobs.items():
             # use dispatch there is no proc
                 status = j["status"]
+                if isinstance(j["start"], datetime):
+                    j["start"] = j["start"].timestamp()
                 elapsed = time.time() - j["start"]
-                lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j['profile']})")
+                lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j.get('profile', 'unknown')})")
             return "\n".join(lines)
 
 
@@ -997,13 +1066,23 @@ class LLMRepl:
 
             with patch_stdout(True):
                 while True:
+                    # Write a statusbar
+                    console.rule(
+                        f"[turquoise4]{self.model}|{self.client.base_url}|{self.api.context_limit}|{self.backend}[/turquoise4]"
+                    )
                     try:
-                        if prompt_session is not None:
-                            user_input = prompt_session.prompt("\nUser > ")
-                        else:
-                            user_input = input("\nUser > ")
-                        user_input = (user_input or "").strip()
-
+                        if not self.loop_task:
+                            if prompt_session is not None:
+                                user_input = prompt_session.prompt("\nUser > ")
+                            else:
+                                user_input = input("\nUser > ")
+                            user_input = (user_input or "").strip()
+                        elif isinstance(self.loop_task, SimpleLoopTask):
+                            user_input = self.loop_task.get_next_input()
+                            if user_input is None:
+                                self.loop_task = None
+                                continue
+                            console.print(f"User(loop) > {user_input}\n")
                         command, args, params, errors = parse_command(user_input)
 
                         if not user_input:
@@ -1021,7 +1100,8 @@ class LLMRepl:
                                     self.loop_task = status
                             continue
                         # Let's mark that the message was sent
-                        console.print(Markdown("---"))
+                        loop_remains = f"Loop: {self.loop_task.get_remaining_time()}" if self.loop_task else "ᓚᘏᗢ"
+                        console.rule(f"{loop_remains}")
                         response = self.send_message(user_input)
 
                         # if response:
@@ -1030,6 +1110,14 @@ class LLMRepl:
                         console.print("[bold red]Goodbye![/bold red]")
                         break
                     except KeyboardInterrupt:
+                        if self.loop_task:
+                            try:
+                                self.loop_task.stop()
+                            except Exception as e:
+                                logger.error(f"Error stopping loop task: {e}")
+                            self.loop_task = None
+                            continue # avoid exit _once_
+
                         console.print("\n[bold red]Goodbye![/bold red]")
                         break
                     except Exception as e:
@@ -1076,6 +1164,14 @@ REPL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                         "type": "integer",
                         "description": "Maximum runtime in seconds.",
                     },
+                    "backend": {
+                        "type": "string",
+                        "description": "Backend to use. options:[ollama, mistral, llamacpp, koboldcpp]",
+                    },
+                    "port": {
+                        "type": "integer",
+                        "description": "Port to use for the agent.",
+                    }
                 },
                 "required": ["task"],
             },
@@ -1106,6 +1202,21 @@ REPL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_loop",
+            "description": ("You may stop the autonomous session using stop_loop "
+                            "when the task is complete or when a genuine blocker "
+                            "prevents further progress. Do not use it merely "
+                            "because you have completed a phase or have nothing "
+                            "immediately obvious to do."),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]
 
 
@@ -1122,6 +1233,7 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
         "dispatch_agent": lambda **kwargs: repl._dispatch_agent_job(**kwargs),
         "check_job": lambda job_id, **kwargs: repl._check_job(job_id),
         "list_jobs": lambda **kwargs: repl._list_jobs(),
+        "stop_loop": lambda **kwargs: repl.loop_task.stop() or "loop task stopped!",
     }
 
     definitions.extend(REPL_TOOL_DEFINITIONS)
@@ -1157,6 +1269,7 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
             parameters=function_def.get("parameters", {}),
         )
         registered.add(name)
+        registry.disable_tool("stop_loop")
 
     return registry
 
@@ -1166,8 +1279,8 @@ class JobManager:
     def __init__(self, repl: LLMRepl):
         self.repl = repl
 
-    def dispatch(self, task: str, profile: str = "engineering", max_turns: int = 40, timeout: int = 1800) -> str:
-        return self.repl._dispatch_agent_job(task, profile=profile, max_turns=max_turns, timeout=timeout)
+    def dispatch(self, task: str, profile: str = "engineering", max_turns: int = 40, timeout: int = 1800, **kwargs) -> str:
+        return self.repl._dispatch_agent_job(task, profile=profile, max_turns=max_turns, timeout=timeout, **kwargs)
 
     def check(self, job_id: str) -> str:
         return self.repl._check_job(job_id)

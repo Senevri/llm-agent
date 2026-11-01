@@ -12,7 +12,6 @@ RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10sandbox
 
 # Tier 1: system packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-ast-grep \
 bat \
 build-essential \
 ca-certificates \
@@ -26,12 +25,12 @@ iputils-ping \
 jq \
 just \
 less \
-mlr \
+miller \
 pkg-config \
 procps \
-python3 \
-python3-pip \
-python3-venv \
+# python3 \
+# python3-pip \
+# python3-venv \
 ripgrep \
 rsync \
 sd \
@@ -62,15 +61,13 @@ RUN curl -fsSL https://bun.sh/install | bash
 RUN bun install -g @oh-my-pi/pi-coding-agent \
 && /opt/bun/bin/bun --version
 
+RUN bun install --global @ast-grep/cli
+
 # Install Astral uv installer globally
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
-# Install Cargo
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/home/sandboxuser/.cargo/bin:${PATH}"
-
 # Install Go
-# RUN curl -LsSf https://go.dev/dl/go1.21.0.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+RUN curl -LsSf https://go.dev/dl/go1.21.0.linux-amd64.tar.gz | tar -C /usr/local -xzf -
 
 # Set up workspace ownership
 WORKDIR /workspace
@@ -80,10 +77,25 @@ RUN chown sandboxuser:sandboxuser /workspace
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir \
         requests pydantic openai python-dotenv \
-        pytest ipython ddgs rich json-repair
+        pytest ipython ddgs rich json-repair pyyaml
 
 # Switch to non-root user for runtime and final preparations
 USER sandboxuser
+
+# install in correct location for user-space binaries
+RUN curl -o eget.sh https://zyedidia.github.io/eget.sh \
+    && shasum -a 256 eget.sh \
+    && bash eget.sh \
+    && mv eget /home/sandboxuser/.local/bin/eget \
+    && rm eget.sh
+
+
+# Install Rust
+ENV CARGO_HOME=/home/sandboxuser/.cargo
+ENV RUSTUP_HOME=/home/sandboxuser/.rustup
+ENV PATH="/home/sandboxuser/.cargo/bin:${PATH}"
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 # Create user local bin directory for user-space binaries
 RUN mkdir -p /home/sandboxuser/.local/bin

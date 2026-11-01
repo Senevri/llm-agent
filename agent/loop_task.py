@@ -72,8 +72,59 @@ if os.getenv("DEBUG"):
             pass
 
 
+class SimpleLoopTask:
+    def __init__(self, repl, task):
+        self.repl = repl
+        self.task = task
+        self.started_at = None
+        self.ends_at: datetime = datetime.now() + timedelta(minutes=10)
+
+    def get_next_input(self):
+        if not self.is_running():
+            self.stop()
+            return None
+        if isinstance(self.task, List):
+            next_task = self.task.pop(0)
+            if not self.task:
+                self.task = next_task # Have the last item repeat
+            return next_task
+        return self.task
+
+    def is_running(self) -> bool:
+        return (
+            self.task is not None
+            and self.started_at is not None
+            and datetime.now() < self.ends_at
+        )
+
+    def get_output(self):
+        if not self.is_running():
+            self.stop()
+        return ""
+
+    def get_remaining_time(self):
+        if not self.is_running():
+            self.stop()
+            return None
+        return str(self.ends_at - datetime.now()).split(".")[0]
+
+    def stop(self):
+        self.task = None
+        self.repl.tool_registry.disable_tool("stop_loop")
+        self.repl.tool_schemas = self.repl.tool_registry.get_all_schemas()
+
+    def cleanup(self):
+        self.repl.loop_task = None
+
+    def start(self):
+        self.started_at = datetime.now()
+        self.repl.loop_task = self
+        self.repl.tool_registry.enable_tool("stop_loop")
+        self.repl.tool_schemas = self.repl.tool_registry.get_all_schemas()
+
+
 # --- LoopTask ---
-class LoopTask:
+class LoopTask(SimpleLoopTask):
     import threading
     def __init__(self, repl, task):
         self.repl: LLMRepl = repl
@@ -132,7 +183,7 @@ class LoopTask:
                         self.agent = (dispatcher, jid, info)
             else:
                 dispatcher = AgentDispatcher(prompt_gen=self.repl.prompt_gen)
-                dispatcher.backend="mistral"
+                dispatcher.backend="llamacpp"
                 # dispatcher.backend = self.backend_settings.get("backend", "mistral")
                 # dispatcher.port = self.backend_settings.get("port")
                 # dispatcher.model = self.backend_settings.get("model")
@@ -174,6 +225,7 @@ class LoopTask:
         self.stop_event.set()
         self.started_at=None
 
+
     def set_end(self, end):
         self.ends_at = end
 
@@ -183,6 +235,15 @@ class LoopTask:
     def resume(self):
         self.pause_event.clear()
 
+def _parse_timedelta(kwargs):
+    # add parsing of timedelta
+    hours = int(kwargs.get("hours", 0))
+    minutes = int(kwargs.get("minutes", 0))
+    seconds = int(kwargs.get("seconds", 0))
+    # form a time delta
+
+    # add the delta to the current time
+    return timedelta(hours=hours, minutes=minutes, seconds=seconds)
 
 def loop (repl, *args, **kwargs):
 
@@ -196,17 +257,10 @@ def loop (repl, *args, **kwargs):
             console.print("[red]Loop task already running[/red]")
             return
 
-
         loop_task = LoopTask(repl, task_prompt)
         loop_task.started_at = datetime.now()
-        # add parsing of timedelta
-        hours = int(kwargs.get("hours", 0))
-        minutes = int(kwargs.get("minutes", 0))
-        seconds = int(kwargs.get("seconds", 0))
-        # form a time delta
 
-        # add the delta to the current time
-        delta = timedelta(hours=hours, minutes=minutes, seconds=seconds)
+        delta = _parse_timedelta(kwargs)
         loop_task.set_end(loop_task.started_at + delta)
         loop_task.start()
         return loop_task
@@ -225,4 +279,20 @@ def loop (repl, *args, **kwargs):
             console.print(repl.loop_task.get_output())
         else:
             console.print("[red]No loop task running[/red]")
+
+    elif "simple" in args:
+        tasks = kwargs.get("task", None)
+        if kwargs.get("note", None):
+            tasks = [kwargs.get("note"), tasks]
+        repl.loop_task = SimpleLoopTask(
+            repl,
+            tasks
+        )
+        try:
+            repl.loop_task.ends_at = datetime.now() + _parse_timedelta(kwargs)
+            repl.loop_task.start()
+            console.print(f"[green]Loop task started; active until {str(repl.loop_task.ends_at)}[/green]")
+        except Exception as e:
+            console.print(f"No end time set: {e}", color=True)
+
     return None

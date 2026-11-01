@@ -59,7 +59,7 @@ class Status(StrEnum):
 
 
 class AgentDispatcher:
-    def __init__(self, agent_dir: Optional[str] = None, prompt_gen=None):
+    def __init__(self, agent_dir: Optional[str] = None, prompt_gen=None, ):
         self.agent_dir = Path(agent_dir or os.environ.get("AGENT_DIR", "/agent"))
         self.prompt_gen = prompt_gen
         self.backend = os.getenv("AGENT_BACKEND", "mistral")
@@ -124,14 +124,19 @@ class AgentDispatcher:
                 f"tmux new-session failed: {res.stderr.strip()}"
             )
 
+
+
     def dispatch_agent_job(
-        self,
-        task: str,
-        profile: str = "software-dev",
-        max_turns: int = 40,
-        timeout: int = 1800,
-        session_name: Optional[str] = None,
-    ) -> Tuple[str, Dict[str, Any]]:
+            self,
+            task: str,
+            profile: str = "software-dev",
+            max_turns: int = 40,
+            timeout: int = 1800,
+            session_name: Optional[str] = None,
+            backend: Optional[str] = None,
+            model: Optional[str] = None,
+            port: Optional[int] = None,
+        ) -> Tuple[str, Dict[str, Any]]:
         if self.prompt_gen is None:
             raise RuntimeError("prompt_gen is required")
 
@@ -143,17 +148,21 @@ class AgentDispatcher:
 
         cmd = [
             sys.executable, str(self.agent_dir / "run_agent.py"),
-            "--backend", os.getenv("AGENT_BACKEND", self.backend),
             "--system-prompt", str(system_prompt_path),
             "--user-prompt", str(task_path),
             "--max-turns", str(max_turns),
         ]
 
-        if self.port is not None:
-            cmd += ["--port", str(self.port)]
+        optional_args = {
+            "backend": backend,
+            "model": model,
+            "port": port,
+        }
 
-        if self.model is not None:
-            cmd += ["--model", self.model]
+        for arg in optional_args:
+            if getattr(self, arg) is not None:
+                cmd += [f"--{arg}", str(getattr(self, str(arg)))]
+        logger.info("Running command: %s", " ".join(cmd))
 
         session_name = session_name or f"agent-{uuid.uuid4().hex[:8]}"
         wrapper = self._write_wrapper(workspace, cmd, timeout)
@@ -340,6 +349,8 @@ if __name__ == "__main__":
 
     dispatcher = AgentDispatcher(prompt_gen=prompt_generator.PromptGenerator())
     session_name=None
+    dispatcher.__setattr__("port", 5001) # port=5001
+    dispatcher.backend="llamacpp"
     if args.test:
         session_name = "agent-test"
     jid, info = dispatcher.dispatch_agent_job(args.task, session_name=session_name)
