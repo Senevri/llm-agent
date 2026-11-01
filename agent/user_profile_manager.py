@@ -20,6 +20,65 @@ class ContextSnapshot:
     event_type: str = "turn_complete"
 
 
+from collections.abc import Mapping
+from typing import Any
+
+
+def profile_to_prompt(
+    data: Any,
+    *,
+    indent: int = 0,
+    omit_keys: set[str] | None = None,
+) -> str:
+    """Render structured profile data as compact, readable prompt text."""
+    if omit_keys is None:
+        omit_keys = {
+            "id", "source", "confidence", "retention",
+            "created_at", "updated_at",
+        }
+
+    lines: list[str] = []
+    prefix = "  " * indent
+
+    if isinstance(data, Mapping):
+        for key, value in data.items():
+            if key in omit_keys or value is None or value == "" or value == []:
+                continue
+
+            label = str(key).replace("_", " ").capitalize()
+
+            if isinstance(value, (Mapping, list)):
+                nested = profile_to_prompt(
+                    value, indent=indent + 1, omit_keys=omit_keys
+                )
+                if nested:
+                    lines.append(f"{prefix}{label}:")
+                    lines.append(nested)
+            else:
+                lines.append(f"{prefix}{label}: {value}")
+
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, (Mapping, list)):
+                nested = profile_to_prompt(
+                    item, indent=indent + 1, omit_keys=omit_keys
+                )
+                if nested:
+                    lines.append(f"{prefix}- {nested.lstrip()}")
+            else:
+                lines.append(f"{prefix}- {item}")
+
+    else:
+        return f"{prefix}{data}"
+
+    return "\n".join(lines)
+
+
+def render_profile(profile: dict) -> str:
+    """Render a complete user profile for system-prompt inclusion."""
+    return profile_to_prompt(profile)
+
+
 class UserProfileManager:
     """Thread-safe manager for user preferences and profile data."""
 
@@ -52,16 +111,26 @@ class UserProfileManager:
             except Exception as e:
                 logging.error(f"Error saving profile: {e}")
 
-    def get_profile_string(self) -> str:
+    def get_profile_json_string(self) -> str:
         with self._lock:
             if not self._profile_data:
                 return "No user profile available."
             return json.dumps(self._profile_data, indent=2)
 
+    def get_profile_string(self) -> str:
+        with self._lock:
+            if not self._profile_data:
+                return "No user profile available."
+            return render_profile(self._profile_data)
+
     def update_profile(self, updates: Dict[str, Any]) -> None:
         with self._lock:
             self._profile_data.update(updates)
             self.save_profile()
+
+    def needs_consolidation(self) -> bool:
+        with self._lock:
+            return len(str(self.get_profile_string())) > 5000
 
     def set_profile_data(self, data: Dict[str, Any]) -> None:
         with self._lock:
@@ -81,3 +150,19 @@ class UserProfileManager:
     def __exit__(self, exc_type, exc, tb) -> bool:
         self.save_profile()
         return False
+
+if __name__ == "__main__":
+    # test
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile_path", type=str, default=DEFAULT_PROFILE_PATH)
+    args = parser.parse_args()
+
+    profile_path = Path(args.profile_path)
+
+
+    manager = UserProfileManager(profile_path=profile_path)
+    print(manager.get_profile_string())
+    print(len(str(manager.profile_data)))
+    print(manager.needs_consolidation())

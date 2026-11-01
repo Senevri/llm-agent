@@ -191,6 +191,23 @@ def write_file(path: str, content: str) -> str:
     return write_or_append_file(
         path, content, mode="w", message=f"Successfully wrote {len(content)} chars to {path}")
 
+def replace_lines(
+    path="/workspace/tagdb_tui/main.py",
+    start_line=42,
+    end_line=48,
+    content="def search_tags(query):\n    ..."
+):
+    ...
+
+def insert_lines(
+    path="/workspace/tagdb_tui/main.py",
+    before_line=42,
+    content="# Search functionality\n"
+):
+    # Insert content before a specific line
+    pass # Implementation would go here
+
+
 def append_file(path: str, content: str) -> str:
     """Append content to a file."""
     logger.info("Appending to file: %s", path)

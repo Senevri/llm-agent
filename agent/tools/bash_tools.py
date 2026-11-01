@@ -33,7 +33,7 @@ def run_bash(command: str, executable="/bin/bash", cwd="/workspace") -> str:
             return (f"Output truncated to {MAX_OUTPUT_LENGTH} characters:\n\n"
                     f"{output[:MAX_OUTPUT_LENGTH]} [...]\n{returncode_str}")
         # return output
-        return f"{output}\n{returncode_str}"]"
+        return f"{output}\n[{returncode_str}]"
     except subprocess.TimeoutExpired:
         return "Error: Command timed out."
     except Exception as e:

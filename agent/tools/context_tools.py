@@ -24,6 +24,11 @@ MEMORY_MIN_REDUCTION = float(
     os.getenv("AGENT_MEMORY_MIN_REDUCTION", "0.15")
 )
 
+def set_memory_path(path: str):
+    """Set the path to the memory file. Useful per-project basis <WIP> """
+    global MEMORY_PATH
+    MEMORY_PATH = path
+
 def _update_context_file(file_key: str, content: str, mode: str = "append") -> str:
     """Internal helper to update context files."""
     filename = CONTEXT_FILES.get(file_key)
@@ -147,6 +152,18 @@ def compress_memory(compressed_content: str) -> str:
         logger.exception("Memory compression failed")
         return f"Error compressing memory: {e}"
 
+def _tail_memory(n: int) -> str:
+    path = MEMORY_PATH
+    try:
+        if not os.path.isfile(path):
+            return f"Error: memory file not found: {path}"
+
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            return "".join(lines[-n:])
+    except Exception as e:
+        logger.error(f"Error tailing memory: {e}")
+        return f"Error tailing memory: {e}"
 
 def update_memory(content: str, mode: str = "append") -> str:
     """Update the agent's memory.md file. Use 'append' to add new information, 'prepend' for high priority, or 'replace' to rewrite."""
@@ -160,17 +177,24 @@ def update_todo(content: str, mode: str = "append") -> str:
     """Update the agent's todo.md file. Use 'append' to add new tasks, 'prepend' for high priority, or 'replace' to rewrite."""
     return _update_context_file("todo", content, mode)
 
+def tail_memory(n: int) -> str:
+    return _tail_memory(n)
+
 # --- Tool Mapping ---
 CONTEXT_TOOL_MAP = {
     "update_memory": update_memory,
     "update_plan": update_plan,
     "update_todo": update_todo,
-    "compress_memory": compress_memory
+    "compress_memory": compress_memory,
+    "get_recent_memory": tail_memory
 }
 
 # --- Tool Definitions ---
-def _create_definition(name, description):
-    return {
+def _create_definition(name, description, properties=None, required=None):
+    if properties is None:
+        properties = {}
+
+    template = {
         "type": "function",
         "function": {
             "name": name,
@@ -190,17 +214,28 @@ def _create_definition(name, description):
         }
     }
 
+    if properties:
+        template["function"]["parameters"]["properties"].update(properties)
+
+    if required:
+        template["function"]["parameters"]["required"] = required
+
+    return template
+
 CONTEXT_TOOL_DEFINITION_MAP = {
     "update_memory": _create_definition("update_memory", "Update the agent's memory.md file. Use this for long-term knowledge and context."),
     "update_plan": _create_definition("update_plan", "Update the agent's plan.md file. Use this for the current high-level execution strategy."),
     "update_todo": _create_definition("update_todo", "Update the agent's todo.md file. Use this for tracking specific tasks."),
+    "tail_memory": _create_definition("tail_memory", "Get the last N lines of the agent's memory.md file.",
+                                      properties={"n": {"type": "integer", "minimum": 1}}, required=["n"]),
     "compress_memory": {
         "type": "function",
         "function": {
             "name": "compress_memory",
             "description": (
                 "Replace memory.md with a concise version of its existing contents. "
-                "First read the entire memory file and prepare a faithful summary. "
+                "First back up the old version by copying it to a new file. "
+                "Then read the entire memory file and prepare a faithful summary. "
                 "Preserve durable facts, preferences, project decisions, constraints, "
                 "and unresolved tasks. Do not invent information. "
                 "The tool only commits changes when memory exceeds its configured "

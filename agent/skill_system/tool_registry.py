@@ -28,6 +28,7 @@ class ToolRegistry:
     """Registry for managing and dispatching agent tools."""
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
+        self._disabled_tools = set(os.getenv("DISABLED_TOOLS", "").split(","))
 
     def register(self, name: str, description: str, func: Callable, parameters: Dict[str, Any]):
         """Register a new tool."""
@@ -36,6 +37,14 @@ class ToolRegistry:
 
         self._tools[name] = Tool(name, description, func, parameters)
         logger.info(f"Tool '{name}' registered successfully.")
+
+    def disable_tool(self, name: str):
+        """Disable a tool by name."""
+        self._disabled_tools.add(name)
+
+    def enable_tool(self, name: str):
+        """Enable a tool by name."""
+        self._disabled_tools.discard(name)
 
     def get_tool(self, name: str) -> Optional[Tool]:
         """Retrieve a tool by name."""
@@ -77,14 +86,14 @@ class ToolRegistry:
 
     def list_tools(self) -> List[str]:
         """List all registered tool names."""
-        return list(self._tools.keys())
+        return list(k for k in self._tools.keys() if k not in self._disabled_tools)
 
     def get_all_schemas(self) -> List[Dict[str, Any]]:
         """Get OpenAI schemas for all registered tools."""
-        return [tool.to_openai_schema() for tool in self._tools.values()]
+        return [tool.to_openai_schema() for tool in self._tools.values() if tool.name not in self._disabled_tools]
 
     def get_map(self) -> Dict[str, Callable]:
         """Return a mapping of name to function for legacy support."""
-        return {name: tool.func for name, tool in self._tools.items()}
+        return {name: tool.func for name, tool in self._tools.items() if name not in self._disabled_tools}
 
 registry = ToolRegistry()
