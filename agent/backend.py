@@ -33,7 +33,8 @@ class APIEndpoint:
 
     def set_base_url(self, base_url, port=None):
         #parsed = urlsplit(base_url)
-        print (f"Setting base URL to {base_url} with port {port}")
+        #print (f"Setting base URL to {base_url} with port {port}")
+        logger.info(f"Setting base URL to {base_url} with port {port}")
         parsed = urlparse(base_url)
 
         if not port:
@@ -50,6 +51,7 @@ class APIEndpoint:
 class RawEndpoint(APIEndpoint):
 
     def __init__(self, model: str = ""):
+
         super().__init__(model)
         self.base_url = "http://localhost"
         self.api_key = "00000000"
@@ -201,6 +203,8 @@ class LLMBackend:
         self.port: Optional[int] = None
         self.endpoint: Optional[APIEndpoint] = None
         self.context_limit = -1
+        self.base_url=""
+        self.logger = logger
 
     def set_model(self, model: str):
         self.model = model

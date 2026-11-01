@@ -4,6 +4,7 @@ No import side effects: importing this module never starts a tmux server.
 """
 
 import logging
+import platform
 import os
 import re
 import subprocess
@@ -319,18 +320,23 @@ tmux_kill_tool_definition = {
     },
 }
 
-TMUX_TOOL_MAP = {
-    "tmux_create_session": tmux_create_session,
-    "tmux_send": tmux_send,
-    "tmux_capture": tmux_capture,
-    "tmux_list": tmux_list,
-    "tmux_kill": tmux_kill,
-}
+if platform.system() == "Windows":
+    logger.warning("Tmux tools are not supported on Windows. All tmux tool calls will fail.")
+    TMUX_TOOL_MAP = {}
+    TMUX_TOOL_DEFINITION_MAP = {}
+else:
+    TMUX_TOOL_MAP = {
+        "tmux_create_session": tmux_create_session,
+        "tmux_send": tmux_send,
+        "tmux_capture": tmux_capture,
+        "tmux_list": tmux_list,
+        "tmux_kill": tmux_kill,
+    }
 
-TMUX_TOOL_DEFINITION_MAP = {
-    "tmux_create_session": tmux_create_session_tool_definition,
-    "tmux_send": tmux_send_tool_definition,
-    "tmux_capture": tmux_capture_tool_definition,
-    "tmux_list": tmux_list_tool_definition,
-    "tmux_kill": tmux_kill_tool_definition,
-}
+    TMUX_TOOL_DEFINITION_MAP = {
+        "tmux_create_session": tmux_create_session_tool_definition,
+        "tmux_send": tmux_send_tool_definition,
+        "tmux_capture": tmux_capture_tool_definition,
+        "tmux_list": tmux_list_tool_definition,
+        "tmux_kill": tmux_kill_tool_definition,
+    }

@@ -2,6 +2,7 @@
 
 import os
 import sys
+import platform
 import shlex
 import json
 import logging
@@ -139,7 +140,7 @@ from skill_system.tool_registry import ToolRegistry
 from skill_system.skills_manager import SkillsManager
 from skill_system.integration import SKILLS_ROOT
 
-DEFAULT_MODEL = os.getenv("LLM_REPL_MODEL", "gemma4:e4b")
+DEFAULT_MODEL = os.getenv("LLM_REPL_MODEL", "")
 DEFAULT_BASE_URL = os.getenv(
     "OPENAI_BASE_URL",
     os.getenv("LLM_BASE_URL", f"http://{get_gateway_ip()}:11434/v1"),
@@ -399,6 +400,7 @@ def backend(repl, *args, **kwargs):
             api = LLMBackend(backend=repl.backend)
             api.port = kwargs.get("port", api.port)
             api.model = kwargs.get("model", api.model)
+            api.base_url = kwargs.get("base_url", api.base_url)
             repl.client, repl.model = api.get_client()
         except HTTPError as e:
             console.print(f"[red]Failed to switch backend: {e}[/red]")
@@ -410,9 +412,14 @@ def backend(repl, *args, **kwargs):
         repl.system_prompt = repl._build_system_prompt()
         repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
     # save conf
+    save_config(repl)
+    console.print(f"[yellow]Backend switched to: {repl.backend}[/yellow]")
+
+def save_config(repl, *args, **kwargs):
+    api = repl.api
     with open(Path.cwd() / "llm_repl.yaml", "w") as f:
         yaml.dump({"backend": repl.backend, "port": api.port, "model": api.model}, f)
-    console.print(f"[yellow]Backend switched to: {repl.backend}[/yellow]")
+
 
 def history(repl, *args, **kwargs):
     table = Table(title="Conversation History")
@@ -490,15 +497,16 @@ class LLMRepl:
                 with open(conf_path, "r") as f:
                     conf = yaml.safe_load(f)
             self.api = LLMBackend(backend=conf.get("backend", self.backend))
+            self.api.logger.setLevel(logger.level)
             self.api.model = conf.get("model", model)
             self.api.port = conf.get("port", self.api.port)
             self.backend = self.api.backend
 
-            self.client, _ = self.api.get_client()
+            self.client, discovered_model = self.api.get_client()
         except Exception as e:
             raise StartupError(f"Failed to create OpenAI client: {e}") from e
 
-        self.model = model
+        self.model = discovered_model
         try:
             self.profile_manager = UserProfileManager(profile_path=self._profile_path)
         except Exception as e:
@@ -582,6 +590,11 @@ class LLMRepl:
             _active_repls = max(0, _active_repls - 1)
             if _active_repls == 0:
                 _stop_log_listener()
+
+        try:
+            save_config(self)
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
 
         logger.info("LLMRepl shutdown complete.")
     def _build_system_prompt(self) -> str:
@@ -1066,6 +1079,8 @@ class LLMRepl:
 
             with patch_stdout(True):
                 while True:
+                    # live update model
+                    self.model = self.api.model
                     # Write a statusbar
                     console.rule(
                         f"[turquoise4]{self.model}|{self.client.base_url}|{self.api.context_limit}|{self.backend}[/turquoise4]"
@@ -1235,6 +1250,11 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
         "list_jobs": lambda **kwargs: repl._list_jobs(),
         "stop_loop": lambda **kwargs: repl.loop_task.stop() or "loop task stopped!",
     }
+
+    if platform.system() == "Windows":
+        logger.warning("REPL tool registry: Windows detected; disabling 'dispatch_agent' tool.")
+        repl_functions.pop("dispatch_agent", None)
+        definitions = [d for d in definitions if d.get("function", {}).get("name") != "dispatch_agent"]
 
     definitions.extend(REPL_TOOL_DEFINITIONS)
 

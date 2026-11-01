@@ -94,10 +94,10 @@ def discover_llama_context_window(base_url, model, default=4096):
     props = response.json()
 
     ctx_size = props["default_generation_settings"]["n_ctx"]
-
-    from logging import getLogger
-    logger = getLogger(__name__)
-    logger.info("LLaMA context window size: %s", ctx_size)
+    if __name__ == "__main__":
+        from logging import getLogger
+        logger = getLogger(__name__)
+        logger.info("LLaMA context window size: %s", ctx_size)
     return ctx_size or default
 
 

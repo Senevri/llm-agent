@@ -1,5 +1,6 @@
 # agent_tools.py
 import os
+import platform
 import sys
 import subprocess
 import logging
