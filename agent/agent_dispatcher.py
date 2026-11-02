@@ -29,6 +29,10 @@ SESSION_RE = re.compile(r"[A-Za-z0-9_-]+")  # tmux dislikes '.' and ':' in names
 
 AGENT_DIR = os.environ.get("AGENT_DIR", "/agent")
 
+# Current file IS in agent dir
+if not Path(AGENT_DIR).exists():
+    AGENT_DIR = str(Path(__file__).resolve().parent)
+
 if AGENT_DIR not in sys.path:
     sys.path.insert(0, AGENT_DIR)
 
@@ -61,6 +65,8 @@ class Status(StrEnum):
 class AgentDispatcher:
     def __init__(self, agent_dir: Optional[str] = None, prompt_gen=None, ):
         self.agent_dir = Path(agent_dir or os.environ.get("AGENT_DIR", "/agent"))
+        if not self.agent_dir.exists():
+            self.agent_dir=Path(__file__).resolve().parent
         self.prompt_gen = prompt_gen
         self.backend = os.getenv("AGENT_BACKEND", "mistral")
         self.active_jobs: Dict[str, Dict[str, Any]] = {}
@@ -338,7 +344,9 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    sys.path.insert(0, os.environ.get("AGENT_DIR", "/agent"))
+    curdir = str(Path(__file__).parent)
+    if curdir not in sys.path:
+        sys.path.insert(curdir)
     import prompt_generator
 
     parser = argparse.ArgumentParser()

@@ -16,7 +16,11 @@ CONTEXT_FILES = {
 
 # --- Memory compression ---
 
-MEMORY_PATH = "/workspace/memory.md"
+from pathlib import Path
+from tools import WORKSPACE_DIR
+
+
+MEMORY_PATH = WORKSPACE_DIR / "memory.md"
 MEMORY_COMPRESSION_THRESHOLD = int(
     os.getenv("AGENT_MEMORY_COMPRESSION_THRESHOLD", "12000")
 )
@@ -24,7 +28,7 @@ MEMORY_MIN_REDUCTION = float(
     os.getenv("AGENT_MEMORY_MIN_REDUCTION", "0.15")
 )
 
-def set_memory_path(path: str):
+def set_memory_path(path: Path):
     """Set the path to the memory file. Useful per-project basis <WIP> """
     global MEMORY_PATH
     MEMORY_PATH = path
@@ -37,7 +41,7 @@ def _update_context_file(file_key: str, content: str, mode: str = "append") -> s
 
     # Use absolute path if possible, or relative to workspace
     # For this environment, we assume files are in /workspace/
-    path = os.path.join("/workspace", filename)
+    path = WORKSPACE_DIR / filename
 
     try:
         if mode == "append":
@@ -48,7 +52,7 @@ def _update_context_file(file_key: str, content: str, mode: str = "append") -> s
 
         elif mode == "prepend":
             existing_content = ""
-            if os.path.exists(path):
+            if path.exists():
                 with open(path, 'r', encoding='utf-8') as f:
                     existing_content = f.read()
 
@@ -83,7 +87,7 @@ def compress_memory(compressed_content: str) -> str:
     path = MEMORY_PATH
 
     try:
-        if not os.path.isfile(path):
+        if not path.is_file():
             return f"Error: memory file not found: {path}"
 
         original = open(path, "r", encoding="utf-8").read()
@@ -155,7 +159,7 @@ def compress_memory(compressed_content: str) -> str:
 def _tail_memory(n: int) -> str:
     path = MEMORY_PATH
     try:
-        if not os.path.isfile(path):
+        if path.is_file():
             return f"Error: memory file not found: {path}"
 
         with open(path, "r", encoding="utf-8") as f:

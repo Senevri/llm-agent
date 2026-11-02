@@ -6,6 +6,11 @@ import os
 import sys
 import random
 from pathlib import Path
+from typing import Optional
+
+from tools import WORKSPACE_DIR
+
+default_workspace = str(WORKSPACE_DIR)
 
 
 
@@ -17,7 +22,7 @@ load_dotenv()
 
 
 
-def generate_cloud_image(prompt: str, output_path: str = "/workspace/image.png", width: int = 1024, height: int = 1024, mode="pollinations"):
+def generate_cloud_image(prompt: str, output_path: str = f"{default_workspace}/image.png", width: int = 1024, height: int = 1024, mode="pollinations"):
     valid_modes = ["pollinations", "hf"]
     if mode=="pollinations":
         if os.getenv("POLLINATIONS_API_KEY"):
@@ -32,7 +37,7 @@ def generate_cloud_image(prompt: str, output_path: str = "/workspace/image.png",
 
 def _generate_pollinations_image(
         prompt: str,
-        output_path: str = "/workspace/image.png",
+        output_path: str = f"{default_workspace}/image.png",
         width: int = 1024, height: int = 1024,
         model = "black-forest-labs/flux.1-schnell") -> str:
     """
@@ -82,7 +87,7 @@ import time
 import os
 from pathlib import Path
 
-def _generate_image_hf(prompt: str, output_path: str = "/workspace/image.png", hf_token: str = None) -> str:
+def _generate_image_hf(prompt: str, output_path: str = f"{default_workspace}/image.png", hf_token: Optional[str] = None) -> str:
     """
     Generates an image using the Qwen Image 2.1 Hugging Face Space API.
     """

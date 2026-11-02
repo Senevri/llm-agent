@@ -18,7 +18,8 @@ import yaml
 import re
 import uuid
 import shutil
-from requests.exceptions import HTTPError
+from httpx2 import ConnectError, HTTPError
+#from requests.exceptions import HTTPError
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Any, List, Callable, NamedTuple, Optional, Union, Tuple
@@ -26,25 +27,31 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 
+from openai import OpenAI
+from openai_error_handling import classify_api_error, Action
+
+
 from prompt_generator import PromptGenerator, find_prompt_dir
 from agent_dispatcher import AgentDispatcher, Status as AgentStatus
 from backend import LLMBackend, BACKEND_MAP
 from loop_task import LoopTask, SimpleLoopTask, loop
-from command_dispatcher import CommandDispatcher
+from command_dispatcher import CommandDispatcher, parse_command
 from user_profile_manager import UserProfileManager, ContextSnapshot
+from log_queue import LogQueueHandler, LogQueueListener
 
-from openai import OpenAI
+
 
 PROMPT_DIR = find_prompt_dir()
 
 # --- Paths / environment discovery -------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-AGENT_DIR = Path(os.getenv("AGENT_DIR", "/agent"))
+AGENT_DIR = Path(os.getenv("AGENT_DIR", SCRIPT_DIR))
 PROFILE_PATH = Path(os.getenv("LLM_REPL_PROFILE_PATH", str(Path.cwd() / ".llm_user_profile_v2.json")))
 LOG_FILE = Path(os.getenv("LLM_REPL_LOG_FILE", str(Path.cwd() / "llm_repl_v2.log")))
 MAX_CONTEXT_MESSAGES = int(os.getenv("LLM_REPL_MAX_CONTEXT", "40"))
 JOB_CLEANUP_INTERVAL = int(os.getenv("LLM_REPL_JOB_CLEANUP_INTERVAL", "3600"))
 
+sys.path.insert(0, str(SCRIPT_DIR))
 # Make /agent importable, mirroring run_agent.py.
 sys.path.insert(0, str(AGENT_DIR))
 
@@ -66,6 +73,45 @@ def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
 
 _load_dotenv()
 
+# --- Setup Logging ------------------------------------------------------------
+
+logger = logging.getLogger("LLMReplV2")
+if os.getenv("DEBUG"):
+    logger.setLevel(logging.DEBUG)
+else:
+    logger.setLevel(logging.WARNING)
+logger.propagate = False
+_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+try:
+    _fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
+    _fh.setFormatter(_fmt)
+    logger.addHandler(_fh)
+except Exception as e:
+    sys.stderr.write(f"Warning: could not create log file handler: {e}\n")
+
+_log_queue = queue.Queue()
+_log_handler = LogQueueHandler(_log_queue)
+_log_handler.setFormatter(_fmt)
+logger.addHandler(_log_handler)
+_log_listener = LogQueueListener(_log_queue, _fmt)
+try:
+    _log_listener.start()
+except Exception as e:
+    sys.stderr.write(f"Warning: could not start log listener: {e}\n")
+
+_active_repls = 0
+_active_repls_lock = threading.Lock()
+
+
+def _stop_log_listener() -> None:
+    try:
+        _log_listener.stop()
+        _log_listener.join(timeout=2.0)
+    except Exception:
+        pass
+
+
+atexit.register(_stop_log_listener)
 
 def get_gateway_ip() -> str:
     try:
@@ -75,54 +121,12 @@ def get_gateway_ip() -> str:
         return os.getenv("GATEWAY_IP", "127.0.0.1")
 
 
-def _env_default(key: str, fallback: str) -> str:
-    return os.getenv(key, fallback)
-
-
-def parse_command(text: str):
-    try:
-        parts = shlex.split(text)
-    except ValueError as e:
-        return None, [], {}, str(e)
-
-    if not parts:
-        return None, [], {}, None
-
-    command = parts[0].lstrip("/")
-    positional = []
-    kwargs = {}
-
-    for part in parts[1:]:
-        if "=" in part:
-            key, value = part.split("=", 1)
-            kwargs[key] = value
-        else:
-            positional.append(part)
-
-    return command, positional, kwargs, None
-
-try:
-    from get_ip import get_gateway_ip as _gw
-except Exception:
-    def _gw() -> str:
-        return "127.0.0.1"
-
-try:
-    from openai_error_handling import classify_api_error, Action
-except Exception:
-    class Action:
-        ABORT = "abort"
-        RETRY = "retry"
-        BACKOFF = "backoff"
-
-    def classify_api_error(e):  # type: ignore
-        return Action.ABORT, 0.0
-
 try:
     from tools.internet_tools import (
         INTERNET_TOOL_DEFINITION_MAP, INTERNET_TOOL_MAP
     )
-except Exception:
+except (ImportError, Exception) as e:
+    logger.warning("Failed to import internet tools.")
     INTERNET_TOOL_MAP = {}
     INTERNET_TOOL_DEFINITION_MAP = {}
     def search_internet(query: str, max_results: int = 5) -> str:  # type: ignore
@@ -146,6 +150,7 @@ DEFAULT_BASE_URL = os.getenv(
     os.getenv("LLM_BASE_URL", f"http://{get_gateway_ip()}:11434/v1"),
 )
 DEFAULT_API_KEY = os.getenv("LLM_REPL_API_KEY", "ollama")
+DEFAULT_BACKEND = os.getenv("LLM_REPL_BACKEND", "ollama")
 
 # --- Rich / prompt_toolkit with safe fallbacks -----------------------------------
 try:
@@ -213,85 +218,6 @@ class StartupError(REPLError):
     pass
 
 
-# --- Logging setup (queue-decoupled) ---------------------------------------------
-class LogQueueHandler(logging.Handler):
-    def __init__(self, log_queue: queue.Queue):
-        super().__init__()
-        self.log_queue = log_queue
-
-    def emit(self, record):
-        try:
-            self.log_queue.put(record)
-        except Exception:
-            self.handleError(record)
-
-
-class LogQueueListener(threading.Thread):
-    def __init__(self, log_queue: queue.Queue, formatter=None):
-        super().__init__(daemon=True, name="LogQueueListener")
-        self.log_queue = log_queue
-        self.formatter = formatter
-        self._stop_event = threading.Event()
-
-    def stop(self):
-        self._stop_event.set()
-        try:
-            self.log_queue.put(None)
-        except Exception:
-            pass
-
-    def run(self):
-        while not self._stop_event.is_set():
-            try:
-                record = self.log_queue.get(timeout=1.0)
-                if record is None:
-                    break
-                msg = self.formatter.format(record) if self.formatter else record.getMessage()
-                sys.stderr.write(msg + "\n")
-                sys.stderr.flush()
-                self.log_queue.task_done()
-            except queue.Empty:
-                continue
-            except Exception as e:
-                sys.stderr.write(f"LogQueueListener error: {e}\n")
-
-
-logger = logging.getLogger("LLMReplV2")
-#logger.setLevel(logging.DEBUG)
-logger.setLevel(logging.WARNING)
-logger.propagate = False
-_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-try:
-    _fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
-    _fh.setFormatter(_fmt)
-    logger.addHandler(_fh)
-except Exception as e:
-    sys.stderr.write(f"Warning: could not create log file handler: {e}\n")
-
-_log_queue = queue.Queue()
-_log_handler = LogQueueHandler(_log_queue)
-_log_handler.setFormatter(_fmt)
-logger.addHandler(_log_handler)
-_log_listener = LogQueueListener(_log_queue, _fmt)
-try:
-    _log_listener.start()
-except Exception as e:
-    sys.stderr.write(f"Warning: could not start log listener: {e}\n")
-
-_active_repls = 0
-_active_repls_lock = threading.Lock()
-
-
-def _stop_log_listener() -> None:
-    try:
-        _log_listener.stop()
-        _log_listener.join(timeout=2.0)
-    except Exception:
-        pass
-
-
-atexit.register(_stop_log_listener)
-
 # --- Profiling worker --------------------------------------------------------------
 class ProfileWorker(threading.Thread):
     """Background worker that consumes profiling tasks and updates the user profile."""
@@ -343,8 +269,82 @@ class ProfileWorker(threading.Thread):
         self.repl._apply_profile_update(latest.user_input, latest.assistant_response, prompt=prompt)
         self.batch = []
 
-# --- Commands for CommandDispatcher -------------------------------------------------------------
+# --- REPL commands --------------------------------------------------------------
 
+def load_commands():
+
+    command_definitions = {
+        "quit": {
+            "aliases":  ["quit", "q", "exit", "bye"],
+            "help": "",
+        },
+        "clear": {
+            "help": "reset"
+        },
+        "sys": {
+            "help": "display current system prompt or <prompt> set system prompt",
+        },
+        "model": {
+            "help": "<name> change model",
+        },
+
+        "history": {
+            "help": "show context",
+        },
+        "profile": {
+            "help": "view profile",
+        },
+        "role": {
+            "help": "<name> change role",
+        },
+        "backend": {
+            "help": "<name> change backend",
+        },
+        "help": {
+            "help": "show help",
+        },
+        "loop": {
+            "help": "<start|stop> hours=0 minutes=0 seconds=0 task=<prompt> loop task",
+        },
+        "read": {
+            "help": "<file> read file without sending it to LLM",
+        },
+        "tools": {
+            "help": "list available tools",
+        },
+        "config": {
+            "help": "<save|load> save or load config",
+        },
+        "shell": {
+            "help": "<command> execute shell command",
+        },
+    }
+
+
+    # ---
+
+    commands = {
+        "quit": quit_command,
+        "clear": clear_command,
+        "sys": system_prompt_command,
+        "model": model,
+        "history": history,
+        "profile": profile_command,
+        "role": role,
+        "backend": backend,
+        "help" : help,
+        "loop": loop,
+        "read": read,
+        "tools": tools_command,
+        "config": config,
+        "shell": shell_command
+    }
+
+    # let's get unique commoands:
+    return commands, command_definitions
+
+
+# --- Commands for CommandDispatcher -------------------------------------------------------------
 
 def clear_command(repl, *args, **kwargs):
     with repl._state_lock:
@@ -366,7 +366,7 @@ def stub(repl, *args, **kwargs):
             return "stub"
 
 def help(repl, *args, **kwargs):
-    _, command_definitions = repl.load_commands()
+    _, command_definitions = load_commands()
     cmd_help = "\n".join([f"    /{k}: {v['help']}" for k, v in command_definitions.items()])
     help_text = textwrap.dedent(f"""
         Commands:
@@ -402,7 +402,7 @@ def backend(repl, *args, **kwargs):
             api.model = kwargs.get("model", api.model)
             api.base_url = kwargs.get("base_url", api.base_url)
             repl.client, repl.model = api.get_client()
-        except HTTPError as e:
+        except (ConnectError, HTTPError) as e:
             console.print(f"[red]Failed to switch backend: {e}[/red]")
             repl.backend, repl.api.port, repl.api.model, repl.client = old_backend
             return
@@ -415,10 +415,58 @@ def backend(repl, *args, **kwargs):
     save_config(repl)
     console.print(f"[yellow]Backend switched to: {repl.backend}[/yellow]")
 
+def tools_command(repl, *args, **kwargs):
+    if "reload" in args:
+        repl.skills_manager.discover_skills()
+        repl.tool_registry = create_tool_registry(repl)
+        console.print("[yellow]Tools reloaded.[/yellow]")
+        return
+    # console.print("[yellow]Available skills:[/yellow]")
+    # console.print(repl.skills_manager.get_catalog_summary())
+    # for skill_id, meta in repl.skills_manager.catalog.items() or {}:
+    #     console.print(f"  - {meta.name}: {meta.description}")
+    console.print("[yellow]Available tools:[/yellow]")
+    console.print(f' - {", ".join(repl.tool_registry.list_tools())}')
+    console.print("[yellow]Disabled tools:[/yellow]")
+    console.print(f' - {", ".join(repl.tool_registry._disabled_tools)}')
+
+
+def config(repl, *args, **kwargs):
+    if "save" in args:
+        save_config(repl)
+        console.print("[yellow]Config saved.[/yellow]")
+        return
+    elif "load" in args:
+        load_config(repl)
+        console.print("[yellow]Config loaded.[/yellow]")
+        return
+    else:
+        console.print("[yellow]Config:[/yellow]")
+        console.print(f"  - backend: {repl.backend}")
+        console.print(f"  - port: {repl.api.port}")
+        console.print(f"  - model: {repl.api.model}")
+        console.print(f"  - base_url: {repl.api.base_url}")
+
 def save_config(repl, *args, **kwargs):
     api = repl.api
     with open(Path.cwd() / "llm_repl.yaml", "w") as f:
         yaml.dump({"backend": repl.backend, "port": api.port, "model": api.model}, f)
+
+def load_config(repl, *args, **kwargs):
+    conf_path = Path(Path.cwd() / "llm_repl.yaml")
+    conf = {}
+    if conf_path.is_file():
+        with open(conf_path, "r") as f:
+            conf = yaml.safe_load(f)
+    repl.api = LLMBackend(backend=conf.get("backend", repl.backend))
+    repl.api.base_url = conf.get("base_url", kwargs.get("base_url", repl.api.base_url))
+    if not os.getenv("DEBUG", "false").lower() == "true":
+        repl.api.logger.setLevel(logger.level)
+    repl.api.model = conf.get("model", kwargs.get("model", repl.api.model))
+    repl.api.port = conf.get("port", repl.api.port)
+    repl.backend = repl.api.backend
+    return repl.api
+
 
 
 def history(repl, *args, **kwargs):
@@ -473,10 +521,24 @@ def read(repl, *args, **kwargs):
     except Exception as e:
         console.print(f"[red]Failed to read file: {e}[/red]")
 
+def shell_command(repl, *args, **kwargs):
+    out = subprocess.run(args,
+                   stdout=subprocess.PIPE,
+                   stderr=subprocess.STDOUT,
+                   text=True,
+                   check=True)
+    if out.stderr:
+        console.print(out.stderr)
+    console.print(out.stdout)
+
 # --- Main REPL --------------------------------------------------------------------
 class LLMRepl:
-    def __init__(self, model=DEFAULT_MODEL, base_url=DEFAULT_BASE_URL, api_key=DEFAULT_API_KEY,
-                 profile_path: Path = PROFILE_PATH):
+    def __init__(self, model=DEFAULT_MODEL,
+                 base_url=DEFAULT_BASE_URL,
+                 api_key=DEFAULT_API_KEY,
+                 profile_path: Path = PROFILE_PATH
+                 ):
+
         global _active_repls
         self._state_lock = threading.RLock()
         self._jobs_lock = threading.RLock()
@@ -491,18 +553,12 @@ class LLMRepl:
             _active_repls += 1
 
         try:
-            conf_path = Path(Path.cwd() / "llm_repl.yaml")
-            conf = {}
-            if conf_path.is_file():
-                with open(conf_path, "r") as f:
-                    conf = yaml.safe_load(f)
-            self.api = LLMBackend(backend=conf.get("backend", self.backend))
-            self.api.logger.setLevel(logger.level)
-            self.api.model = conf.get("model", model)
-            self.api.port = conf.get("port", self.api.port)
-            self.backend = self.api.backend
+            # Note: llm_repl mutates self.api, self.client,
+            # and self.model based on the loaded config.
+            self.api = load_config(self, base_url=base_url, model=model)
 
             self.client, discovered_model = self.api.get_client()
+
         except Exception as e:
             raise StartupError(f"Failed to create OpenAI client: {e}") from e
 
@@ -515,7 +571,7 @@ class LLMRepl:
 
         try:
             self.prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
-            self.current_role = "repl"
+            self.current_role = "repl_windows" if platform.system() == "Windows" else "repl"
             self.base_system_prompt = self.prompt_gen.generate_prompt(self.current_role)
         except ImportError:
             prompt_gen = None
@@ -529,6 +585,9 @@ class LLMRepl:
         #     self.system_prompt = self._build_system_prompt()
         #     self.messages = [{"role": "system", "content": self.system_prompt}]
 
+        self.tool_registry = create_tool_registry(self)
+        self.tool_schemas = self.tool_registry.get_all_schemas()
+
         with self._state_lock:
             self.system_prompt = self._build_system_prompt()
             self.messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
@@ -536,8 +595,6 @@ class LLMRepl:
         self.profile_queue = queue.Queue()
         self.worker = ProfileWorker(self, self.profile_queue)
 
-        self.tool_registry = create_tool_registry(self)
-        self.tool_schemas = self.tool_registry.get_all_schemas()
 
         self.worker.start()
 
@@ -546,7 +603,7 @@ class LLMRepl:
             len(self.tool_schemas),
             self.tool_registry.list_tools(),
         )
-        logger.info("Discovered skills: %s", self.skills_manager.catalog.keys())
+        logger.info("Discovered skills: %s", ", ".join(self.skills_manager.catalog.keys()))
 
         atexit.register(self.shutdown)
 
@@ -614,6 +671,12 @@ class LLMRepl:
                 "Use the discovered skill catalog to identify relevant capabilities "
                 "and follow the applicable skill instructions when needed.\n\n"
                 f"{skills_summary}"
+            )
+        allowed_paths = self.tool_registry.get_allowed_paths()
+        if allowed_paths:
+            sections.append(
+                "### Allowed Paths\n"
+               f"{allowed_paths}"
             )
 
         return "\n\n".join(sections)
@@ -720,9 +783,10 @@ class LLMRepl:
             try:
                 response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
                 msg = response.choices[0].message
-                # console.print(Panel(Markdown(msg.content), title="DEBUG"))
-                # console.print(f"FINISH: {response.choices[0].finish_reason}")
-                # console.print(f"TOOL CALLS: {msg.tool_calls}")
+                # print((self.api.model, self.api.port, self.api.base_url))
+                # print("CONTENT:", repr(msg.content))
+                # print("TOOL CALLS:", msg.tool_calls)
+                # print("FINISH REASON:", response.choices[0].finish_reason)
                 assistant_msg = msg.model_dump(exclude_none=True)
                 from pprint import pformat
                 # console.print((pformat(str(assistant_msg))))
@@ -990,71 +1054,16 @@ class LLMRepl:
                 lines.append(f"{jid}: {status} ({elapsed:.0f}s, profile={j.get('profile', 'unknown')})")
             return "\n".join(lines)
 
-
-    def load_commands(self):
-
-        command_definitions = {
-            "quit": {
-                "aliases":  ["quit", "q", "exit", "bye"],
-                "help": "",
-            },
-            "clear": {
-                "help": "reset"
-            },
-            "sys": {
-                "help": "display current system prompt or <prompt> set system prompt",
-            },
-            "model": {
-                "help": "<name> change model",
-            },
-
-            "history": {
-                "help": "show context",
-            },
-            "profile": {
-                "help": "view profile",
-            },
-            "role": {
-                "help": "<name> change role",
-            },
-            "backend": {
-                "help": "<name> change backend",
-            },
-            "help": {
-                "help": "show help",
-            },
-            "loop": {
-                "help": "<start|stop> hours=0 minutes=0 seconds=0 task=<prompt> loop task",
-            },
-            "read": {
-                "help": "<file> read file without sending it to LLM",
-            }
-        }
+    def _load_commands(self) -> Tuple[Dict[str, Callable], Dict[str, Dict[str, Any]]]:
+         commands, command_definitions = load_commands()
+         # can modify commands here.
 
 
-        # ---
-
-        commands = {
-            "quit": quit_command,
-            "clear": clear_command,
-            "sys": system_prompt_command,
-            "model": model,
-            "history": history,
-            "profile": profile_command,
-            "role": role,
-            "backend": backend,
-            "help" : help,
-            "loop": loop,
-            "read": read
-        }
-
-        # let's get unique commoands:
-        return commands, command_definitions
-
+         return commands, command_definitions
 
     def run(self) -> None:
         try:
-            commands, command_definitions = self.load_commands()
+            commands, command_definitions = self._load_commands()
 
             self.cmd_dispatcher = CommandDispatcher(self)
 
@@ -1114,8 +1123,13 @@ class LLMRepl:
                                 if isinstance(status, LoopTask):
                                     self.loop_task = status
                             continue
+                        elif user_input.startswith("/"):
+                            console.print(f"[bold red]Unknown command: {user_input}[/bold red]")
+                            continue
+
                         # Let's mark that the message was sent
-                        loop_remains = f"Loop: {self.loop_task.get_remaining_time()}" if self.loop_task else "ᓚᘏᗢ"
+                        loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
+                                        if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
                         console.rule(f"{loop_remains}")
                         response = self.send_message(user_input)
 
@@ -1241,7 +1255,9 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
 
     # The definitions in agent_tools are the source of truth for the
     # core, internet, tmux, and context tools.
-    definitions = list(BASE_TOOL_SCHEMAS or [])
+    definitions = BASE_TOOL_SCHEMAS
+
+    logger.debug(definitions)
 
     # Bind REPL-specific functions to this instance.
     repl_functions = {
@@ -1251,12 +1267,14 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
         "stop_loop": lambda **kwargs: repl.loop_task.stop() or "loop task stopped!",
     }
 
+    definitions.extend(REPL_TOOL_DEFINITIONS)
+
     if platform.system() == "Windows":
         logger.warning("REPL tool registry: Windows detected; disabling 'dispatch_agent' tool.")
-        repl_functions.pop("dispatch_agent", None)
-        definitions = [d for d in definitions if d.get("function", {}).get("name") != "dispatch_agent"]
+        for fn in ["dispatch_agent", "check_job", "list_jobs"]:
+            repl_functions.pop(fn, None)
+        #definitions = [d for d in definitions if d.get("function", {}).get("name") != "dispatch_agent"]
 
-    definitions.extend(REPL_TOOL_DEFINITIONS)
 
     # Use the existing implementation map; the definitions supply schemas.
     implementations = dict(BASE_TOOL_MAP or {})
@@ -1264,6 +1282,8 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
     implementations.update(repl_functions)
 
     registered = set()
+
+    assert len(definitions) > 0, "No tool definitions found for REPL registry."
 
     for definition in definitions:
         function_def = definition.get("function", {})
@@ -1317,12 +1337,16 @@ def _role(m: Any) -> str:
 
 # --- Entry point ------------------------------------------------------------------
 def main() -> int:
+
+
+
     try:
         repl = LLMRepl(
             model=os.getenv("LLM_REPL_MODEL", DEFAULT_MODEL),
             base_url=os.getenv("LLM_REPL_BASE_URL", DEFAULT_BASE_URL),
             api_key=os.getenv("LLM_REPL_API_KEY", DEFAULT_API_KEY),
         )
+        repl.backend=os.getenv("LLM_REPL_BACKEND", DEFAULT_BACKEND)
     except Exception as e:
         logger.exception("Failed to initialize REPL")
         try:
@@ -1350,4 +1374,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import tools
+    print(BASE_TOOL_SCHEMAS)
+    print(BASE_TOOL_MAP)
+
     raise SystemExit(main())

@@ -4,6 +4,7 @@ class GatewayIPError(Exception):
     pass
 
 def get_gateway_ip():
+
     try:
         # are we in windows?
         if platform.system() == "Windows":
@@ -29,7 +30,7 @@ def get_gateway_ip():
                         return gateway_ip
     except Exception as e:
         raise GatewayIPError(f"Error reading route: {e}")
-    return "Gateway not found"
+    return "localhost"
 
 if __name__ == "__main__":
     print(f"Parent/Gateway IP: {get_gateway_ip()}")

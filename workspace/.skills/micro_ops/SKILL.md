@@ -10,6 +10,7 @@ A collection of highly specialized, atomic tools designed to reduce the cognitiv
 
 # Instructions
  - scripts/implementation.py contains small utility functions, implementations.TOOL_REGISTRY is a dict of the tools.
+ -
 
 
 ## Tool Definitions

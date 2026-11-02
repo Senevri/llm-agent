@@ -3,9 +3,10 @@ import os
 import platform
 import sys
 import subprocess
-import logging
+#import logging
 import json
 from pathlib import Path
+
 
 try:
     import tools
@@ -14,13 +15,11 @@ except ImportError:
     # In a real deployment, we'd ensure it's in the same directory or package
     if Path(__file__).parent.parent not in sys.path:
         sys.path.append(str(Path(__file__).parent.parent))
-from tools import AGENT_DIR, TOOLS_DIR
+from tools import AGENT_DIR, TOOLS_DIR, WORKSPACE_DIR
 from tools.internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
 from tools.agent_deb_tools import install_deb_package
 from tools.bash_tools import run_bash
 from tools.cloud_image_gen import CLOUD_IMAGE_GEN_TOOL_DEFINITION, generate_cloud_image
-
-
 
 try:
     from tools.tmux_tools import TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
@@ -44,11 +43,14 @@ from datetime import datetime, timezone
 TOOL_TIMEOUT = int(os.getenv("AGENT_TOOL_TIMEOUT", "60"))
 MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
 
-logger = logging.getLogger("OllamaAgentTools")
+from custom_logger import setup_logging
+
+
+logger = setup_logging("AgentTools")
 
 def _is_memory_file(path: str) -> bool:
     """Check if the given path is the protected memory file."""
-    memory_path = Path("/workspace/memory.md").resolve()
+    memory_path = WORKSPACE_DIR / "memory.md"
     try:
         return Path(path).resolve() == memory_path
     except Exception as e:
@@ -76,6 +78,10 @@ def read_file(
 
         if not p.is_file():
             return f"Error: not a regular file: {p}"
+
+        # Check filesize
+        if p.stat().st_size > max_chars:
+            return f"Error: file too large: {p}"
 
         # Read text, not a fixed number of bytes.
         with p.open("r", encoding="utf-8", errors="replace") as f:
@@ -171,11 +177,11 @@ def search_file(path: str, query: str) -> str:
     except Exception as e:
         return f"Error searching file: {str(e)}"
 
-def list_files(path: str = ".") -> str:
+def list_files(path: str = ".", filter: str = "*") -> str:
     """List files and directories in a given path."""
     logger.info(f"Listing files in: {path}")
     try:
-        files = os.listdir(path)
+        files = [str(p) for p in Path(path).glob(filter)]
         return "\n".join(files) if files else "Directory is empty."
     except Exception as e:
         return f"Error listing files: {str(e)}"
@@ -276,7 +282,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "read_file_lines",
-            "description": "Read specific lines of a file (1-indexed). Useful for large files.",
+            "description": "Read specific lines of a file (1-indexed), with added line numbers. Useful for large files.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -310,7 +316,9 @@ tools = [
             "description": "List files and directories in a given path.",
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Path to list, defaults to current directory"}},
+                "properties": {"path": {"type": "string", "description": "Path to list, defaults to current directory"},
+                               "filter": {"type": "string", "description": "Filter files by name"}
+                               },
                 "required": []
             }
         }
@@ -376,4 +384,8 @@ TOOL_DEFINITIONS = tools
 
 if __name__=="__main__":
     from pprint import pprint, pformat
-    pprint(TOOL_DEFINITIONS, indent=0, width=100)
+    import json
+    module_dir = Path(__file__).parent.parent
+    if  not module_dir in sys.path:
+        sys.path.append(str(module_dir))
+    print(json.dumps(TOOL_DEFINITIONS, indent=2))

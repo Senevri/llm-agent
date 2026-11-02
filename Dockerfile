@@ -76,7 +76,7 @@ RUN chown sandboxuser:sandboxuser /workspace
 # Python deps as root (globally visible), utilizing uv for speed
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir \
-        requests pydantic openai python-dotenv \
+        httpx2 requests pydantic openai python-dotenv \
         pytest ipython ddgs rich json-repair pyyaml
 
 # Switch to non-root user for runtime and final preparations

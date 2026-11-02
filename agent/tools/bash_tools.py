@@ -2,6 +2,9 @@
 import subprocess
 import logging
 import os
+import platform
+
+from tools import WORKSPACE_DIR
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("BashAgentTools")
@@ -9,7 +12,15 @@ logger = logging.getLogger("BashAgentTools")
 TOOL_TIMEOUT = int(os.getenv("AGENT_TOOL_TIMEOUT", "60"))
 MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
 
-def run_bash(command: str, executable="/bin/bash", cwd="/workspace") -> str:
+EXECUTABLE = "/bin/bash"
+if platform.system() == "Windows":
+    EXECUTABLE = "C:\\Windows\\System32\\bash.exe"
+
+
+def run_bash(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
+    return _run_bash(command, executable=executable, cwd=cwd)
+
+def _run_bash(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
     """Execute a bash command inside the container environment."""
     logger.info(f"Executing bash: {command}")
     try:

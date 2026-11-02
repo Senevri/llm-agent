@@ -6,6 +6,10 @@ roles:
   repl:
     snippets:
       - repl
+      - environment
+  repl_windows:
+    snippets:
+      - repl_windows
   general:
     snippets:
       - core

@@ -1,9 +1,15 @@
-import logging
+
 import os
 import json
 from typing import Dict, Any, List, Optional, Callable
+from pathlib import Path
 
-logger = logging.getLogger("ToolRegistry")
+try:
+    from custom_logger import setup_logging
+    logger = setup_logging("ToolRegistry")
+except ImportError:
+    import logging
+    logger = logging.getLogger("ToolRegistry")
 
 class Tool:
     """A tool definition combining metadata and implementation."""
@@ -24,11 +30,36 @@ class Tool:
             }
         }
 
+
+class PathAccessError(Exception):
+    pass
+
+
+def resolve_allowed_path(path: str, roots: list[Path]) -> Path:
+    candidate = Path(path).expanduser().resolve()
+
+    for root in roots:
+        root = root.resolve()
+        try:
+            candidate.relative_to(root)
+            return candidate
+        except ValueError:
+            continue
+
+    raise PathAccessError(f"Path outside permitted workspace: {path}")
+
 class ToolRegistry:
     """Registry for managing and dispatching agent tools."""
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
-        self._disabled_tools = set(os.getenv("DISABLED_TOOLS", "").split(","))
+        self._disabled_tools = set(t for t in os.getenv("DISABLED_TOOLS", "").split(",") if t)
+        self._allowed_paths = [Path(p) for p in os.getenv("ALLOWED_PATHS", str(Path.cwd())).split(",") if p]
+
+    def get_allowed_paths(self) -> str:
+        return "\n".join(str(p) for p in self._allowed_paths)
+
+    def allow_path(self, path: Path):
+        self._allowed_paths.append(path)
 
     def register(self, name: str, description: str, func: Callable, parameters: Dict[str, Any]):
         """Register a new tool."""
@@ -45,6 +76,7 @@ class ToolRegistry:
     def enable_tool(self, name: str):
         """Enable a tool by name."""
         self._disabled_tools.discard(name)
+
 
     def get_tool(self, name: str) -> Optional[Tool]:
         """Retrieve a tool by name."""
@@ -63,6 +95,9 @@ class ToolRegistry:
             if missing:
                 return f"Error: Tool '{tool_name}' is missing required arguments: {missing}"
 
+            # validate policy:
+            kwargs = self._validate_policy(tool_name, tool, kwargs)
+
             result = tool.func(**kwargs)
 
             if result is None:
@@ -76,6 +111,27 @@ class ToolRegistry:
         except Exception as e:
             logger.exception(f"Error executing tool '{tool_name}': {e}")
             return f"Error executing tool '{tool_name}': {str(e)}"
+
+    def _validate_policy(self, tool_name, tool, kwargs) -> dict:
+        if tool_name in self._disabled_tools:
+            return f"Error: Tool '{tool_name}' is disabled."
+        # Check allowed paths
+        for k, v in tool.parameters.get("properties", {}).items():
+            if (k in ["path", "cwd"]
+                or "path" in k):
+                path = kwargs.get(k)
+                if path:
+                    path = resolve_allowed_path(path, self._allowed_paths)
+                    kwargs[k] = str(path)
+            # check if v is path
+            try:
+                if v.get("type") == "string":
+                    path = Path(kwargs.get(k))
+                    # Still don't know if it is a path.
+            except Exception as e:
+                # Probably not a path
+                pass
+        return kwargs
 
     def _get_required_params(self, parameters: Dict[str, Any]) -> List[str]:
         """Extract required parameters from JSON schema."""
@@ -97,3 +153,4 @@ class ToolRegistry:
         return {name: tool.func for name, tool in self._tools.items() if name not in self._disabled_tools}
 
 registry = ToolRegistry()
+logger.info(f"Tool registry initialized. Allowed paths: {registry._allowed_paths}")

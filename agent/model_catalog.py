@@ -5,11 +5,15 @@ from openai import OpenAI
 from mistralai.client import Mistral
 from get_ip import get_gateway_ip
 from dotenv import load_dotenv
+from pathlib import Path
 
 try:
     load_dotenv()
 except Exception as e:
-    load_dotenv("/agent/.env")
+    if Path("/agent/.env").exists():
+        load_dotenv("/agent/.env")
+    else:
+        load_dotenv(Path(__file__).parent / ".env")
 
 def list_ollama_models():
     gateway_ip = get_gateway_ip()

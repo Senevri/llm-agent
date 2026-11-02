@@ -101,3 +101,8 @@ class SkillsManager:
         for skill_id, meta in self.catalog.items():
             summary.append(f"- {skill_id} ({meta.name}): {meta.description} (Category: {meta.category})")
         return "\n".join(summary)
+
+if __name__=="__main__":
+    sm = SkillsManager(".skills")
+    sm.discover_skills()
+    print(sm.get_catalog_summary())

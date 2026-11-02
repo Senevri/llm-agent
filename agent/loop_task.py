@@ -10,7 +10,16 @@ import uuid
 from typing import Dict, Any, List, Callable, NamedTuple, Optional, Union, Tuple
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from agent_dispatcher import AgentDispatcher, Status as AgentStatus
+from pathlib import Path
+
+
+try:
+    from agent_dispatcher import AgentDispatcher, Status as AgentStatus
+except ImportError:
+    if Path.cwd() not in sys.path:
+        sys.path.append(str(Path.cwd()))
+    from agent_dispatcher import AgentDispatcher, Status as AgentStatus
+
 
 # --- Stubs for rich (mirrors original) ---
 try:
@@ -48,7 +57,12 @@ except Exception:
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
-    prompt_session = PromptSession(history=FileHistory(str("/workspace")))
+    # Figure out filehistory location
+    # TODO: this should be configurable
+    if Path("/workspace").exists:
+        history_path = "/workspace/"
+    else: history_path=Path.cwd()
+    prompt_session = PromptSession(history=FileHistory(str(history_path)))
 except Exception:
     prompt_session = None
 

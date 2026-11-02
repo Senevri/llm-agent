@@ -1,5 +1,5 @@
 import os
-import requests
+import httpx2 as requests
 from urllib.parse import urlparse, urlsplit
 from openai import OpenAI
 from get_ip import get_gateway_ip
@@ -10,18 +10,24 @@ from typing import Optional, Dict, Type
 from pathlib import Path
 
 AGENT_DIR = os.getenv("AGENT_DIR", "/agent")
+if not Path(AGENT_DIR).exists():
+    AGENT_DIR = Path(__file__).resolve().parent
 load_dotenv(f"{AGENT_DIR}/.env")
 
-LOG_DIR = os.getenv("LOG_DIR", "/workspace/logs/")
+if not Path("/workspace").exists():
+    LOG_DIR = Path.cwd() / "logs/"
+else:
+    LOG_DIR = os.getenv("LOG_DIR", "/workspace/logs/")
 
 logger = setup_logging("Backend", level="INFO", log_dir=Path(LOG_DIR))
 
 
 class APIEndpoint:
     """Base class for LLM API endpoints."""
-    def __init__(self, model: str = ""):
+    def __init__(self, model: str = "", base_url: str = ""):
         self.model = model
-        self.base_url = ""
+        self.base_url = base_url
+
         self.api_key = ""
         self.ctx_size = 4096  # Sensible default fallback
 
@@ -50,24 +56,56 @@ class APIEndpoint:
 
 class RawEndpoint(APIEndpoint):
 
-    def __init__(self, model: str = ""):
+    def __init__(self, model: str = "", base_url: str = "http://localhost"):
 
-        super().__init__(model)
-        self.base_url = "http://localhost"
+        super().__init__(model, base_url)
         self.api_key = "00000000"
         self.ctx_size = 4096  # Sensible default fallback
+        self.model = model
+        self.try_get_model()
 
     def get_client(self) -> tuple[OpenAI, str]:
         return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
 
-    def get_models(self) -> list[str]:
-        raise NotImplementedError("Subclasses must implement get_models()")
+    def get_model(self):
+        return self.try_get_model()
+
+    def try_get_model(self) -> str:
+        self_model = self.model or ""
+        try:
+            response = requests.get(f"{self.base_url}/models", timeout=5)
+            response.raise_for_status()
+            models_data = response.json().get("data", [])
+            self.model = [m.get("id") for m in models_data if "id" in m]
+        except Exception as e:
+            logger.error(f"Failed to retrieve models from {self.base_url}: {e}")
+        try:
+            url = self.base_url.rstrip("/v1")  + "/api/v1/model"
+            current_model = requests.get(url)
+            if current_model:
+                self.model = current_model.json().get("result", "")
+        except Exception as e:
+            logger.error(f"Failed to retrieve current model from {self.base_url}: {e}")
+        try:
+            url = self.base_url.rstrip("/v1")  + "/models"
+            models = requests.get(url)
+            models = models.json()["models"]
+            model_names = [model["name"] for model in models]
+            if self.model not in model_names:
+                print(f"Setting default model to {models[0]['name']}")
+                self.model = models[0]["model"]
+        except Exception as e:
+            logger.error(f"Failed to retrieve available models from {self.base_url}: {e}")
+
+        return self.model
+
 
 class KoboldCppApiendpoint(APIEndpoint):
-    def __init__(self, model: str = ""):
-        super().__init__(model)
-        host_ip = get_gateway_ip()
-        self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:5001/")
+    def __init__(self, model: str = "", base_url: str = ""):
+        super().__init__(model, base_url)
+        if not base_url:
+            host_ip = get_gateway_ip()
+            self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:5001/")
         self.ctx_size = 8192
         self.api_key = "kobold"
         try:
@@ -96,13 +134,14 @@ class KoboldCppApiendpoint(APIEndpoint):
         return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
 
 class LlamaApiEndpoint(APIEndpoint):
-    def __init__(self, model: str = ""):
-        super().__init__(model)
-        host_ip = get_gateway_ip()
+    def __init__(self, model: str = "", base_url: str = ""):
+        super().__init__(model, base_url)
         port = os.getenv("LLAMA_PORT", "9964")
-        self.base_url = os.getenv(
-            "LLAMA_BASE_URL",
-            f"http://{host_ip}:{port}/v1"
+        if not base_url:
+            host_ip = get_gateway_ip()
+            self.base_url = os.getenv(
+                "LLAMA_BASE_URL",
+                f"http://{host_ip}:{port}/v1"
         ).rstrip("/")
         if os.getenv("DEBUG", "false").lower() == "true":
             print(self.base_url)
@@ -129,10 +168,15 @@ class LlamaApiEndpoint(APIEndpoint):
         ), self.model
 
     def get_model(self):
+        if not self.model:
+            self.set_default_model()
         return self.model
 
     def set_default_model(self):
         models = self.get_llama_models()
+        if not models:
+            logger.warning("No models found from LLaMA endpoint.")
+            return
         model_names = [model["name"] for model in models]
         if self.model not in model_names:
             print(f"Setting default model to {models[0]['name']}")
@@ -140,16 +184,20 @@ class LlamaApiEndpoint(APIEndpoint):
 
     def get_llama_models(self):
         # /api/v1/model
+        if not self.base_url:
+            return []
         available_models = requests.get(self.base_url + "/models")
         # format: {"result": "<model_name
-        return available_models.json()["models"]
+        return available_models.json().get("models", [])
 
 class OllamaApiEndpoint(APIEndpoint):
-    def __init__(self, model: str = ""):
-        super().__init__(model)
-        host_ip = get_gateway_ip()
+    def __init__(self, model: str = "", base_url: str = ""):
+        super().__init__(model, base_url)
         port = os.getenv("OLLAMA_PORT", "11434")
-        self.base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
+
+        if not base_url:
+            host_ip = get_gateway_ip()
+            self.base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
         self.api_key = "ollama"
         self.ctx_size = 8192  # Ollama default, but will be overwritten by discovery
         self.model = self.model or "gemma4:31b-cloud"
@@ -169,8 +217,8 @@ class OllamaApiEndpoint(APIEndpoint):
 
 
 class MistralApiEndpoint(APIEndpoint):
-    def __init__(self, model: str = ""):
-        super().__init__(model)
+    def __init__(self, model: str = "", base_url: str = ""):
+        super().__init__(model, base_url=base_url)
         self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
         self.ctx_size = 32000
         self.model = self.model or "ministral-14b-latest"
@@ -216,7 +264,7 @@ class LLMBackend:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
         # 1. Instantiate the specific endpoint with the current model state
-        self.endpoint = endpoint_cls(model=self.model)
+        self.endpoint = endpoint_cls(model=self.model, base_url=self.base_url)
 
         if self.port:
             # print(dict(endpoint_cls))
@@ -232,12 +280,22 @@ class LLMBackend:
         self.model = self.endpoint.model
         # 2. Discover context window (this updates the usage tracker)
         # Note: Removed `backend=self.backend` kwarg unless your discover_context_window explicitly requires it
-        self.usage.context_limit = discover_context_window(
-            self.endpoint.base_url,
-            model=self.endpoint.model,
-            default=self.endpoint.ctx_size,
-            backend=self.backend
-        )
+        try:
+            self.usage.context_limit = discover_context_window(
+                self.endpoint.base_url,
+                model=self.endpoint.model,
+                default=self.endpoint.ctx_size,
+                backend=self.backend
+            )
+            #logger.warn(self.usage.context_limit)
+        except Exception as e:
+            logger.error(f"Error discovering context window: {e}")
+            logger.error(
+                f"Values: base_url={self.endpoint.base_url}, "
+                f"model={self.endpoint.model}, "
+                f"default={self.endpoint.ctx_size}, "
+                f"backend={self.backend}")
+            self.usage.context_limit = self.endpoint.ctx_size  # Fallback to default
         logger.info(f"Context window set to: {self.usage.context_limit}")
         self.context_limit = self.usage.context_limit
 
@@ -254,8 +312,10 @@ if __name__ == "__main__":
     from pprint import pprint
     from argparse import ArgumentParser
 
+
+    defaultbackend = os.getenv("AGENT_BACKEND", "llamacpp")
     parser = ArgumentParser()
-    parser.add_argument("--backend", type=str, default="koboldcpp", help="LLM backend to use (ollama, mistral, koboldcpp, llamacpp)")
+    parser.add_argument("--backend", type=str, default="defaultbackend", help="LLM backend to use (ollama, mistral, koboldcpp, llamacpp)")
     parser.add_argument("--model", type=str, default="", help="Model name to use (if applicable)")
     parser.add_argument("--port", type=int, default="5001", help="Port for the backend service (if applicable)")
     args=parser.parse_args()

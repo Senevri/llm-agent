@@ -88,6 +88,7 @@ def discover_ollama_context_window(base_url, model, default=4096):
 
 def discover_llama_context_window(base_url, model, default=4096):
     # NOTE: also  curl -s localhost:5001/props | jq -r .default_generation_settings.n_ctx
+    assert base_url.startswith("http"), "base_url must be a full URL, e.g. http://localhost:5001/v1"
     url = base_url.removesuffix("/v1") + "/props"
     response = requests.get(url, timeout=10)
     response.raise_for_status()

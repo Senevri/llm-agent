@@ -16,8 +16,9 @@ from dotenv import load_dotenv
 # Import internal modules from /agent
 import sys
 for path in "/agent", "/agent/skill_system":
-    if path not in sys.path:
+    if Path(path).exists() and path not in sys.path:
         sys.path.append(path)
+
 # Fix the import issue for skill_system internal imports
 if Path(__file__).parent not in sys.path:
     sys.path.append(str(Path(__file__).parent))
@@ -68,9 +69,6 @@ DEFAULT_CONTEXT_LIMIT = 100
 
 from datetime import datetime
 
-
-
-
 def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
     if not os.path.exists(path):
         return
@@ -85,6 +83,12 @@ def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
             )
 
 _load_dotenv()
+
+if not os.getenv("ALLOWED_PATHS"):
+    # Load from yaml
+    with open(Path.cwd() / "tool_config.yaml", "r", encoding="utf-8") as f:
+        conf = yaml.safe_load(f)
+    os.environ["ALLOWED_PATHS"] = ",".join(conf.allowed_paths)
 
 try:
     from prompt_generator import PromptGenerator, find_prompt_dir
