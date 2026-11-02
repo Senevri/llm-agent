@@ -346,7 +346,7 @@ if __name__ == "__main__":
                         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     curdir = str(Path(__file__).parent)
     if curdir not in sys.path:
-        sys.path.insert(curdir)
+        sys.path.insert(0, curdir)
     import prompt_generator
 
     parser = argparse.ArgumentParser()

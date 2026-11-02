@@ -76,18 +76,19 @@ class RawEndpoint(APIEndpoint):
             response = requests.get(f"{self.base_url}/models", timeout=5)
             response.raise_for_status()
             models_data = response.json().get("data", [])
-            self.model = [m.get("id") for m in models_data if "id" in m]
+            available_models = [m.get("id") for m in models_data if "id" in m]
+            self.model = next((m for m in available_models if m.startswith(self_model)), self.model)
         except Exception as e:
             logger.error(f"Failed to retrieve models from {self.base_url}: {e}")
         try:
-            url = self.base_url.rstrip("/v1")  + "/api/v1/model"
+            url = self.base_url.removesuffix("/v1")  + "/api/v1/model"
             current_model = requests.get(url)
             if current_model:
-                self.model = current_model.json().get("result", "")
+                self.model = current_model.json().get("result", self.model)
         except Exception as e:
             logger.error(f"Failed to retrieve current model from {self.base_url}: {e}")
         try:
-            url = self.base_url.rstrip("/v1")  + "/models"
+            url = self.base_url.removesuffix("/v1")  + "/models"
             models = requests.get(url)
             models = models.json()["models"]
             model_names = [model["name"] for model in models]
@@ -315,7 +316,7 @@ if __name__ == "__main__":
 
     defaultbackend = os.getenv("AGENT_BACKEND", "llamacpp")
     parser = ArgumentParser()
-    parser.add_argument("--backend", type=str, default="defaultbackend", help="LLM backend to use (ollama, mistral, koboldcpp, llamacpp)")
+    parser.add_argument("--backend", type=str, default=defaultbackend, help="LLM backend to use (ollama, mistral, koboldcpp, llamacpp)")
     parser.add_argument("--model", type=str, default="", help="Model name to use (if applicable)")
     parser.add_argument("--port", type=int, default="5001", help="Port for the backend service (if applicable)")
     args=parser.parse_args()
