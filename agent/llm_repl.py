@@ -39,7 +39,10 @@ from command_dispatcher import CommandDispatcher, parse_command
 from user_profile_manager import UserProfileManager, ContextSnapshot
 from log_queue import LogQueueHandler, LogQueueListener
 
-
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
 
 PROMPT_DIR = find_prompt_dir()
 
@@ -75,7 +78,7 @@ _load_dotenv()
 
 # --- Setup Logging ------------------------------------------------------------
 
-logger = logging.getLogger("LLMReplV2")
+logger = logging.getLogger("LLMReplV3")
 if os.getenv("DEBUG"):
     logger.setLevel(logging.DEBUG)
 else:
@@ -188,9 +191,24 @@ except Exception:
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
-    prompt_session = PromptSession(history=FileHistory(str(Path.cwd() / ".repl_history")))
+    # try to find history file
+    possible_paths = [
+        Path("/workspace"),
+        Path.cwd(),
+        Path(__file__).resolve().parent,
+        Path("./workspace")
+    ]
+    for path in possible_paths:
+        if path.exists():
+            history_path = path / ".repl_history"
+            break
+    else:
+        history_path = Path.cwd() / ".repl_history"
+    prompt_session = PromptSession(history=FileHistory(str(history_path)))
 except Exception:
+    logger.error("Failed to import prompt_toolkit")
     prompt_session = None
+
 
 # --- Error hierarchy ---------------------------------------------------------------
 class REPLError(Exception):
@@ -377,7 +395,7 @@ def help(repl, *args, **kwargs):
 
 def system_prompt_command(repl, *args, **kwargs):
     if len(args) < 1:
-        console.print(f"Current system prompt: {repl.system_prompt}")
+        console.print(f"[blue]Current system prompt[/blue]: {repl.system_prompt}")
         return
     with repl._state_lock:
         repl.base_system_prompt = args[0].strip()
@@ -440,6 +458,15 @@ def config(repl, *args, **kwargs):
         load_config(repl)
         console.print("[yellow]Config loaded.[/yellow]")
         return
+    elif "set" in args:
+        for k, v in kwargs.items():
+            if k in ["backend", "port", "model", "base_url"]:
+                repl.api.__dict__[k] = v
+            if k in ["n_ctx"]:
+                repl.api.update_context_limit(int(v))
+                repl._trim_context(int(v))
+
+
     else:
         console.print("[yellow]Config:[/yellow]")
         console.print(f"  - backend: {repl.backend}")
@@ -571,7 +598,8 @@ class LLMRepl:
 
         try:
             self.prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
-            self.current_role = "repl_windows" if platform.system() == "Windows" else "repl"
+            self.current_role = "repl"
+            self.prompt_gen.platform = platform.system().lower()
             self.base_system_prompt = self.prompt_gen.generate_prompt(self.current_role)
         except ImportError:
             prompt_gen = None
@@ -587,6 +615,8 @@ class LLMRepl:
 
         self.tool_registry = create_tool_registry(self)
         self.tool_schemas = self.tool_registry.get_all_schemas()
+
+
 
         with self._state_lock:
             self.system_prompt = self._build_system_prompt()
@@ -653,6 +683,12 @@ class LLMRepl:
         except Exception as e:
             logger.error(f"Error saving config: {e}")
 
+        # Save messages, ignore tools NOT IN PROFILE DUH tags:[save messages]
+        with self._state_lock:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(Path.cwd() / f"repl_messages.yaml-{stamp}", "w", encoding="utf-8") as f:
+                yaml.dump((msg for msg in self.messages if _role(msg) != "tool"), f)
+
         logger.info("LLMRepl shutdown complete.")
     def _build_system_prompt(self) -> str:
         profile_str = self.profile_manager.get_profile_string()
@@ -660,7 +696,7 @@ class LLMRepl:
         sections = [
             self.base_system_prompt,
             "### User Profile\n"
-            "The following is what is known about the user. Use this to personalize responses:\n"
+            "Wat is known about the user; Use this to personalize responses:\n"
             f"{profile_str}",
         ]
 
@@ -668,8 +704,8 @@ class LLMRepl:
         if skills_summary:
             sections.append(
                 "### Available Skills\n"
-                "Use the discovered skill catalog to identify relevant capabilities "
-                "and follow the applicable skill instructions when needed.\n\n"
+                "Use the discovered skill catalog to identify relevant capabilities, "
+                "follow the applicable skill instructions.\n\n"
                 f"{skills_summary}"
             )
         allowed_paths = self.tool_registry.get_allowed_paths()
@@ -679,10 +715,24 @@ class LLMRepl:
                f"{allowed_paths}"
             )
 
+        if self.api and self.client:
+            if len(str(sections)) > self.api.context_limit/2:
+                response = self._request_chat_completion(
+                    [{"role": "system", "content": "You are a helpful assistant. Provide a concise, condensed version of the prompt below."},
+                    {"role": "user", "content": "\n\n".join(sections)}],
+                    tools=None,
+                    tool_choice=None,
+                )
+                content = response.choices[0].message.content
+                if content:
+                    logger.warning (f"condensed system prompt to {content}")
+                    return content
+
+
         return "\n\n".join(sections)
 
 
-    def _trim_context(self) -> None:
+    def _trim_context(self, n_ctx:int=0) -> None:
         # Safe to call with or without holding _state_lock (RLock).
         with self._state_lock:
             if len(self.messages) <= MAX_CONTEXT_MESSAGES:
@@ -691,7 +741,16 @@ class LLMRepl:
             tail = self.messages[-keep_count:]
             while tail and _role(tail[0]) == "tool":
                 tail = tail[1:]
+            # Guesstimate tokens; not exact
+            if n_ctx:
+                while (len(str(self.messages).split(" ")) > n_ctx):
+                    tail = tail[1:]
+                    if not tail:
+                        break
+
             self.messages = [self.messages[0]] + tail
+        console.print(f"[dim]Trimmed: {self.api.usage.summary()}[/dim]")
+        console.print(f"[dim]Messages: {len(self.messages)}, characters {len(str(self.messages).split(' '))}[/dim]")
 
     def _normalize_messages(self, messages, provider):
         normalized = []
@@ -844,6 +903,18 @@ class LLMRepl:
                 pass
             return True
         logger.error(f"Fatal API error: {e}")
+        if "exceeds the available context size" in str(e):
+            n_ctx = getattr(e, "body", {}).get("error", {}).get("n_ctx")
+            if n_ctx:
+                self.api.update_context_limit(n_ctx)
+            else:
+                old_limit = self.api.context_limit
+                new_limit = self.api.context_limit // 2
+                self.api.update_context_limit(new_limit)
+                logger.warning(f"Failed to update context limit, reduced context from {old_limit} to {new_limit}.")
+            self._trim_context(self.api.context_limit)
+            self._consolidate_profile()
+
         with self._state_lock:
             if self.messages and _role(self.messages[-1]) == "user":
                 self.messages.pop()
@@ -1097,17 +1168,16 @@ class LLMRepl:
                     try:
                         if not self.loop_task:
                             if prompt_session is not None:
-                                user_input = prompt_session.prompt("\nUser > ")
+                                user_input = prompt_session.prompt("\nUser > ").strip()
                             else:
-                                user_input = input("\nUser > ")
-                            user_input = (user_input or "").strip()
+                                user_input = input("\nUser > ").strip()
                         elif isinstance(self.loop_task, SimpleLoopTask):
                             user_input = self.loop_task.get_next_input()
                             if user_input is None:
                                 self.loop_task = None
                                 continue
                             console.print(f"User(loop) > {user_input}\n")
-                        command, args, params, errors = parse_command(user_input)
+                        command, args, params, errors = parse_command(user_input) # type: ignore
 
                         if not user_input:
                             continue
@@ -1251,13 +1321,25 @@ REPL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 
 def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
     """Build a per-REPL registry from existing tool definitions and callables."""
+
+    # Load allowed paths from environment
+    if not os.getenv("ALLOWED_PATHS"):
+        # Load from yaml
+        conf_path = Path.cwd() / "tool_config.yaml"
+        if conf_path.is_file():
+            with open(conf_path, "r", encoding="utf-8") as f:
+                conf = yaml.safe_load(f)
+            os.environ["ALLOWED_PATHS"] = ",".join(conf["allowed_paths"])
+        else:
+            os.environ["ALLOWED_PATHS"] = str(Path.cwd().resolve())
+
     registry = ToolRegistry()
 
     # The definitions in agent_tools are the source of truth for the
     # core, internet, tmux, and context tools.
     definitions = BASE_TOOL_SCHEMAS
 
-    logger.debug(definitions)
+    logger.debug("Definitions: %s", definitions)
 
     # Bind REPL-specific functions to this instance.
     repl_functions = {
@@ -1337,6 +1419,17 @@ def _role(m: Any) -> str:
 
 # --- Entry point ------------------------------------------------------------------
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run LLM REPL")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--backend", default=DEFAULT_BACKEND, help="LLM backend to use")
+    args = parser.parse_args()
+
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled")
+
 
 
 
@@ -1346,7 +1439,7 @@ def main() -> int:
             base_url=os.getenv("LLM_REPL_BASE_URL", DEFAULT_BASE_URL),
             api_key=os.getenv("LLM_REPL_API_KEY", DEFAULT_API_KEY),
         )
-        repl.backend=os.getenv("LLM_REPL_BACKEND", DEFAULT_BACKEND)
+        repl.backend=os.getenv("LLM_REPL_BACKEND", args.backend)
     except Exception as e:
         logger.exception("Failed to initialize REPL")
         try:
@@ -1375,7 +1468,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     import tools
-    print(BASE_TOOL_SCHEMAS)
-    print(BASE_TOOL_MAP)
+    # logger.debug(BASE_TOOL_SCHEMAS)
+    # logger.debug(BASE_TOOL_MAP)
 
     raise SystemExit(main())

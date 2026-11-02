@@ -79,10 +79,6 @@ def read_file(
         if not p.is_file():
             return f"Error: not a regular file: {p}"
 
-        # Check filesize
-        if p.stat().st_size > max_chars:
-            return f"Error: file too large: {p}"
-
         # Read text, not a fixed number of bytes.
         with p.open("r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -161,6 +157,8 @@ def search_file(path: str, query: str) -> str:
     """Search for a string within a file and return matching lines with line numbers."""
     logger.info(f"Searching for '{query}' in file: {path}")
     try:
+        if not Path(path).is_file():
+            return f"Error: not a regular file: {path} were you trying to search a directory?"
         matches = []
         with open(path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f, 1):
@@ -177,10 +175,13 @@ def search_file(path: str, query: str) -> str:
     except Exception as e:
         return f"Error searching file: {str(e)}"
 
-def list_files(path: str = ".", filter: str = "*") -> str:
+def list_files(path: str = ".", filter: str = "*", recurse: bool = False) -> str:
     """List files and directories in a given path."""
     logger.info(f"Listing files in: {path}")
     try:
+        if recurse:
+            files = [str(p) for p in Path(path).rglob(filter)]
+            return "\n".join(files) if files else "Directory is empty."
         files = [str(p) for p in Path(path).glob(filter)]
         return "\n".join(files) if files else "Directory is empty."
     except Exception as e:
@@ -298,7 +299,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "search_file",
-            "description": "Search for a LITERAL substring (case-sensitive). No regex, no boolean operators, no 'OR'. For pattern/boolean search, use run_bash with rg.",
+            "description": "Search for a LITERAL substring (case-sensitive). No regex, no boolean operators, no 'OR'. For pattern/boolean search, use run_bash with rg (ripgrep).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -317,7 +318,8 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "Path to list, defaults to current directory"},
-                               "filter": {"type": "string", "description": "Filter files by name"}
+                               "filter": {"type": "string", "description": "Filter files by name"},
+                               "recurse": {"type": "boolean", "description": "Recurse into subdirectories"},
                                },
                 "required": []
             }

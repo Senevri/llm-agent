@@ -28,7 +28,7 @@ class CommandDispatcher:
 
         if entry is None:
             return None
-        logger.debug(entry)
+        logger.debug("Executing command: %s", entry)
         return entry["handler"](self.repl, *args, **kwargs)
 
     def load(self, commands_dict: Dict[str, Callable], command_definitions: Dict[str, Dict[str, Any]]):

@@ -6,6 +6,7 @@ import json
 import yaml
 import logging
 import argparse
+import platform
 from pathlib import Path
 from collections import Counter
 
@@ -86,16 +87,20 @@ _load_dotenv()
 
 if not os.getenv("ALLOWED_PATHS"):
     # Load from yaml
-    with open(Path.cwd() / "tool_config.yaml", "r", encoding="utf-8") as f:
-        conf = yaml.safe_load(f)
-    os.environ["ALLOWED_PATHS"] = ",".join(conf.allowed_paths)
-
+    conf_path = Path.cwd() / "tool_config.yaml"
+    if conf_path.is_file():
+        with open(conf_path, "r", encoding="utf-8") as f:
+            conf = yaml.safe_load(f)
+        os.environ["ALLOWED_PATHS"] = ",".join(conf.allowed_paths)
+    else:
+        os.environ["ALLOWED_PATHS"] = str(Path.cwd().resolve())
 try:
     from prompt_generator import PromptGenerator, find_prompt_dir
     # Find prompt directory
     PROMPT_DIR = find_prompt_dir()
 
     prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
+    prompt_gen.platform = platform.system().lower()
     current_role = "general"
 except ImportError as e:
     logging.warning(f"Failed to import prompt_generator: {e}")
@@ -118,7 +123,7 @@ recent_calls = deque(maxlen=6)
 MAX_IDENTICAL_CALLS = 3
 MAX_TOOL_CHARS = 12000
 
-
+logger = setup_logging("RunAgent")
 
 def check_tool_call(name, arguments):
     key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
@@ -228,7 +233,7 @@ def run_turns(
 def main():
     parser = argparse.ArgumentParser(description="Unified LLM Agent with Skill System")
     parser.add_argument("--backend", choices=BACKEND_MAP.keys(), required=True, help="LLM backend to use")
-    parser.add_argument("--system-prompt", default="system_prompt.md", help="Path to system prompt file")
+    parser.add_argument("--system-prompt", default="", help="Path to system prompt file")
     parser.add_argument("--user-prompt", default="user_prompt.md", help="Path to user prompt file")
     parser.add_argument("--model", help="Override model name")
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="Maximum agent turns")
@@ -244,8 +249,8 @@ def main():
 
     args = parser.parse_args()
 
-    logger = setup_logging(args.log_level, log_dir=Path(
-        os.getenv("AGENT_LOG_DIR", "./log/")))
+    # logger = setup_logging(args.log_level, log_dir=Path(
+    #     os.getenv("AGENT_LOG_DIR", "./log/")))
 
 
     if args.project:
@@ -273,10 +278,6 @@ def main():
     else:
         from skill_system.integration import SKILLS_ROOT
 
-
-
-
-
     logger.info(f"Registered tools: {tool_registry.list_tools()}")
 
     skills_summary = ""
@@ -298,7 +299,7 @@ def main():
     try:
         if args.port:
             logger.info(f"Using port override: {args.port}")
-            api.port = str(args.port)
+            api.port = int(args.port)
 
         client, default_model = api.get_client()
     except Exception as e:
@@ -308,9 +309,10 @@ def main():
     # Load Prompts
     try:
         current_role = args.role or "agent"
-        if args.role:
-            prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
-        if prompt_gen:
+        prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
+        prompt_gen.platform = platform.system().lower()
+        assert prompt_gen
+        if args.system_prompt == "" and prompt_gen:
             system_prompt = prompt_gen.generate_prompt(current_role)
             enabled_skills = prompt_gen.enabled_skills
             if not enabled_skills:
@@ -330,7 +332,15 @@ def main():
         logger.error(f"Required prompt file missing: {e}")
         return
 
-    logger.info(f"Using system prompt: \n{system_prompt}\n")
+    allowed_paths = tool_registry.get_allowed_paths()
+    if allowed_paths:
+        system_prompt += (
+            "### Allowed Paths\n"
+            f"{allowed_paths}"
+        )
+
+
+    logger.info(f"Using system prompt: \n{system_prompt[:250]}")
     logger.info(f"current role: {current_role}")
 
 

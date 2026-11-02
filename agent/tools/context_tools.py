@@ -42,6 +42,7 @@ def _update_context_file(file_key: str, content: str, mode: str = "append") -> s
     # Use absolute path if possible, or relative to workspace
     # For this environment, we assume files are in /workspace/
     path = WORKSPACE_DIR / filename
+    logger.info(f"Updating {path} with mode {mode}")
 
     try:
         if mode == "append":

@@ -14,7 +14,10 @@ MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
 
 EXECUTABLE = "/bin/bash"
 if platform.system() == "Windows":
-    EXECUTABLE = "C:\\Windows\\System32\\bash.exe"
+    #EXECUTABLE = "C:\\Windows\\System32\\bash.exe"
+    # userprofile = os.getenv('USERPROFILE')
+    # EXECUTABLE = f"{userprofile}\\scoop\\shims\\bash.exe"
+    EXECUTABLE = None
 
 
 def run_bash(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
@@ -44,7 +47,7 @@ def _run_bash(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> st
             return (f"Output truncated to {MAX_OUTPUT_LENGTH} characters:\n\n"
                     f"{output[:MAX_OUTPUT_LENGTH]} [...]\n{returncode_str}")
         # return output
-        return f"{output}\n[{returncode_str}]"
+        return f"{output}\n{returncode_str}"
     except subprocess.TimeoutExpired:
         return "Error: Command timed out."
     except Exception as e:

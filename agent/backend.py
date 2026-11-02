@@ -27,7 +27,7 @@ class APIEndpoint:
     def __init__(self, model: str = "", base_url: str = ""):
         self.model = model
         self.base_url = base_url
-
+        self.port = -1
         self.api_key = ""
         self.ctx_size = 4096  # Sensible default fallback
 
@@ -93,7 +93,7 @@ class RawEndpoint(APIEndpoint):
             models = models.json()["models"]
             model_names = [model["name"] for model in models]
             if self.model not in model_names:
-                print(f"Setting default model to {models[0]['name']}")
+                logger.info(f"Setting default model to {models[0]['name']}")
                 self.model = models[0]["model"]
         except Exception as e:
             logger.error(f"Failed to retrieve available models from {self.base_url}: {e}")
@@ -104,9 +104,10 @@ class RawEndpoint(APIEndpoint):
 class KoboldCppApiendpoint(APIEndpoint):
     def __init__(self, model: str = "", base_url: str = ""):
         super().__init__(model, base_url)
+        self.port = os.getenv("KOBOLD_PORT", "5001")
         if not base_url:
             host_ip = get_gateway_ip()
-            self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:5001/")
+            self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:{self.port}/")
         self.ctx_size = 8192
         self.api_key = "kobold"
         try:
@@ -137,20 +138,21 @@ class KoboldCppApiendpoint(APIEndpoint):
 class LlamaApiEndpoint(APIEndpoint):
     def __init__(self, model: str = "", base_url: str = ""):
         super().__init__(model, base_url)
-        port = os.getenv("LLAMA_PORT", "9964")
+        self.port = os.getenv("LLAMA_PORT", "9931")
         if not base_url:
             host_ip = get_gateway_ip()
             self.base_url = os.getenv(
                 "LLAMA_BASE_URL",
-                f"http://{host_ip}:{port}/v1"
+                f"http://{host_ip}:{self.port}/v1"
         ).rstrip("/")
         if os.getenv("DEBUG", "false").lower() == "true":
-            print(self.base_url)
+            logger.info(self.base_url)
         self.api_key = "llama"
         # Can be overwritten by args
         self.ctx_size = 32768
         # Empty means resolve the model from the server.
         self.model = model
+
 
     def get_context_size(self) -> int:
         url = self.base_url.removesuffix("/v1") + "/props"
@@ -180,7 +182,7 @@ class LlamaApiEndpoint(APIEndpoint):
             return
         model_names = [model["name"] for model in models]
         if self.model not in model_names:
-            print(f"Setting default model to {models[0]['name']}")
+            logger.info(f"Setting default model to {models[0]['name']}")
             self.model = models[0]["model"]
 
     def get_llama_models(self):
@@ -194,11 +196,11 @@ class LlamaApiEndpoint(APIEndpoint):
 class OllamaApiEndpoint(APIEndpoint):
     def __init__(self, model: str = "", base_url: str = ""):
         super().__init__(model, base_url)
-        port = os.getenv("OLLAMA_PORT", "11434")
+        self.port = os.getenv("OLLAMA_PORT", "11434")
 
         if not base_url:
             host_ip = get_gateway_ip()
-            self.base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
+            self.base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1")
         self.api_key = "ollama"
         self.ctx_size = 8192  # Ollama default, but will be overwritten by discovery
         self.model = self.model or "gemma4:31b-cloud"
@@ -249,10 +251,10 @@ class LLMBackend:
         self.model = os.getenv("AGENT_MODEL", "")
         logger.info(f"Backend: {backend}, Model: {self.model or '(default)'}")
         self.backends = BACKEND_MAP.keys()
-        self.port: Optional[int] = None
-        self.endpoint: Optional[APIEndpoint] = None
-        self.context_limit = -1
-        self.base_url=""
+        self.endpoint: Optional[APIEndpoint] = BACKEND_MAP[self.backend](model=self.model)
+        self.port: Optional[int] = self.endpoint.port
+        self.context_limit = self.endpoint.ctx_size
+        self.base_url=self.endpoint.base_url
         self.logger = logger
 
     def set_model(self, model: str):
@@ -272,6 +274,11 @@ class LLMBackend:
             self.endpoint.set_base_url(self.endpoint.base_url, self.port)
             logger.info(f"Adjusted base URL to: {self.endpoint.base_url}")
         return self.endpoint
+
+    def update_context_limit(self, context_limit: int):
+        self.context_limit = context_limit
+        self.usage.context_limit = context_limit
+        logger.info(f"Context window set to: {context_limit}")
 
 
     def get_client(self) -> tuple[OpenAI, str]:

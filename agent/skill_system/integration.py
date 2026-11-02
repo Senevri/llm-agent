@@ -15,6 +15,9 @@ from skill_system.skills_manager import SkillsManager
 
 # Configuration
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("SkillSystem")
+
 def get_skills_root():
     """Determine the root directory for skills."""
     # Check environment variable first
@@ -30,7 +33,7 @@ def get_skills_root():
             break
     else:
         path = Path.cwd() / ".skills"
-    print(f"Using  skills root: {path}")
+    logger.info(f"Using skills root: {path}")
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
 

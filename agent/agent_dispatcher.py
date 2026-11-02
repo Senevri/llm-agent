@@ -362,12 +362,12 @@ if __name__ == "__main__":
     if args.test:
         session_name = "agent-test"
     jid, info = dispatcher.dispatch_agent_job(args.task, session_name=session_name)
-    print(f"Dispatched {jid}. Session: {info['session_name']}\nWorkspace: {info['workspace']}")
+    logger.info(f"Dispatched {jid}. Session: {info['session_name']}\nWorkspace: {info['workspace']}")
 
     if args.test:
         seen, deadline = 0, time.time() + args.wait
         if info["log"].exists():
-            print(f"log exists at {info['log']}")
+            logger.info(f"log exists at {info['log']}")
         while True:
             running = dispatcher.is_running(info)
             if info["log"].exists():
@@ -375,9 +375,9 @@ if __name__ == "__main__":
                 print(text[seen:], end="")
                 seen = len(text)
             else:
-                print(tmux_tools.tmux_capture(info["session_name"]))
+                logger.info(tmux_tools.tmux_capture(info["session_name"]))
             if not running or time.time() > deadline:
                 break
             time.sleep(1)
-        print(f"\n[{_get_timestamp()}] Final: {'running' if running else 'exit ' + str(dispatcher.exit_code(info))}")
+        logger.info(f"\n[{_get_timestamp()}] Final: {'running' if running else 'exit ' + str(dispatcher.exit_code(info))}")
         # dispatcher.shutdown(stop_owned_jobs=True)

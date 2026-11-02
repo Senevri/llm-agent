@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import logging
+logger = logging.getLogger(__name__)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 def find_prompt_dir(paths:Optional[List[Path]] = None) -> Path:
@@ -37,13 +40,21 @@ class PromptGenerator:
         self.snippets_dir = self.prompts_dir / "snippets"
         self._profiles = self._load_profiles()
         self.enabled_skills = ["all"]
+        self.platform = "linux"
 
     def _load_profiles(self) -> Dict:
         if not self.profiles_path.exists():
             raise FileNotFoundError(f"Profiles file not found: {self.profiles_path}")
         with open(self.profiles_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-            return data.get("roles", {})
+            self.data = yaml.safe_load(f)
+            logger.debug("Profiles data: %s", self.data)
+            return self.data.get("roles", {})
+
+
+    def _get_platform_patches(self, platform_name: str):
+        return self.data.get("platforms", {}).get(platform_name, {}).get("patches", {})
+
+
 
     def reload_profiles(self):
         self._profiles = self._load_profiles()
@@ -59,12 +70,23 @@ class PromptGenerator:
         return list(self._profiles.keys())
 
     def generate_prompt(self, role_name: str) -> str:
+        logger.debug("--------", role_name, "------")
         if role_name not in self._profiles:
             raise ValueError(f"Unknown role: {role_name}")
 
         profile = self._profiles[role_name]
         snippets = profile.get("snippets", [])
-
+        patches = self._get_platform_patches(self.platform)
+        logger.debug("platform patches: %s, snippets: %s", patches, snippets)
+        if patches:
+            logger.debug("platform patches found:", patches)
+        for i, snippet_name in enumerate(snippets):
+            if snippet_name in patches:
+                #index matters
+                snippets.remove(snippet_name)
+                snippets.insert(i, patches[snippet_name])
+                logger.info (f"patched {snippet_name} with {patches[snippet_name]}")
+        logger.debug("snippets: %s", snippets)
         prompt_parts = []
         for snippet_name in snippets:
             snippet_path = self.snippets_dir / f"{snippet_name}.md"
