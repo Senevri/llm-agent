@@ -231,7 +231,7 @@ CONTEXT_TOOL_DEFINITION_MAP = {
     "update_memory": _create_definition("update_memory", "Update the agent's memory.md file. Use this for long-term knowledge and context."),
     "update_plan": _create_definition("update_plan", "Update the agent's plan.md file. Use this for the current high-level execution strategy."),
     "update_todo": _create_definition("update_todo", "Update the agent's todo.md file. Use this for tracking specific tasks."),
-    "tail_memory": _create_definition("tail_memory", "Get the last N lines of the agent's memory.md file.",
+    "get_recent_memory": _create_definition("get_recent_memory", "Get the last N lines of the agent's memory.md file.",
                                       properties={"n": {"type": "integer", "minimum": 1}}, required=["n"]),
     "compress_memory": {
         "type": "function",

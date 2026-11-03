@@ -6,7 +6,7 @@ import subprocess
 #import logging
 import json
 from pathlib import Path
-
+import platform
 
 try:
     import tools
@@ -73,6 +73,7 @@ def read_file(
     max_chars: int = DEFAULT_READ_CHARS,
 ) -> str:
     """Read a local UTF-8 text file with explicit paging metadata."""
+    path = _relative_paths_helper(path)
     try:
         p = Path(path).expanduser().resolve()
 
@@ -140,6 +141,7 @@ def read_file(
 def read_file_lines(path: str, start_line: int = 1, end_line: int = None) -> str:
     """Read specific lines of a file (1-indexed)."""
     logger.info(f"Reading lines {start_line} to {end_line} of file: {path}")
+    path = _relative_paths_helper(path)
     try:
         lines_read = []
         with open(path, 'r', encoding='utf-8') as f:
@@ -153,17 +155,35 @@ def read_file_lines(path: str, start_line: int = 1, end_line: int = None) -> str
     except Exception as e:
         return f"Error reading lines: {str(e)}"
 
+def find_file(path: str, filename: str) -> str:
+    return list_files(path, filename)
+
 def search_file(path: str, query: str) -> str:
     """Search for a string within a file and return matching lines with line numbers."""
+    path = _relative_paths_helper(path)
     logger.info(f"Searching for '{query}' in file: {path}")
-    try:
-        if not Path(path).is_file():
-            return f"Error: not a regular file: {path} were you trying to search a directory?"
+    def _search_file(path: str, query: str) -> str:
         matches = []
         with open(path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f, 1):
                 if query in line:
                     matches.append(f"{i}: {line}")
+        return matches
+
+    try:
+        matches = []
+        if not Path(path).is_file():
+            if Path(path).is_dir():
+                #let's help them out...
+                files = {file: _search_file(file, query) for file in _glob_files(path, recurse=True)}
+                for file in files:
+                    files[file] = _search_file(file, query)
+                result =  "\n".join([f"{file}:\n{matches}" for file, matches in files.items()]) or "No matches found."
+                if len(result) > MAX_OUTPUT_LENGTH:
+                    result = f"Too many matches. Truncated output:\n\n{result[:MAX_OUTPUT_LENGTH]}..."
+                return f"Searched files in {path}:\n{result}"
+                # return f"Error: not a regular file: {path} were you trying to search a directory?"
+            return f"Error: not a regular file: {path} were you trying to search a directory?"
 
         if not matches:
             return "No matches found."
@@ -175,14 +195,25 @@ def search_file(path: str, query: str) -> str:
     except Exception as e:
         return f"Error searching file: {str(e)}"
 
-def list_files(path: str = ".", filter: str = "*", recurse: bool = False) -> str:
+def _relative_paths_helper(path: str) -> str:
+    if not ("/" in path or "\\" in path):
+        path = str(Path(path).resolve())
+    return path
+
+def _glob_files(path, filterstr="*", recurse=False):
+    if recurse:
+        files = [str(p) for p in Path(path).rglob(filterstr)]
+    else:
+        files = [str(p) for p in Path(path).glob(filterstr)]
+    return files
+
+def list_files(path: str = ".", filterstr: str = "*", recurse: bool = False) -> str:
     """List files and directories in a given path."""
+
+    path = _relative_paths_helper(path)
     logger.info(f"Listing files in: {path}")
     try:
-        if recurse:
-            files = [str(p) for p in Path(path).rglob(filter)]
-            return "\n".join(files) if files else "Directory is empty."
-        files = [str(p) for p in Path(path).glob(filter)]
+        files = _glob_files(path, filterstr, recurse)
         return "\n".join(files) if files else "Directory is empty."
     except Exception as e:
         return f"Error listing files: {str(e)}"
@@ -223,6 +254,7 @@ def append_file(path: str, content: str) -> str:
         path, content, mode="a", message=f"Successfully appended {len(content)} chars to {path}")
 
 def write_or_append_file(path: str, content: str, mode: str = "a", message: str = None) -> str:
+    path = _relative_paths_helper(path)
     try:
         with open(path, mode, encoding="utf-8") as f:
             f.write(content)
@@ -246,18 +278,22 @@ TOOL_MAP = {
     "generate_cloud_image": generate_cloud_image
 }
 
+bash_description = "Execute a bash command. Use /tmp or /workspace for writes."
+if platform.system() == "Windows":
+    bash_description = "Execute a shell command. Use allowed directiories for writes."
+
 # Tool definitions for the LLM
 tools = [
     {
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Execute a bash command. Use /tmp or /workspace for writes.",
+            "description": bash_description,
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string"},
                                "executable": {"type": "string", "description": "default: bash"},
-                               "cwd": {"type": "string", "description": "default: /workspace"}},
+                               "cwd": {"type": "string", "description": f"default: {WORKSPACE_DIR}"},},
                 "required": ["command"]
             }
         }

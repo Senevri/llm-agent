@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError
 from openai_error_handling import classify_api_error, Action
 
 
@@ -40,6 +40,7 @@ from user_profile_manager import UserProfileManager, ContextSnapshot
 from log_queue import LogQueueHandler, LogQueueListener
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
@@ -138,6 +139,7 @@ except (ImportError, Exception) as e:
         return "Weather lookup is not available."
 
 try:
+    from tools import WORKSPACE_DIR
     from tools.agent_tools import TOOL_MAP as BASE_TOOL_MAP, tools as BASE_TOOL_SCHEMAS
 except Exception:
     BASE_TOOL_MAP = {}
@@ -385,7 +387,10 @@ def stub(repl, *args, **kwargs):
 
 def help(repl, *args, **kwargs):
     _, command_definitions = load_commands()
-    cmd_help = "\n".join([f"    /{k}: {v['help']}" for k, v in command_definitions.items()])
+    def get_aliases(v):
+        if "aliases" in v:
+            return f"Aliases: ({', '.join(v['aliases'])})"
+    cmd_help = "\n".join([f"    /{k}: {v['help']} or {get_aliases(v)}" for k, v in command_definitions.items()])
     help_text = textwrap.dedent(f"""
         Commands:
             /help - show this help
@@ -438,6 +443,14 @@ def tools_command(repl, *args, **kwargs):
         repl.skills_manager.discover_skills()
         repl.tool_registry = create_tool_registry(repl)
         console.print("[yellow]Tools reloaded.[/yellow]")
+        return
+    elif "off" in args:
+        repl.notools = True
+        console.print("[yellow]Tools disabled.[/yellow]")
+        return
+    elif "on" in args:
+        repl.notools = False
+        console.print("[yellow]Tools enabled.[/yellow]")
         return
     # console.print("[yellow]Available skills:[/yellow]")
     # console.print(repl.skills_manager.get_catalog_summary())
@@ -510,6 +523,8 @@ def history(repl, *args, **kwargs):
             content = content[:100] + "..."
         table.add_row(role, content)
     console.print(table)
+    if "save" in args:
+        repl.save_conversation_history()
 
 def role(repl, *args, **kwargs):
     with repl._state_lock:
@@ -575,6 +590,8 @@ class LLMRepl:
         self.backend="ollama"
         self.loop_task=None
         self.dispatcher=None
+        self.condensed_prompt = None
+        self.notools=False
 
         with _active_repls_lock:
             _active_repls += 1
@@ -644,8 +661,28 @@ class LLMRepl:
         self.shutdown()
         return False
 
+    def save_conversation_history(self): # save_messages
+        if not len(self.messages) >1 and any(_role(msg) != "tool" for msg in self.messages):
+            return
+        with self._state_lock:
+            logger.info("Saving conversation history...")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = Path.cwd() / f"repl_messages-{stamp}.yaml"
+            logger.info("Saving to %s", path)
+            with open(path, "w", encoding="utf-8") as f:
+                # Leave off system prompt
+                yaml.dump([msg for msg in self.messages[1:] if _role(msg) != "tool"], f)
+
     def shutdown(self) -> None:
         global _active_repls
+
+        try:
+            save_config(self)
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
+
+        self.save_conversation_history()
+
         if self._shutdown_done:
             return
         self._shutdown_done = True
@@ -678,16 +715,8 @@ class LLMRepl:
             if _active_repls == 0:
                 _stop_log_listener()
 
-        try:
-            save_config(self)
-        except Exception as e:
-            logger.error(f"Error saving config: {e}")
 
         # Save messages, ignore tools NOT IN PROFILE DUH tags:[save messages]
-        with self._state_lock:
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            with open(Path.cwd() / f"repl_messages.yaml-{stamp}", "w", encoding="utf-8") as f:
-                yaml.dump((msg for msg in self.messages if _role(msg) != "tool"), f)
 
         logger.info("LLMRepl shutdown complete.")
     def _build_system_prompt(self) -> str:
@@ -711,25 +740,27 @@ class LLMRepl:
         allowed_paths = self.tool_registry.get_allowed_paths()
         if allowed_paths:
             sections.append(
-                "### Allowed Paths\n"
+                "Allowed Paths. No access outside these paths + workspace\n"
                f"{allowed_paths}"
             )
 
         if self.api and self.client:
-            if len(str(sections)) > self.api.context_limit/2:
-                response = self._request_chat_completion(
-                    [{"role": "system", "content": "You are a helpful assistant. Provide a concise, condensed version of the prompt below."},
-                    {"role": "user", "content": "\n\n".join(sections)}],
-                    tools=None,
-                    tool_choice=None,
-                )
-                content = response.choices[0].message.content
-                if content:
-                    logger.warning (f"condensed system prompt to {content}")
-                    return content
-
-
-        return "\n\n".join(sections)
+            try:
+                if len(str(sections[:-1])) > self.api.context_limit/2:
+                    response = self._request_chat_completion(
+                        [{"role": "system", "content": "You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for max 2000 tokens."},
+                        {"role": "user", "content": "\n\n".join(sections[:-1])}],
+                        tools=None,
+                        tool_choice=None,
+                    )
+                    content = response.choices[0].message.content
+                    if content:
+                        sections = [content, sections[-1]]
+                        logger.warning (f"condensed system prompt to {content}")
+            except APIConnectionError:
+                logger.warning(f"{self.api.backend}: {self.api.base_url} is not reachable")
+        sections.append(f"workspace: {str(WORKSPACE_DIR)}")
+        return "\n".join(sections)
 
 
     def _trim_context(self, n_ctx:int=0) -> None:
@@ -737,6 +768,7 @@ class LLMRepl:
         with self._state_lock:
             if len(self.messages) <= MAX_CONTEXT_MESSAGES:
                 return
+            self.save_conversation_history()
             keep_count = MAX_CONTEXT_MESSAGES - 1
             tail = self.messages[-keep_count:]
             while tail and _role(tail[0]) == "tool":
@@ -766,6 +798,9 @@ class LLMRepl:
         return normalized
 
     def _request_chat_completion(self, messages: List[Dict[str, Any]], tools=None, tool_choice=None):
+        if self.notools:
+            tools = []
+            tool_choice = "none"
         return self.client.chat.completions.create(
             model=self.model,
             messages=self._normalize_messages(messages, self.backend),
@@ -828,8 +863,13 @@ class LLMRepl:
 
 
     def send_message(self, user_input: str) -> str:
+
         with self._state_lock:
             self.messages.append({"role": "user", "content": user_input})
+            if self.api.usage.last_prompt_tokens >= self.api.context_limit*0.85:
+                self._request_chat_completion(
+                    [{"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": "running low on context, update and compress memories and todos"}], tools=None, tool_choice=None)
             self._trim_context()
             current_messages = list(self.messages)
 
@@ -1201,14 +1241,19 @@ class LLMRepl:
                         loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
                                         if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
                         console.rule(f"{loop_remains}")
+                        self.agent_active = True
                         response = self.send_message(user_input)
-
+                        self.agent_active = False
                         # if response:
                         #     console.print(Panel(Markdown(response), title="Assistant"))
                     except EOFError:
                         console.print("[bold red]Goodbye![/bold red]")
                         break
                     except KeyboardInterrupt:
+                        if self.agent_active:
+                            logger.warning("Interrupted by user")
+                            self.agent_active = False
+                            continue
                         if self.loop_task:
                             try:
                                 self.loop_task.stop()
@@ -1409,13 +1454,6 @@ class JobManager:
 
     def list(self) -> str:
         return self.repl._list_jobs()
-
-
-def _role(m: Any) -> str:
-    if isinstance(m, dict):
-        return str(m.get("role", ""))
-    return str(getattr(m, "role", ""))
-
 
 # --- Entry point ------------------------------------------------------------------
 def main() -> int:

@@ -6,7 +6,7 @@ def setup_logging(name="UnifiedAgent", level="INFO", log_dir: Path | None = None
     log_dir = log_dir or Path.cwd() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = log_dir / f"agent_{stamp}.log"
+    log_path = log_dir / f"agent_{name}_{stamp}.log"
 
     fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     stream = logging.StreamHandler()
@@ -16,7 +16,7 @@ def setup_logging(name="UnifiedAgent", level="INFO", log_dir: Path | None = None
 
     logging.basicConfig(level=level, handlers=[stream, fileh], force=True)
     logger = logging.getLogger(name)
-    logger.info(f"Logging to {log_path}")
+    logger.info(f"{name} Logging to {log_path}")
     return logger
 
 def get_logger(name="UnifiedAgent", level="INFO", log_dir: Path | None = None) -> logging.Logger:
