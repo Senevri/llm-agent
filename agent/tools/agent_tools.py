@@ -176,8 +176,6 @@ def search_file(path: str, query: str) -> str:
             if Path(path).is_dir():
                 #let's help them out...
                 files = {file: _search_file(file, query) for file in _glob_files(path, recurse=True)}
-                for file in files:
-                    files[file] = _search_file(file, query)
                 result =  "\n".join([f"{file}:\n{matches}" for file, matches in files.items()]) or "No matches found."
                 if len(result) > MAX_OUTPUT_LENGTH:
                     result = f"Too many matches. Truncated output:\n\n{result[:MAX_OUTPUT_LENGTH]}..."

@@ -388,9 +388,12 @@ def stub(repl, *args, **kwargs):
 def help(repl, *args, **kwargs):
     _, command_definitions = load_commands()
     def get_aliases(v):
-        if "aliases" in v:
-            return f"Aliases: ({', '.join(v['aliases'])})"
-    cmd_help = "\n".join([f"    /{k}: {v['help']} or {get_aliases(v)}" for k, v in command_definitions.items()])
+        return  (
+            f" (aliases: {', '.join(v['aliases'])})"
+            if v.get("aliases") else ""
+            )
+
+    cmd_help = "\n".join([f"    /{k}: {v['help'] or get_aliases(v)}" for k, v in command_definitions.items()])
     help_text = textwrap.dedent(f"""
         Commands:
             /help - show this help
@@ -662,7 +665,7 @@ class LLMRepl:
         return False
 
     def save_conversation_history(self): # save_messages
-        if not len(self.messages) >1 and any(_role(msg) != "tool" for msg in self.messages):
+        if not any(_role(msg) != "tool" for msg in self.messages[1:]):
             return
         with self._state_lock:
             logger.info("Saving conversation history...")
@@ -674,7 +677,12 @@ class LLMRepl:
                 yaml.dump([msg for msg in self.messages[1:] if _role(msg) != "tool"], f)
 
     def shutdown(self) -> None:
+
         global _active_repls
+
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
 
         try:
             save_config(self)
@@ -682,10 +690,6 @@ class LLMRepl:
             logger.error(f"Error saving config: {e}")
 
         self.save_conversation_history()
-
-        if self._shutdown_done:
-            return
-        self._shutdown_done = True
 
         logger.info("Shutting down LLMRepl...")
 
