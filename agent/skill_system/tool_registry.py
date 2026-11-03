@@ -46,14 +46,15 @@ def resolve_allowed_path(path: str, roots: list[Path]) -> Path:
         except ValueError:
             continue
 
-    raise PathAccessError(f"Path outside permitted workspace: {path}")
+    raise PathAccessError(f"Path outside permitted workspace: {path}\nAllowed root paths: {roots}")
 
 class ToolRegistry:
     """Registry for managing and dispatching agent tools."""
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
         self._disabled_tools = set(t for t in os.getenv("DISABLED_TOOLS", "").split(",") if t)
-        self._allowed_paths = [Path(p) for p in os.getenv("ALLOWED_PATHS", str(Path.cwd())).split(",") if p]
+        self._allowed_paths = [Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(",") if p]
+        self._allowed_paths.append(Path.cwd())
 
     def get_allowed_paths(self) -> str:
         return "\n".join(str(p) for p in self._allowed_paths)
