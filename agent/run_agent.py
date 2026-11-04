@@ -25,7 +25,7 @@ if Path(__file__).parent not in sys.path:
     sys.path.append(str(Path(__file__).parent))
 
 from openai_error_handling import classify_api_error, Action
-from llm_utils import UsageTracker
+from llm_utils import UsageTracker, estimate_tokens
 from custom_logger import setup_logging
 from backend import LLMBackend, BACKEND_MAP
 
@@ -43,7 +43,29 @@ from tools.agent_tools import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def _load_dotenv(dotenv_path: Path = SCRIPT_DIR / ".env") -> None:
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                os.environ.setdefault(
+                    key.strip(), value.strip().strip('"').strip("'")
+                )
+    _load_dotenv()
+
 load_dotenv(SCRIPT_DIR / ".env")
+
+
+logger = setup_logging("RunAgent")
+
 
 # --- Tool Registration ---
 def register_core_tools():
@@ -70,20 +92,6 @@ DEFAULT_CONTEXT_LIMIT = 100
 
 from datetime import datetime
 
-def _load_dotenv(path: Path = SCRIPT_DIR / ".env") -> None:
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(
-                key.strip(), value.strip().strip('"').strip("'")
-            )
-
-_load_dotenv()
 
 if not os.getenv("ALLOWED_PATHS"):
     # Load from yaml
@@ -91,7 +99,8 @@ if not os.getenv("ALLOWED_PATHS"):
     if conf_path.is_file():
         with open(conf_path, "r", encoding="utf-8") as f:
             conf = yaml.safe_load(f)
-        os.environ["ALLOWED_PATHS"] = ",".join(conf.allowed_paths)
+        logger.info(conf)
+        os.environ["ALLOWED_PATHS"] = ",".join(conf.get("allowed_paths",[]))
     else:
         os.environ["ALLOWED_PATHS"] = str(Path.cwd().resolve())
 try:
@@ -109,21 +118,28 @@ except ImportError as e:
 
 def _role(m) -> str:
     return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
-def _trim_messages(messages, limit: int):
+
+def _trim_messages(messages, limit: int, n_ctx: int):
     if len(messages) <= limit + 2:
         return messages
     head = messages[:2]  # system + original task
     tail = messages[-limit:]
-    while tail and _role(tail[0]) == "tool":
+    tokens_in_msg = estimate_tokens(messages)
+    # more aggressive trimming
+    while (tail and _role(tail[0]) == "tool"
+        or tokens_in_msg > n_ctx):
         tail = tail[1:]
-    return head + tail
+    new_message_list = head + tail
+    trimmed_count = len(messages) - len(new_message_list) + 2
+    logger.info(f"trimmed {trimmed_count} messages")
+    logger.info(f"Messages:\m\n{messages[2:trimmed_count+2]}")
+
+    return new_message_list
 
 from collections import deque
 recent_calls = deque(maxlen=6)
 MAX_IDENTICAL_CALLS = 3
 MAX_TOOL_CHARS = 12000
-
-logger = setup_logging("RunAgent")
 
 def check_tool_call(name, arguments):
     key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
@@ -141,6 +157,9 @@ def run_turns(
     """Run one user-facing assistant turn, executing safe tools as needed."""
     empty_streak = 0
 
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
     for turn in range(max_turns):
         if sleep_time > 0:
             time.sleep(sleep_time)
@@ -148,7 +167,8 @@ def run_turns(
         if api.usage.context_pct > 90:
             logger.warning(f"context >90% — trimming to {api.context_limit}")
             # fixed bug: was args.context_limit.
-            messages = _trim_messages(messages, api.context_limit)
+            _trim_messages(messages, api.context_limit)
+            # Could compress and insert...
 
         try:
             response = client.chat.completions.create(
@@ -159,6 +179,11 @@ def run_turns(
             )
             api.usage.record(response.usage, turn=len(messages))
             logger.info(f"usage: {api.usage.summary()}")
+        except KeyboardInterrupt:
+            clarification = input("User: > ")
+            if clarification in ("q", "quit", "exit"):
+                break
+            messages.append({"role": "user", "content": str(clarification)})
         except Exception as e:
             action, delay = classify_api_error(e)
             if action is Action.ABORT:
