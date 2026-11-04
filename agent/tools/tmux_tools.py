@@ -6,6 +6,7 @@ No import side effects: importing this module never starts a tmux server.
 import logging
 import platform
 import os
+import sys
 import re
 import subprocess
 import time
@@ -18,6 +19,9 @@ TMUX_SOCKET = os.getenv("AGENT_TMUX_SOCKET", "agent")
 TMUX_PREFIX = os.getenv("AGENT_TMUX_PREFIX", "agent-")
 MAX_CAPTURE = int(os.getenv("AGENT_TMUX_MAX_CAPTURE", "20000"))
 
+src_dir = os.path.dirname(__file__)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
 def _tmux(*args, timeout=10):
     """Run a tmux command on the agent socket. Argv only, never shell=True."""
@@ -30,6 +34,8 @@ def _tmux(*args, timeout=10):
 
 
 def _validate_name(name):
+    if platform.system()=="Windows":
+        return name
     """Validate a tmux session name. Raises ValueError on failure."""
     if not isinstance(name, str) or not name:
         raise ValueError("Session name must be a non-empty string.")
@@ -320,6 +326,9 @@ tmux_kill_tool_definition = {
     },
 }
 
+def get_returncode(output):
+    return int(output.split("\n")[-1].strip("[]").split("=")[1])
+
 def get_tools():
     if platform.system() == "Windows":
         # TODO: This is a hack.
@@ -327,12 +336,13 @@ def get_tools():
         # logger.warning("Tmux tools are not supported on Windows. All tmux tool calls will fail.")
         from bash_tools import run_bash, run_command
         tmux_version = run_bash("tmux --version")
-        returncode = run_command(r"echo %errorcode%")
+        returncode = get_returncode(run_command(r"echo $?"))
+        logger.debug(f"returncode: {returncode}, tmux_version: {tmux_version}")
         if not (int(returncode) == 0 and "tmux" in tmux_version):
             logger.warning("Tmux tools are not supported on Windows. All tmux tool calls will fail.")
             TMUX_TOOL_MAP = {}
             TMUX_TOOL_DEFINITION_MAP = {}
-        return TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
+            return TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
 
     TMUX_TOOL_MAP = {
         "tmux_create_session": tmux_create_session,
@@ -352,3 +362,34 @@ def get_tools():
     return TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
 
 TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP = get_tools()
+
+
+def main():
+    import sys
+    from pathlib import Path
+    from time import sleep
+    project_root_dir = Path(__file__).resolve().parent.parent
+
+    if project_root_dir not in sys.path:
+        sys.path.append(str(project_root_dir))
+
+    #mux_session = tmux_create_session("test")
+    tmux_session = tmux_create_session("agent-test-124", "timeout 30 & ", str(project_root_dir))
+    print(tmux_session)
+    for t in [
+        tmux_send(tmux_session, "ls"),
+        tmux_send(tmux_session, "ls", wait=1),
+        tmux_send(tmux_session, "pwd", wait=1),
+        tmux_kill(tmux_session)
+        ]:
+        print(t); sleep(1)
+
+
+
+
+
+
+
+
+if __name__ == "__main__":
+    main()

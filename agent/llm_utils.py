@@ -19,6 +19,19 @@ except ImportError:
     def estimate_tokens(messages: list) -> int:
         return sum(size_bytes(m) for m in messages) // 4
 
+def normalize_messages( messages, provider):
+    normalized = []
+
+    for message in messages:
+        msg = dict(message)
+
+        if provider == "mistral":
+            msg.pop("reasoning_content", None)
+
+        normalized.append(msg)
+
+    return normalized
+
 @dataclass
 class UsageTracker:
     prompt_tokens: int = 0

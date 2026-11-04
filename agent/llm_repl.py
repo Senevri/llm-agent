@@ -62,7 +62,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 # Make /agent importable, mirroring run_agent.py.
 sys.path.insert(0, str(AGENT_DIR))
 
-from llm_utils import size_bytes, estimate_tokens
+from llm_utils import size_bytes, estimate_tokens, normalize_messages
 from profileworker import ProfileWorker
 
 def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
@@ -85,35 +85,31 @@ _load_dotenv()
 
 # --- Setup Logging ------------------------------------------------------------
 
-logger = logging.getLogger("LLMReplV3")
-if os.getenv("DEBUG"):
-    logger.setLevel(logging.DEBUG)
-else:
-    logger.setLevel(logging.WARNING)
-logger.propagate = False
-_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-try:
-    _fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
-    _fh.setFormatter(_fmt)
-    logger.addHandler(_fh)
-except Exception as e:
-    sys.stderr.write(f"Warning: could not create log file handler: {e}\n")
+# --- Setup Logging (Unified & Thread-Safe) ------------------------------------
+from custom_logger import setup_logging
 
+# 1. Initialize the robust wrapped logger (handles file + basic stream)
+logger = setup_logging("LLMReplV3", level="DEBUG" if os.getenv("DEBUG") else "WARNING", log_dir=Path.cwd() / "logs")
+
+# 2. OPTIONAL BUT RECOMMENDED: Remove the standard StreamHandler to prevent
+# duplicate console prints, since the Queue Listener will handle console output safely.
+for h in list(logger.handlers):
+    if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+        logger.removeHandler(h)
+
+# 3. Add the thread-safe queue handler for console output (prevents prompt_toolkit garbling)
 _log_queue = queue.Queue()
 _log_handler = LogQueueHandler(_log_queue)
-_log_handler.setFormatter(_fmt)
-logger.addHandler(_log_handler)
-_log_listener = LogQueueListener(_log_queue, _fmt)
+_log_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+_log_handler.setFormatter(_log_fmt)
+logger.addHandler(_log_handler)  # __getattr__ cleanly delegates this to the underlying logger
+
+# 4. Start the listener
+_log_listener = LogQueueListener(_log_queue, _log_fmt)
 try:
     _log_listener.start()
 except Exception as e:
     sys.stderr.write(f"Warning: could not start log listener: {e}\n")
-
-from custom_logger import setup_logging
-
-_active_repls = 0
-_active_repls_lock = threading.Lock()
-
 
 def _stop_log_listener() -> None:
     try:
@@ -122,10 +118,12 @@ def _stop_log_listener() -> None:
     except Exception:
         pass
 
-
+# 5. Register cleanup
 atexit.register(_stop_log_listener)
 
 
+_active_repls = 0
+_active_repls_lock = threading.Lock()
 
 tool_logger=None
 
@@ -889,13 +887,17 @@ class LLMRepl:
                 logger.warning(f"{self.api.backend}: {self.api.base_url} is not reachable")
         sections.append(f"workspace: {str(WORKSPACE_DIR)}")
         return "\n".join(sections)
+
     def ai_compress(self, sections, max_tokens=2000):
-        response = self._request_chat_completion(
-            [{"role": "system", "content": f"You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for max {max_tokens} tokens."},
+        task_message = [
+            {"role": "system",
+             "content": f"You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for max {max_tokens} tokens."},
             {"role": "user", "content": "\n\n".join(sections[:-1])}],
-            tools=None,
-            tool_choice=None,
-        )
+
+        response =  self.client.chat.completions.create(
+                model=self.model,
+                messages=normalize_messages(task_message, self.backend)
+            )
         return response.choices[0].message.content
 
 
@@ -967,19 +969,6 @@ class LLMRepl:
         console.print(
             f"[dim]Messages: {len(self.messages)}, characters {chars}, est. tokens: {token_est}[/dim]"
         )
-
-    def _normalize_messages(self, messages, provider):
-        normalized = []
-
-        for message in messages:
-            msg = dict(message)
-
-            if provider == "mistral":
-                msg.pop("reasoning_content", None)
-
-            normalized.append(msg)
-
-        return normalized
 
     def _request_chat_completion(self, messages: List[Dict[str, Any]], tools=None, tool_choice=None):
         if self.notools:

@@ -25,7 +25,7 @@ if Path(__file__).parent not in sys.path:
     sys.path.append(str(Path(__file__).parent))
 
 from openai_error_handling import classify_api_error, Action
-from llm_utils import UsageTracker, estimate_tokens
+from llm_utils import UsageTracker, estimate_tokens, normalize_messages
 from custom_logger import setup_logging
 from backend import LLMBackend, BACKEND_MAP
 
@@ -116,145 +116,192 @@ except ImportError as e:
     prompt_gen = None
 
 
-def _role(m) -> str:
-    return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
-
-def _trim_messages(messages, limit: int):
+def _trim_messages(messages:list, limit: int) -> dict:
     if len(messages) <= limit + 2:
-        return messages
+        return {"messages": messages}  # no trimming needed, return original messages
     head = messages[:2]  # system + original task
     tail = messages[-limit:]
     tokens_in_msg = estimate_tokens(messages)
     # more aggressive trimming
-    while (tail and _role(tail[0]) == "tool"
+    while (
+        len(tail) > 2
+        and tail and _role(tail[0]) == "tool"
         or tokens_in_msg > limit
         ):
         tail = tail[1:]
+        tokens_in_msg = estimate_tokens(messages)
     new_message_list = head + tail
-    trimmed_count = len(messages) - len(new_message_list) + 2
-    logger.info(f"trimmed {trimmed_count} messages")
-    logger.info(f"Messages:\m\n{messages[2:trimmed_count+2]}")
+    removed_count = len(messages) - len(new_message_list) + 2
+    trimmed_msgs = messages[2:removed_count+2]
+    logger.info(f"trimmed {removed_count} messages")
+    def format_for_compression(msg: dict) -> str:
+        if msg.get("role") == "tool":
+            return f"[TOOL RESULT: {msg.get('name', 'unknown')} (ID: {msg.get('tool_call_id')})]\n{msg.get('content')}"
+        return f"{msg['role']}: {msg.get('content', '')}"
 
-    return new_message_list
+    sections = [format_for_compression(c) for c in trimmed_msgs]
+
+    logger.info(f"Messages:\m\n{trimmed_msgs}")
+
+    return {
+        "messages": new_message_list,
+        "removed_sections": sections
+        }
+
+def _role(m) -> str:
+    return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
+
+
 
 from collections import deque
-recent_calls = deque(maxlen=6)
 MAX_IDENTICAL_CALLS = 3
 MAX_TOOL_CHARS = 12000
 
-def check_tool_call(name, arguments):
-    key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
-    recent_calls.append(key)
-    if recent_calls.count(key) > MAX_IDENTICAL_CALLS:
-        return (False,
-                f"Loop detected: {name} repeated with the same arguments. "
-                "Do not repeat this call. Use a different approach or answer "
-                "from the evidence already gathered.")
-    return True, None
+class LLMAgent:
+    def __init__(self, client, api, max_turns=DEFAULT_MAX_TURNS, logger=None, sleep_time=0):
+        self.client = client
+        self.api = api
+        self.max_turns = max_turns
+        self.sleep_time = sleep_time
+        self.logger = setup_logging("LLMAgent")
+        self.recent_calls = deque(maxlen=6)
 
-def run_turns(
-        client, api, messages: list,
-        max_turns: int = DEFAULT_MAX_TURNS, logger=None, sleep_time=0):
-    """Run one user-facing assistant turn, executing safe tools as needed."""
-    empty_streak = 0
+    def run_turns (self, messages: list, **kwargs):
+        return self._run_turns(self.client, self.api, messages, **kwargs)
 
-    if logger is None:
-        logger = logging.getLogger(__name__)
+    def ai_compress(self, sections, max_tokens=2000):
+        task_message = [
+            {"role": "system",
+             "content": f"You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for max {max_tokens} tokens."},
+            {"role": "user", "content": "\n\n".join(sections[:-1])}]
 
-    for turn in range(max_turns):
-        if sleep_time > 0:
-            time.sleep(sleep_time)
-
-        if api.usage.context_pct > 90:
-            logger.warning(f"context >90% — trimming to {api.context_limit}")
-            # fixed bug: was args.context_limit.
-            _trim_messages(messages, api.context_limit)
-            # Could compress and insert...
-
-        try:
-            response = client.chat.completions.create(
-                model=api.model,
-                messages=messages,
-                tools=tool_registry.get_all_schemas(),
-                tool_choice="auto"
+        response =  self.client.chat.completions.create(
+                model=self.api.model,
+                messages=normalize_messages(task_message, self.api.backend)
             )
-            api.usage.record(response.usage, turn=len(messages))
-            logger.info(f"usage: {api.usage.summary()}")
-        except KeyboardInterrupt:
-            clarification = input("User: > ")
-            if clarification in ("q", "quit", "exit"):
-                break
-            messages.append({"role": "user", "content": str(clarification)})
-        except Exception as e:
-            action, delay = classify_api_error(e)
-            if action is Action.ABORT:
-                logger.error(f"Aborting on: {e}")
-                raise SystemExit(1)
-            logger.warning(f"{action.name} in {delay}s: {e}")
-            time.sleep(delay)
-            continue
+        return response.choices[0].message.content
 
-        choice = response.choices[0]
-        msg = choice.message
-        finish_reason = choice.finish_reason
 
-        if not msg.tool_calls and not msg.content:
-            empty_streak += 1
-            logger.warning(f"Empty response (finish_reason={finish_reason}, streak={empty_streak})")
-            if empty_streak >= 4:
-                logger.error("Model stuck returning empty responses; aborting.")
-                break
-            messages.append({
-                "role": "user",
-                "content": "Continue the task, or if it is complete, respond with your final summary."
-            })
-            continue
 
+    def check_tool_call(self, name, arguments):
+        key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+        self.recent_calls.append(key)
+        if self.recent_calls.count(key) > MAX_IDENTICAL_CALLS:
+            return (False,
+                    f"Loop detected: {name} repeated with the same arguments. "
+                    "Do not repeat this call. Use a different approach or answer "
+                    "from the evidence already gathered.")
+        return True, None
+
+
+
+    def _run_turns(self,
+            client, api, messages: list,
+            max_turns: int = DEFAULT_MAX_TURNS, logger=None, sleep_time=0):
+        """Run one user-facing assistant turn, executing safe tools as needed."""
         empty_streak = 0
-        messages.append(msg)
-        if msg.content:
-            logger.info(msg.content)
-        if msg.tool_calls:
-            for tool_call in msg.tool_calls:
-                # TODO: refactor
-                func_name = tool_call.function.name
-                try:
-                    tool_args = json.loads(tool_call.function.arguments)
-                    tool_check = check_tool_call(func_name, tool_args)
-                    if tool_check[0] is False:
-                        logger.error(tool_check[1])
-                        result = tool_check[1]
-                    else:
-                        result = tool_registry.execute(func_name, **tool_args)
 
-                    if result is None:
-                        logger.error("Tool %s returned None", func_name)
-                        result = "Error: tool returned no result (None)."
-                    elif not isinstance(result, str):
-                        result = str(result)
-                    if len(result) > MAX_TOOL_CHARS:
-                        result = (result[:MAX_TOOL_CHARS]
-                                  + f"\n[truncated {len(result) - MAX_TOOL_CHARS} chars; "
-                                  "use read_file_lines or search_file for specific ranges]")
+        logger = logger or self.logger
 
-                    logger.info("Tool %s output: %.100s...", func_name, result)
+        for turn in range(max_turns):
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
-                except Exception as e:
-                    logger.exception("Tool %s failed", func_name)
-                    result = f"Error executing tool {func_name}: {e}"
+            limit = 75.0
+            if api.usage.context_pct > limit:
+                logger.warning(f"context > {limit}% — trimming to {int(api.context_limit*0.8)} messages")
+                # fixed bug: was args.context_limit.
+                trimmed = _trim_messages(messages, int(api.context_limit*0.8))
 
+                messages = trimmed.get("messages", [])
+                # Could compress and insert...
+                message = self.ai_compress(trimmed.get("removed_sections"))
+                messages.insert(2, {"role": "system", "content": message})
+
+            try:
+                response = client.chat.completions.create(
+                    model=api.model,
+                    messages=messages,
+                    tools=tool_registry.get_all_schemas(),
+                    tool_choice="auto"
+                )
+                api.usage.record(response.usage, turn=len(messages))
+                logger.info(f"usage: {api.usage.summary()}")
+            except KeyboardInterrupt:
+                clarification = input("User: > ")
+                if clarification in ("q", "quit", "exit"):
+                    break
+                messages.append({"role": "user", "content": str(clarification)})
+            except Exception as e:
+                action, delay = classify_api_error(e)
+                if action is Action.ABORT:
+                    logger.error(f"Aborting on: {e}")
+                    raise SystemExit(1)
+                logger.warning(f"{action.name} in {delay}s: {e}")
+                time.sleep(delay)
+                continue
+
+            choice = response.choices[0]
+            msg = choice.message
+            finish_reason = choice.finish_reason
+
+            if not msg.tool_calls and not msg.content:
+                empty_streak += 1
+                logger.warning(f"Empty response (finish_reason={finish_reason}, streak={empty_streak})")
+                if empty_streak >= 4:
+                    logger.error("Model stuck returning empty responses; aborting.")
+                    break
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": func_name,
-                    "content": result
+                    "role": "user",
+                    "content": "Continue the task, or if it is complete, respond with your final summary."
                 })
+                continue
 
-        elif msg.content:
-            break
-    else:
-        logger.error("Max turns reached. Aborting.")
-    return messages
+            empty_streak = 0
+            messages.append(msg)
+            if msg.content:
+                logger.info(msg.content)
+            if msg.tool_calls:
+                for tool_call in msg.tool_calls:
+                    # TODO: refactor
+                    func_name = tool_call.function.name
+                    try:
+                        tool_args = json.loads(tool_call.function.arguments)
+                        tool_check = check_tool_call(func_name, tool_args)
+                        if tool_check[0] is False:
+                            logger.error(tool_check[1])
+                            result = tool_check[1]
+                        else:
+                            result = tool_registry.execute(func_name, **tool_args)
+
+                        if result is None:
+                            logger.error("Tool %s returned None", func_name)
+                            result = "Error: tool returned no result (None)."
+                        elif not isinstance(result, str):
+                            result = str(result)
+                        if len(result) > MAX_TOOL_CHARS:
+                            result = (result[:MAX_TOOL_CHARS]
+                                    + f"\n[truncated {len(result) - MAX_TOOL_CHARS} chars; "
+                                    "use read_file_lines or search_file for specific ranges]")
+
+                        logger.info("Tool %s output: %s...", func_name, result)
+
+                    except Exception as e:
+                        logger.exception("Tool %s failed", func_name)
+                        result = f"Error executing tool {func_name}: {e}"
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": func_name,
+                        "content": result
+                    })
+
+            elif msg.content:
+                break
+        else:
+            logger.error("Max turns reached. Aborting.")
+        return messages
 
 def main():
     parser = argparse.ArgumentParser(description="Unified LLM Agent with Skill System")
@@ -384,8 +431,9 @@ def main():
         logger.info("Test run mode enabled. Exiting...")
         exit(0)
 
+    agent = LLMAgent(client, api, max_turns=args.max_turns, logger=logger, sleep_time=sleep_time)
     logger.info(f"--- Starting Agent Loop via {args.backend} ({api.model}) ---")
-    run_turns(client, api, messages, max_turns=args.max_turns, logger=logger, sleep_time=sleep_time)
+    agent.run_turns(messages)
     logger.info("--- Agent Loop Complete ---")
     path = Path.cwd() / "agent_config.yaml"
     with open(path, "w", encoding="utf-8") as f:

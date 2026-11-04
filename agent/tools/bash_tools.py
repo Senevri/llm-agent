@@ -8,8 +8,14 @@ from typing import List, Union
 import subprocess
 import logging
 import os
+import sys
 import platform
 from pathlib import Path
+
+project_root = Path(__file__).parent.parent
+if project_root not in sys.path:
+    sys.path.append(str(project_root))
+
 from tools import WORKSPACE_DIR
 import re
 
@@ -119,6 +125,7 @@ def run_command(
             timeout=TOOL_TIMEOUT,
             cwd=str(cwd)
         )
+
         return _format_subprocess_result(result)
 
     except subprocess.TimeoutExpired:

@@ -12,5 +12,7 @@ Always consider edge cases and provide robust error handling.
 - Prefer boring, inspectable code. Clever abstractions and tiny functions aren't automatically improvements.
 - Test-driven development, when possible, if test is not trivial. Write testable code.
 
-## Agent develoment
-- as /agent is read-only, /workspace/agent-dev is the development directory for agentic work.
+# Care
+Before modifying an existing function, identify its callers, inputs, outputs, side effects, and existing behavioural assumptions. Preserve those unless the task explicitly requires changing them.
+
+Prefer the smallest change that satisfies the requirement. Do not rewrite adjacent functionality merely because it appears improvable.
