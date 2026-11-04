@@ -119,7 +119,7 @@ except ImportError as e:
 def _role(m) -> str:
     return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
 
-def _trim_messages(messages, limit: int, n_ctx: int):
+def _trim_messages(messages, limit: int):
     if len(messages) <= limit + 2:
         return messages
     head = messages[:2]  # system + original task
@@ -127,7 +127,8 @@ def _trim_messages(messages, limit: int, n_ctx: int):
     tokens_in_msg = estimate_tokens(messages)
     # more aggressive trimming
     while (tail and _role(tail[0]) == "tool"
-        or tokens_in_msg > n_ctx):
+        or tokens_in_msg > limit
+        ):
         tail = tail[1:]
     new_message_list = head + tail
     trimmed_count = len(messages) - len(new_message_list) + 2
