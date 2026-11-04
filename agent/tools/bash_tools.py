@@ -3,7 +3,7 @@ import subprocess
 import logging
 import os
 import platform
-
+from pathlib import Path
 from tools import WORKSPACE_DIR
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -19,6 +19,21 @@ if platform.system() == "Windows":
     # EXECUTABLE = f"{userprofile}\\scoop\\shims\\bash.exe"
     EXECUTABLE = None
 
+def find_bash():
+    candidates = [
+        EXECUTABLE
+    ]
+    userprofile = os.getenv("USERPROFILE")
+    if userprofile and Path(userprofile).exists():
+        candidates.append(str(Path(userprofile) / "scoop" / "shims" / "bash.exe"))
+
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return ""
+
+def run_cmd(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
+    return run_command(command, executable=executable, cwd=cwd)
 
 def run_bash(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
     return _run_bash(command, executable=executable, cwd=cwd)
@@ -26,10 +41,18 @@ def run_bash(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str
 def _run_bash(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
     """Execute a bash command inside the container environment."""
     logger.info(f"Executing bash: {command}")
+    bash = find_bash()
+    if platform.system() == "Windows" and bash:
+        command = bash + " -c " + fr'"{command}"'
+        executable = None
+    else:
+        executable = bash
+    return run_command(command, executable=executable, cwd=cwd)
+def run_command(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
     try:
         result = subprocess.run(
             command,
-            shell=True,
+            shell=False,
             executable=executable,
             capture_output=True,
             text=True,
