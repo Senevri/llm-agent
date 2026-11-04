@@ -196,8 +196,8 @@ def search_file(path: str, query: str) -> str:
 
 def _relative_paths_helper(path: str) -> str:
     if not ("/" in path or "\\" in path):
-        if path.startswith("."):
-            path = Path(path).resolve()
+        # if path.startswith(".\\") or path.startswith(r"./"):
+        #     path = path.lstrip("./\\")
         path = str(Path(path).resolve())
     return path
 
