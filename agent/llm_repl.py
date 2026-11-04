@@ -1,6 +1,7 @@
 #!/usr/local/bin/python
 
 import os
+import inspect
 import sys
 import platform
 import shlex
@@ -9,6 +10,7 @@ import logging
 import tempfile
 from datetime import timedelta, datetime
 import subprocess
+import secrets
 import textwrap
 import time
 import queue
@@ -27,7 +29,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 
-from openai import OpenAI, APIConnectionError
+from openai import OpenAI, APIConnectionError, APIError as AE, InternalServerError
 from openai_error_handling import classify_api_error, Action
 
 
@@ -38,6 +40,7 @@ from loop_task import LoopTask, SimpleLoopTask, loop
 from command_dispatcher import CommandDispatcher, parse_command
 from user_profile_manager import UserProfileManager, ContextSnapshot
 from log_queue import LogQueueHandler, LogQueueListener
+from background_util import run_in_background, BackgroundProcess
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpx2").setLevel(logging.WARNING)
@@ -58,6 +61,9 @@ JOB_CLEANUP_INTERVAL = int(os.getenv("LLM_REPL_JOB_CLEANUP_INTERVAL", "3600"))
 sys.path.insert(0, str(SCRIPT_DIR))
 # Make /agent importable, mirroring run_agent.py.
 sys.path.insert(0, str(AGENT_DIR))
+
+from llm_utils import size_bytes, estimate_tokens
+from profileworker import ProfileWorker
 
 def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
     """Load simple KEY=VALUE env files without overriding existing vars."""
@@ -103,6 +109,8 @@ try:
 except Exception as e:
     sys.stderr.write(f"Warning: could not start log listener: {e}\n")
 
+from custom_logger import setup_logging
+
 _active_repls = 0
 _active_repls_lock = threading.Lock()
 
@@ -116,6 +124,11 @@ def _stop_log_listener() -> None:
 
 
 atexit.register(_stop_log_listener)
+
+
+
+tool_logger=None
+
 
 def get_gateway_ip() -> str:
     try:
@@ -145,7 +158,7 @@ except Exception:
     BASE_TOOL_MAP = {}
     BASE_TOOL_SCHEMAS = []
 
-from skill_system.tool_registry import ToolRegistry
+from skill_system.tool_registry import ToolRegistry, ToolCallResult
 from skill_system.skills_manager import SkillsManager
 from skill_system.integration import SKILLS_ROOT
 
@@ -168,6 +181,7 @@ try:
         force_terminal=True,
         color_system="auto",
     )
+#FIXME why so defensive coding?
 except Exception:
     class Console:  # type: ignore
         def print(self, msg, *args, **kwargs):
@@ -238,56 +252,7 @@ class StartupError(REPLError):
     pass
 
 
-# --- Profiling worker --------------------------------------------------------------
-class ProfileWorker(threading.Thread):
-    """Background worker that consumes profiling tasks and updates the user profile."""
 
-    def __init__(self, repl: "LLMRepl", q: queue.Queue, batch_size: int = 3, time_threshold: float = 0.5):
-        super().__init__(daemon=True, name="ProfileWorker")
-        self.repl = repl
-        self.queue = q
-        self.batch_size = batch_size
-        self.time_threshold = time_threshold
-        self._stop_event = threading.Event()
-        self.batch: List[ContextSnapshot] = []
-        self.api=None
-        self.console=None
-        self.dispatcher = None
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        try:
-            self.queue.put(None)
-        except Exception:
-            pass
-        self.repl._consolidate_profile()
-
-    def run(self) -> None:
-        logger.info("ProfileWorker thread started.")
-        while not self._stop_event.is_set():
-            try:
-                snapshot = self.queue.get(timeout=1.0)
-                if snapshot is None:
-                    self._process_batch()
-                    break
-                self.batch.append(snapshot)
-                if len(self.batch) >= self.batch_size:
-                    self._process_batch()
-                self.queue.task_done()
-            except queue.Empty:
-                if self.batch and (time.time() - self.batch[-1].timestamp >= self.time_threshold):
-                    self._process_batch()
-            except Exception as e:
-                logger.exception(f"ProfileWorker error: {e}")
-        logger.info("ProfileWorker thread shutting down.")
-
-    def _process_batch(self) -> None:
-        if not self.batch:
-            return
-        latest = self.batch[-1]
-        prompt = self.repl.prompt_gen.generate_prompt("profiler")
-        self.repl._apply_profile_update(latest.user_input, latest.assistant_response, prompt=prompt)
-        self.batch = []
 
 # --- REPL commands --------------------------------------------------------------
 
@@ -326,8 +291,14 @@ def load_commands():
         "loop": {
             "help": "<start|stop> hours=0 minutes=0 seconds=0 task=<prompt> loop task",
         },
+        "todo": {
+            "help": "<add|list|rm> add/list/remove tasks",
+        },
         "read": {
             "help": "<file> read file without sending it to LLM",
+        },
+        "load": {
+            "help": "<file> send a file to llm.",
         },
         "tools": {
             "help": "list available tools",
@@ -338,6 +309,14 @@ def load_commands():
         "shell": {
             "help": "<command> execute shell command",
         },
+
+        "repl": {
+            "help": "execute repl method",
+        }
+
+        "status": {
+            "help": "show status",
+        }
     }
 
 
@@ -350,14 +329,19 @@ def load_commands():
         "model": model,
         "history": history,
         "profile": profile_command,
-        "role": role,
+        "role": role_command,
         "backend": backend,
         "help" : help,
         "loop": loop,
-        "read": read,
+        "read": read_command,
+        "load": load_command,
         "tools": tools_command,
-        "config": config,
-        "shell": shell_command
+        "todo": task_command,
+        "config": config_command,
+        "shell": shell_command,
+        "repl": repl_command,
+        "status": status_command
+
     }
 
     # let's get unique commoands:
@@ -366,12 +350,59 @@ def load_commands():
 
 # --- Commands for CommandDispatcher -------------------------------------------------------------
 
+from tools import run_bash
+
 def clear_command(repl, *args, **kwargs):
     with repl._state_lock:
         repl.messages = [
             {"role": "system", "content": repl.system_prompt}
         ]
     console.print("[yellow]Conversation history cleared.[/yellow]")
+
+def status_command(repl, *args, **kwargs):
+    # TODO: other status here?
+    if hasattr(repl, 'current_bg_task') and repl.current_bg_task:
+        status = "🟢 Running" if repl.current_bg_task.is_running else "🏁 Finished"
+        console.print(f"[bold]Background Task Status:[/bold] {status}")
+
+        # Force a drain of the queue to show history
+        outputs = repl.current_bg_task.get_pending_output()
+        if outputs:
+            console.print("[dim]--- Recent Output ---[/dim]")
+            for msg in outputs:
+                console.print(f"[dim]{msg}[/dim]")
+    else:
+        console.print("[faded]No background tasks currently running.[/faded]")
+    console.print(f"[faded]{repl.api.usage.summary()}[/faded]")
+
+def repl_command(repl, *args, **kwargs):
+    if args[0] == "help":
+        attr = getattr(repl, args[0])
+        console.print(inspect.signature(attr))
+        console.print(inspect.getdoc(attr))
+        return
+    attr = args[0]
+
+    if "." in attr:
+        class_chain = attr.split(".")
+        attr = getattr(repl, class_chain[0])
+        for c in class_chain[1:]:
+            attr = getattr(attr, c)
+    else:
+        attr = getattr(repl, attr)
+    if not attr:
+        console.print("[red]Command not found.[/red]")
+        return
+    if callable(attr):
+        #result = getattr(repl, args[0])(*args[1:], **kwargs)
+        repl_args = list(args[1:])
+        result = attr(*repl_args, **kwargs)
+    else:
+        if hasattr(attr, "__dict__"):
+            attr = vars(attr)
+        result = attr
+    console.print(result)
+
 
 def profile_command(repl, *args, **kwargs):
     console.print(Panel(repl.profile_manager.get_profile_string(), title="User Profile"))
@@ -465,7 +496,37 @@ def tools_command(repl, *args, **kwargs):
     console.print(f' - {", ".join(repl.tool_registry._disabled_tools)}')
 
 
-def config(repl, *args, **kwargs):
+def task_command(repl, *args, **kwargs):
+    tasks: dict = repl.tasks
+
+    # Todo: Switch task color by state?
+    if "rm" in args and "idx" in kwargs:
+        repl.tasks.pop(int(kwargs["idx"]))
+        console.print("[yellow]Task removed.[/yellow]")
+    elif "rm" in args and "all" in args:
+        repl.tasks = {}
+        console.print("[yellow]All tasks removed.[/yellow]")
+    elif len(args) == 0 and "idx" in kwargs:
+        console.print(f"[green]Task {kwargs['idx']}[/green]: {tasks.get(int(kwargs['idx']))}")
+    elif len(args) > 1:
+        task_text = " ".join(args)
+        task_id = max(repl.tasks, default=-1) + 1
+        repl.tasks[task_id] = dict(
+            {
+                "id": task_id,
+                "task": task_text,
+                "params": kwargs,
+                "status": kwargs.get("status", "pending"),
+            }
+        )
+        console.print(f"[green]Task {task_text[:40]}[...] added.[/green]")
+    else:
+        console.print("[yellow]Available tasks:[/yellow]")
+        for idx, task in repl.tasks.items():
+            console.print(f"  - {idx}: {task['task'][:60]}")
+
+
+def config_command(repl, *args, **kwargs):
     if "save" in args:
         save_config(repl)
         console.print("[yellow]Config saved.[/yellow]")
@@ -481,6 +542,7 @@ def config(repl, *args, **kwargs):
             if k in ["n_ctx"]:
                 repl.api.update_context_limit(int(v))
                 repl._trim_context(int(v))
+            repl.tasks = v if k == "todos" else repl.tasks
 
 
     else:
@@ -491,23 +553,46 @@ def config(repl, *args, **kwargs):
         console.print(f"  - base_url: {repl.api.base_url}")
 
 def save_config(repl, *args, **kwargs):
-    api = repl.api
+
     with open(Path.cwd() / "llm_repl.yaml", "w") as f:
-        yaml.dump({"backend": repl.backend, "port": api.port, "model": api.model}, f)
+        repl_representation = {
+            k:v if type(v) == dict else v for k, v in repl.__dict__.items() if not k.startswith("_") and k in
+            [
+                "backend",
+                "port",
+                "model",
+                "base_url",
+                "current_role",
+                "tasks",
+                ]
+
+        }
+        repl_representation["api"] = {
+            k:v for k, v in repl.api.__dict__.items()
+            if not k.startswith("_") and k in
+            [
+                "backend",
+                "port",
+                "model",
+                "base_url",
+                ]
+            }
+        yaml.dump(repl_representation, f)
 
 def load_config(repl, *args, **kwargs):
     conf_path = Path(Path.cwd() / "llm_repl.yaml")
     conf = {}
     if conf_path.is_file():
         with open(conf_path, "r") as f:
-            conf = yaml.safe_load(f)
+            conf = yaml.safe_load(f) or {}
+    if conf:
+        for k, v in conf.items():
+            repl.__dict__[k] = v or repl.__dict__[k]
     repl.api = LLMBackend(backend=conf.get("backend", repl.backend))
-    repl.api.base_url = conf.get("base_url", kwargs.get("base_url", repl.api.base_url))
     if not os.getenv("DEBUG", "false").lower() == "true":
         repl.api.logger.setLevel(logger.level)
-    repl.api.model = conf.get("model", kwargs.get("model", repl.api.model))
-    repl.api.port = conf.get("port", repl.api.port)
     repl.backend = repl.api.backend
+    repl.current_role = conf.get("role", repl.current_role)
     return repl.api
 
 
@@ -529,7 +614,7 @@ def history(repl, *args, **kwargs):
     if "save" in args:
         repl.save_conversation_history()
 
-def role(repl, *args, **kwargs):
+def role_command(repl, *args, **kwargs):
     with repl._state_lock:
         repl.current_role = args[0]
         repl.prompt_gen.reload_profiles()
@@ -543,38 +628,56 @@ def model(repl, *args, **kwargs):
         console.print(f"availabe models: {', '.join(repl.api.endpoint.list_models())} (default: {repl.model})")
         return
     repl.model = args[0].strip()
+    repl.api.model = repl.model
+
     console.print(f"[yellow]Model switched to: {repl.model}[/yellow]")
 
-def read(repl, *args, **kwargs):
+def _make_fence(contents: str) -> str:
+    fences = re.findall(r"`+", contents)
+    longest = max((len(f) for f in fences), default=2)
+    return "`" * max(3, longest + 1)
+
+def _read_file(fname: str) -> str:
+    try:
+        if Path(fname).is_file():
+            with open(fname, "r") as f:
+                contents = f.read()
+                return contents
+    except Exception as e:
+        console.print(f"[red]Failed to read file: {e}[/red]")
+
+def load_command(repl, *args, **kwargs):
+        fname = args[0].strip()
+        contents = _read_file(fname)
+
+        with repl._state_lock:
+            fence = _make_fence(contents)
+            message = f"Contents of {fname}:\n{fence}\n{contents}\n{fence}\n"
+            console.print(message)
+            repl.send_message(str(message))
+
+def read_command(repl, *args, **kwargs):
     if len(args) < 1:
         cwd = Path.cwd()
         console.print("current directory: " + str(cwd))
         files = '\n\t'.join([str(p) for p in cwd.glob('*')])
         console.print(f"available files: \n{files}")
         return
-    try:
-        fname = args[0].strip()
-        if Path(fname).is_file():
-            with open(args[0], "r") as f:
-                contents = f.read()
-                console.print(contents)
-        if kwargs.get("load", False):
-            with repl._state_lock:
-                message = f"Contents of {fname}:\n```\n{contents}\n```"
-                repl.send_message({"role": "user", "content": message})
-        return
-    except Exception as e:
-        console.print(f"[red]Failed to read file: {e}[/red]")
+    fname = args[0].strip()
+    contents = _read_file(fname)
+    if contents:
+        #console.print(f"Contents of {fname}:\n{fence}\n{contents}\n{fence}")
+        console.print(contents) # raw output
 
 def shell_command(repl, *args, **kwargs):
-    out = subprocess.run(args,
-                   stdout=subprocess.PIPE,
-                   stderr=subprocess.STDOUT,
-                   text=True,
-                   check=True)
-    if out.stderr:
-        console.print(out.stderr)
-    console.print(out.stdout)
+    # Join the args back into a single string so the user can use shell operators
+    command_str = " ".join(args)
+    console.print(f"[dim]Executing: {command_str}[/dim]")
+
+    # Use the robust _run_bash function we refined
+    result = run_bash(command_str, cwd=str(WORKSPACE_DIR))
+
+    console.print(result)
 
 # --- Main REPL --------------------------------------------------------------------
 class LLMRepl:
@@ -595,6 +698,10 @@ class LLMRepl:
         self.dispatcher=None
         self.condensed_prompt = None
         self.notools=False
+        self.current_role = "repl"
+        self.tasks = {}
+        self.max_context_messages = MAX_CONTEXT_MESSAGES
+        self.current_bg_task = None
 
         with _active_repls_lock:
             _active_repls += 1
@@ -663,6 +770,28 @@ class LLMRepl:
     def __exit__(self, exc_type, exc, tb) -> bool:
         self.shutdown()
         return False
+
+    def check_all_context_use(self):
+
+        messages_bytes = sum(
+            size_bytes(msg)
+            for msg in self.messages
+        )
+
+
+        # profile_bytes = sum(self.profile_manager.get_profile_string().encode("utf-8"))
+        profile_bytes = 0 # included in system_prompt
+        prompt_bytes = sum(self.system_prompt.encode("utf-8"))
+        total_bytes = messages_bytes + profile_bytes + prompt_bytes
+        return total_bytes
+
+    def get_diagnostics(self):
+        return {
+            "model": self.model,
+            "messages": len(self.messages),
+            "context_bytes": self.check_all_context_use(),
+            "usage": self.api.usage.summary(),
+        }
 
     def save_conversation_history(self): # save_messages
         if not any(_role(msg) != "tool" for msg in self.messages[1:]):
@@ -750,14 +879,9 @@ class LLMRepl:
 
         if self.api and self.client:
             try:
-                if len(str(sections[:-1])) > self.api.context_limit/2:
-                    response = self._request_chat_completion(
-                        [{"role": "system", "content": "You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for max 2000 tokens."},
-                        {"role": "user", "content": "\n\n".join(sections[:-1])}],
-                        tools=None,
-                        tool_choice=None,
-                    )
-                    content = response.choices[0].message.content
+                if len(str(sections[:-1])) > self.api.context_limit:
+                    content = self.ai_compress(sections[1:-1], max_tokens=self.api.context_limit//2)
+
                     if content:
                         sections = [content, sections[-1]]
                         logger.warning (f"condensed system prompt to {content}")
@@ -765,28 +889,84 @@ class LLMRepl:
                 logger.warning(f"{self.api.backend}: {self.api.base_url} is not reachable")
         sections.append(f"workspace: {str(WORKSPACE_DIR)}")
         return "\n".join(sections)
+    def ai_compress(self, sections, max_tokens=2000):
+        response = self._request_chat_completion(
+            [{"role": "system", "content": f"You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for max {max_tokens} tokens."},
+            {"role": "user", "content": "\n\n".join(sections[:-1])}],
+            tools=None,
+            tool_choice=None,
+        )
+        return response.choices[0].message.content
 
 
     def _trim_context(self, n_ctx:int=0) -> None:
         # Safe to call with or without holding _state_lock (RLock).
         with self._state_lock:
-            if len(self.messages) <= MAX_CONTEXT_MESSAGES:
+            orig_size = len(str(self.messages))
+
+            logger.debug(
+                    "Context before trim: messages=%d chars=%d",
+                    len(self.messages), orig_size
+                )
+
+            if (
+                len(self.messages) <= self.max_context_messages
+                and orig_size <= self.api.context_limit
+                and not n_ctx
+                ):
                 return
+
+            try:
+                usage_ratio = self.api.usage.context_pct
+                # Let's put a gate on pruning
+                if usage_ratio < 0.75:
+                    return
+            except Exception as e:
+                logger.warning(f"Could not get usage ratio: {e}")
+                pass
+
             self.save_conversation_history()
-            keep_count = MAX_CONTEXT_MESSAGES - 1
+            keep_count = max(self.max_context_messages - 1, 3)
+
+
             tail = self.messages[-keep_count:]
             while tail and _role(tail[0]) == "tool":
                 tail = tail[1:]
+            sections = []
+
             # Guesstimate tokens; not exact
-            if n_ctx:
-                while (len(str(self.messages).split(" ")) > n_ctx):
+            if (n_ctx
+                or self.api.usage.last_prompt_tokens > self.api.context_limit*0.85):
+                # Average token length = 4
+                while (len(str(tail))//4 > self.api.context_limit//2 and len(tail) > 0):
+                    sections.append(tail[0])
                     tail = tail[1:]
                     if not tail:
                         break
+            compress_target = sections
+            logger.debug(f"Compress target: {len(compress_target)} messages, characters={len(str(compress_target))}")
 
+            def format_for_compression(msg: dict) -> str:
+                if msg.get("role") == "tool":
+                    return f"[TOOL RESULT: {msg.get('name', 'unknown')} (ID: {msg.get('tool_call_id')})]\n{msg.get('content')}"
+                return f"{msg['role']}: {msg.get('content', '')}"
+
+            for c in compress_target:
+                sections.append(format_for_compression(c))
+            content = None
+            if sections:
+                content = self.ai_compress(sections, max_tokens=self.api.context_limit//2)
+                logger.info(f"condensed context to {content}")
+            if content:
+                content = f"Historical context summary - not a new response: {content}"
+                tail = [{"role": "assistant", "content": content}] + tail
             self.messages = [self.messages[0]] + tail
+        console.print(f"[dim]Trimmed from {orig_size} to {len(str(self.messages))}[/dim]")
         console.print(f"[dim]Trimmed: {self.api.usage.summary()}[/dim]")
-        console.print(f"[dim]Messages: {len(self.messages)}, characters {len(str(self.messages).split(' '))}[/dim]")
+        token_est = estimate_tokens(self.messages)
+        console.print(
+            f"[dim]Messages: {len(self.messages)}, characters {chars}, est. tokens: {token_est}[/dim]"
+        )
 
     def _normalize_messages(self, messages, provider):
         normalized = []
@@ -805,15 +985,20 @@ class LLMRepl:
         if self.notools:
             tools = []
             tool_choice = "none"
+        if os.getenv("BITNET", "0") == "1":
+            return self.client.chat.completions.create(
+                model=self.model,
+                messages=self._normalize_messages(messages, self.backend)
+            )
+
         return self.client.chat.completions.create(
             model=self.model,
             messages=self._normalize_messages(messages, self.backend),
             tools=tools or [],
             tool_choice=tool_choice or "auto",
         )
-
-    def _execute_tools(self, tool_calls: List[Any]) -> List[Dict[str, Any]]:
-        results: List[Dict[str, Any]] = []
+    def _execute_tools(self, tool_calls: List[Any]) -> List[ToolCallResult]:
+        results: List[ToolCallResult] = []
 
         console.print(
             f"[bold blue][*] Model requested {len(tool_calls)} tool call(s).[/bold blue]")
@@ -855,12 +1040,7 @@ class LLMRepl:
                 content = f"Error executing tool {name} with args {args}: {e}"
 
             # Always return a result, including for malformed arguments and errors.
-            results.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "name": name,
-                "content": content,
-            })
+            results.append(ToolCallResult(tool_call_id=tc.id, name=name, content=content))
 
         return results
 
@@ -873,7 +1053,9 @@ class LLMRepl:
             if self.api.usage.last_prompt_tokens >= self.api.context_limit*0.85:
                 self._request_chat_completion(
                     [{"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": "running low on context, update and compress memories and todos"}], tools=None, tool_choice=None)
+                    {"role": "user", "content": "running low on context, update and compress memories and todos"}],
+                    tools=None, tool_choice=None
+                    )
             self._trim_context()
             current_messages = list(self.messages)
 
@@ -881,9 +1063,25 @@ class LLMRepl:
         start_time = time.time()
 
         SEND_TIMEOUT = 60
+        MAX_TOOL_RESULTS_CHARS = 4000
+
+
 
         while True:
+            console.print(f"[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
+            if self.api.usage.context_pct >= 85.0:
+                # warn llm.
+                warning = self.prompt_gen.generate_prompt(
+                    "warning", {
+                        "snippets": ["context_size_warning"]
+                    },
+                    context_pct=self.api.usage.context_pct,
+                    remaining_tokens=self.api.usage.remaining_tokens
+                    )
+                console.print(f"[dim]warning[dim]")
+                current_messages.append({"role": "system", "content": warning})
             try:
+                json.dumps(self.tool_schemas) # defensive validation
                 response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
                 msg = response.choices[0].message
                 # print((self.api.model, self.api.port, self.api.base_url))
@@ -900,11 +1098,40 @@ class LLMRepl:
                     self.api.usage.record(response.usage, turn=len(self.messages))
                     console.print(f"[dim]{self.api.usage.summary()}[/dim]")
                     tool_results = self._execute_tools(msg.tool_calls)
+                    if not tool_results:
+                        logger.info("Tool call returned no results")
+                        continue
                     with self._state_lock:
+                        global tool_logger
+                        if not tool_logger:
+                            tool_logger = setup_logging("ReplToolLogger", level="WARNING")
+                        tool_logger.info("Tool results: %s", pformat(str(tool_results)))
+                        result_length = len(str(tool_results))
+                        if  result_length> MAX_TOOL_RESULTS_CHARS:
+                            _mtr = MAX_TOOL_RESULTS_CHARS
+                            # generate hash
+                            _id =  f"#{secrets.token_hex(8)}"
+                            # msg was warning; changed to info since it _currently works_
+                            tool_logger.info(
+                                "Tool results too long %s: %s",
+                                _id,
+                                pformat([t for t in tool_results])
+                                )
+                            # truncate tool results
+                            for i, result in enumerate(tool_results):
+                                result["content"] = (
+                                    f"Tool output truncated; original: {result_length} chars. "
+                                    f"see {tool_logger.log_file} for "
+                                    f"full output. tag: {_id}\n"
+                                    f"{result.to_message(MAX_TOOL_RESULTS_CHARS).get('content')}"
+                                    )
+                                tool_results[i] = result
                         self.messages.extend(tool_results)
                     current_messages.extend(tool_results)
+
                     # DEBUG: line below
                     #console.print(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
+                    elapsed = time.time() - start_time
                     continue
 
                 content = msg.content or ""
@@ -913,7 +1140,8 @@ class LLMRepl:
 
                 # Calculate elapsed time
                 elapsed = time.time() - start_time
-
+                if ("/tool" in content):
+                    tools_command(self, "on")
                 if content:
                     console.print(Panel(Markdown(content), title="Assistant"))
                 else:
@@ -927,6 +1155,8 @@ class LLMRepl:
                 return content
 
             except Exception as e:
+                if isinstance(e, InternalServerError):
+                    return f"API Error: {e}"
                 elapsed = time.time() - start_time
                 if elapsed > SEND_TIMEOUT:
                     raise APIError(f"Response timed out after {elapsed:.2f}s")
@@ -943,20 +1173,31 @@ class LLMRepl:
             logger.warning(f"API error {action}: {e}. Waiting {delay}s...")
             try:
                 time.sleep(delay)
+                if (e.response.status_code == 500 # type: ignore
+                    and "Failed to parse tool call arguments as JSON" in str(e)):
+                    self.notools = True
+                    with self._state_lock:
+                        self.messages.append(
+                            {"role": "system", "content": "disabled tool calls. re-enable with /tools"}
+                            )
+                        tools_command(self, "reload")
             except Exception:
                 pass
             return True
         logger.error(f"Fatal API error: {e}")
         if "exceeds the available context size" in str(e):
+            logger.debug(len(self.messages), self.messages)
             n_ctx = getattr(e, "body", {}).get("error", {}).get("n_ctx")
             if n_ctx:
                 self.api.update_context_limit(n_ctx)
             else:
+                new_limit = self.api.context_limit
                 old_limit = self.api.context_limit
-                new_limit = self.api.context_limit // 2
-                self.api.update_context_limit(new_limit)
+                if old_limit > 8192:
+                    new_limit = int(self.api.context_limit / 1.1)
+                    self.api.update_context_limit(int(new_limit))
                 logger.warning(f"Failed to update context limit, reduced context from {old_limit} to {new_limit}.")
-            self._trim_context(self.api.context_limit)
+            self._trim_context(int(self.api.context_limit*0.8))
             self._consolidate_profile()
 
         with self._state_lock:
@@ -1009,13 +1250,15 @@ class LLMRepl:
             updated_json=None
             if content:
                 updated_json = self._robust_json_extract(content)
-            if updated_json is not None:
-                with self._state_lock:
-                    self.profile_manager.set_profile_data(updated_json)
-                    self.system_prompt = self._build_system_prompt()
-                    if self.messages and _role(self.messages[0]) == "system":
-                        self.messages[0] = {"role": "system", "content": self.system_prompt}
-                logger.debug("User profile updated by worker.")
+            if updated_json is None:
+                raise ValueError("Profile worker returned invalid JSON.")
+
+            with self._state_lock:
+                self.profile_manager.set_profile_data(updated_json)
+                self.system_prompt = self._build_system_prompt()
+                if self.messages and _role(self.messages[0]) == "system":
+                    self.messages[0] = {"role": "system", "content": self.system_prompt}
+            logger.debug("User profile updated by worker.")
         except Exception as e:
             logger.error(f"Profile update failed: {e}")
 
@@ -1173,8 +1416,23 @@ class LLMRepl:
          commands, command_definitions = load_commands()
          # can modify commands here.
 
-
          return commands, command_definitions
+
+    def _poll_background_tasks(self) -> None:
+        """Non-blocking check for background task updates."""
+        if hasattr(self, 'current_bg_task') and self.current_bg_task:
+            new_outputs = self.current_bg_task.get_pending_output()
+            for msg in new_outputs:
+                console.print(f"[dim]⚙️  {msg}[/dim]")
+
+            if not self.current_bg_task.is_running():
+                if self.current_bg_task.error:
+                    console.print(f"[bold red]Background task failed: {self.current_bg_task.error}[/bold red]")
+                else:
+                    console.print(f"[bold green]Background task completed. Result: {self.current_bg_task.result}[/bold green]")
+
+                self.current_bg_task = None # Clear it
+
 
     def run(self) -> None:
         try:
@@ -1248,24 +1506,30 @@ class LLMRepl:
                         self.agent_active = True
                         response = self.send_message(user_input)
                         self.agent_active = False
+
+                        if response.startswith("API Error:"):
+                            console.print(f"[bold red]{response}[/bold red]")
+                            diagnostics = self.get_diagnostics()
+                            console.print(Panel(Markdown(diagnostics), title="Diagnostics"))
+
                         # if response:
                         #     console.print(Panel(Markdown(response), title="Assistant"))
                     except EOFError:
                         console.print("[bold red]Goodbye![/bold red]")
                         break
                     except KeyboardInterrupt:
-                        if self.agent_active:
-                            logger.warning("Interrupted by user")
-                            self.agent_active = False
-                            continue
                         if self.loop_task:
                             try:
                                 self.loop_task.stop()
+                                logger.warning("Loop task interrupted!")
                             except Exception as e:
                                 logger.error(f"Error stopping loop task: {e}")
                             self.loop_task = None
                             continue # avoid exit _once_
-
+                        if self.agent_active:
+                            logger.warning("Interrupted by user")
+                            self.agent_active = False
+                            continue
                         console.print("\n[bold red]Goodbye![/bold red]")
                         break
                     except Exception as e:
@@ -1443,6 +1707,9 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
         registry.disable_tool("stop_loop")
 
     return registry
+
+
+
 
 
 # Job manager facade retaining a simple API without changing LLMRepl internals.
