@@ -6,8 +6,13 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from custom_logger import setup_logging
+
 
 DEFAULT_PROFILE_PATH=Path(".llm_user_profile.json")
+logger = setup_logging("UserProfileManager")
+logger.setLevel(logging.WARNING)
+
 
 # --- Helper classes ---------------------------------------------------------------
 @dataclass
@@ -83,7 +88,9 @@ class UserProfileManager:
     """Thread-safe manager for user preferences and profile data."""
 
     def __init__(self, profile_path: Path = DEFAULT_PROFILE_PATH):
+
         self.profile_path = Path(profile_path)
+        #logger.set_log_path(str(self.profile_path.parent))
         self._lock = threading.RLock()
         with self._lock:
             self._profile_data: Dict[str, Any] = self._load_profile()
@@ -103,10 +110,14 @@ class UserProfileManager:
         return {}
 
     def save_profile(self) -> None:
+        # backs up profile changes, too.
+        logger.info("Saving profile", self.get_profile_json_string())
         with self._lock:
             try:
                 self.profile_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(self.profile_path, "w", encoding="utf-8") as f:
+                    json.dump(self._profile_data, f, indent=2)
+                with open(self.profile_path.with_suffix(".bak.json"), "w", encoding="utf-8") as f:
                     json.dump(self._profile_data, f, indent=2)
             except Exception as e:
                 logging.error(f"Error saving profile: {e}")
@@ -115,7 +126,7 @@ class UserProfileManager:
         with self._lock:
             if not self._profile_data:
                 return "No user profile available."
-            return json.dumps(self._profile_data, indent=2)
+            return json.dumps(self._profile_data, indent    =2)
 
     def get_profile_string(self) -> str:
         with self._lock:

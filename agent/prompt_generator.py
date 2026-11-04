@@ -1,8 +1,9 @@
 import os
+import json
 import yaml
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, Any
 
 import logging
 logger = logging.getLogger(__name__)
@@ -69,12 +70,7 @@ class PromptGenerator:
     def get_role_names(self) -> List[str]:
         return list(self._profiles.keys())
 
-    def generate_prompt(self, role_name: str) -> str:
-        logger.debug("--------", role_name, "------")
-        if role_name not in self._profiles:
-            raise ValueError(f"Unknown role: {role_name}")
-
-        profile = self._profiles[role_name]
+    def _get_prompt_parts(self, profile):
         snippets = profile.get("snippets", [])
         patches = self._get_platform_patches(self.platform)
         logger.debug("platform patches: %s, snippets: %s", patches, snippets)
@@ -95,8 +91,24 @@ class PromptGenerator:
             content = snippet_path.read_text(encoding="utf-8").strip()
             prompt_parts.append(content)
 
+        return prompt_parts
+
+    def generate_prompt(self, role_name: str, profile: Optional[Dict[str, Any]] = None, **kwargs) -> str:
+        logger.debug("--------", role_name, "------")
+        if profile:
+            json.dumps(profile) # validate lite
+            if role_name in profile.keys():
+                self._profiles.update(profile)
+        elif role_name not in self._profiles:
+            raise ValueError(f"Unknown role: {role_name}")
+        profile = profile or self._profiles[role_name]
+
+        prompt_parts = self._get_prompt_parts(profile)
+
         prompt = "\n\n".join(prompt_parts).strip()
-        self.enabled_skills = self._get_enabled_skills(role_name)
+        for k, v in kwargs.items():
+            prompt = prompt.replace(f"<{k}>", str(v))
+        # self.enabled_skills = self._get_enabled_skills(role_name)
 
         return f"{prompt}\n" ##make sure we end in newline
 

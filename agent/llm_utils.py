@@ -1,11 +1,28 @@
 from dataclasses import dataclass, field
 import os
 import requests
-from typing import Optional
+from typing import Optional, Iterable
+
+import logging
+from pathlib import Path
+
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+try:
+    import tiktoken
+    encoding = tiktoken.get_encoding("cl100k_base") # or your model's encoding
+    def estimate_tokens(messages: list) -> int:
+        return sum(len(encoding.encode(str(m))) for m in messages)
+except ImportError:
+    logger.warning("Could not import tiktoken. Using len(str(m)) as a fallback.")
+    def estimate_tokens(messages: list) -> int:
+        return sum(size_bytes(m) for m in messages) // 4
 
 @dataclass
 class UsageTracker:
     prompt_tokens: int = 0
+    prompt_estimated: bool = False
     completion_tokens: int = 0
     calls: int = 0
     last_prompt_tokens: int = 0
@@ -19,7 +36,8 @@ class UsageTracker:
         c = getattr(usage, "completion_tokens", 0) or 0
         # Ollama cache-hit quirk: p == 0 means "cached", not "empty".
         if p == 0 and self.last_prompt_tokens:
-            p = self.last_prompt_tokens      # best available estimate
+            p = self.last_prompt_tokens
+            self.prompt_estimated = True
         self.prompt_tokens += p
         self.completion_tokens += c
         self.calls += 1
@@ -32,14 +50,44 @@ class UsageTracker:
             return 0.0
         return 100.0 * self.last_prompt_tokens / self.context_limit
 
+    @property
+    def remaining_tokens(self) -> int:
+        return self.context_limit - self.last_prompt_tokens
+
     def summary(self) -> str:
         return (
             f"calls={self.calls} "
             f"in={self.prompt_tokens} out={self.completion_tokens} "
+            f'{"[est.] " if self.prompt_estimated else ""}'
             f"ctx={self.last_prompt_tokens}/{self.context_limit} "
             f"({self.context_pct:.0f}%)"
+
         )
 
+    def inspect_context(self, messages, tools=None):
+        return {
+            "message_count": len(messages),
+            "role_counts": {
+                role: sum(1 for m in messages if m.get("role") == role)
+                for role in {m.get("role") for m in messages}
+            },
+            "content_chars": sum(
+                len(str(m.get("content") or ""))
+                for m in messages
+            ),
+            "tool_count": len(tools or []),
+        }
+
+def size_bytes(value):
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, dict):
+        return sum(size_bytes(k) + size_bytes(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return sum(size_bytes(item) for item in value)
+    return len(str(value).encode("utf-8"))
 
 
 def discover_context_window(base_url: str, model: str, default: int = 4096, backend="ollama") -> int:
@@ -162,6 +210,32 @@ def discover_openai_context_window(
 
     return default
 
+import json
+try:
+    from jsonschema import Draft202012Validator
+
+    def validate_llm_json(response: str, schema: dict): # type: ignore
+        try:
+            data = json.loads(response)
+        except json.JSONDecodeError as e:
+            return False, None, [f"Invalid JSON syntax: {e}"]
+
+        validator = Draft202012Validator(schema)
+        errors = list(validator.iter_errors(data))
+
+        if errors:
+            messages = [
+                f"{'.'.join(map(str, e.absolute_path))}: {e.message}"
+                for e in errors
+            ]
+            return False, data, messages
+
+        return True, data, []
+
+except ImportError:
+    logger.warning("Failed to import jsonschema. Some features may not work.")
+    def validate_llm_json(response: str, schema: dict):
+        return True, None, []
 
 if __name__ == "__main__":
     # Example usage of discover_context_window for different backends

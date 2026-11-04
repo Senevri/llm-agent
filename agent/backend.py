@@ -136,6 +136,19 @@ class KoboldCppApiendpoint(APIEndpoint):
         return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
 
 class LlamaApiEndpoint(APIEndpoint):
+    """ TODO:
+    implement wrappers maybe?
+        Endpoint	Purpose
+        GET /health	Liveness check: 200 when ready, 503 while loading
+        POST /completion	Native completion with the full llama.cpp option set (token arrays, n_probs logprobs, id_slot pinning, per-request LoRA scales, …)
+        POST /tokenize / POST /detokenize	Convert between text and tokens
+        POST /apply-template	Apply the model’s chat template without running inference
+        POST /infill	Fill-in-the-middle code completion from input_prefix and input_suffix
+        GET /props	Server and model properties (context size, chat template, modalities)
+        GET /slots	Current state of each processing slot
+        GET /metrics	Prometheus metrics (requires --metrics)
+        GET /lora-adapters / POST /lora-adapters	List and set LoRA adapter scales at runtime
+    """
     def __init__(self, model: str = "", base_url: str = ""):
         super().__init__(model, base_url)
         self.port = os.getenv("LLAMA_PORT", "9931")

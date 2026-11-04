@@ -75,6 +75,7 @@ def read_file(
     """Read a local UTF-8 text file with explicit paging metadata."""
     path = _relative_paths_helper(path)
     try:
+
         p = Path(path).expanduser().resolve()
 
         if not p.is_file():
@@ -162,7 +163,7 @@ def search_file(path: str, query: str) -> str:
     """Search for a string within a file and return matching lines with line numbers."""
     path = _relative_paths_helper(path)
     logger.info(f"Searching for '{query}' in file: {path}")
-    def _search_file(path: str, query: str) -> str:
+    def _search_file(path: str, query: str) -> list[str]:
         matches = []
         with open(path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f, 1):
@@ -195,6 +196,8 @@ def search_file(path: str, query: str) -> str:
 
 def _relative_paths_helper(path: str) -> str:
     if not ("/" in path or "\\" in path):
+        if path.startswith("."):
+            path = Path(path).resolve()
         path = str(Path(path).resolve())
     return path
 
@@ -207,11 +210,14 @@ def _glob_files(path, filterstr="*", recurse=False):
 
 def list_files(path: str = ".", filterstr: str = "*", recurse: bool = False) -> str:
     """List files and directories in a given path."""
+    ignorelist = [
+        ".git", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".venv"
+    ]
 
     path = _relative_paths_helper(path)
     logger.info(f"Listing files in: {path}")
     try:
-        files = _glob_files(path, filterstr, recurse)
+        files = [f for f in _glob_files(path, filterstr, recurse) if Path(f).name not in ignorelist]
         return "\n".join(files) if files else "Directory is empty."
     except Exception as e:
         return f"Error listing files: {str(e)}"
@@ -352,7 +358,7 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "Path to list, defaults to current directory"},
-                               "filter": {"type": "string", "description": "Filter files by name"},
+                               "filterstr": {"type": "string", "description": "Filter files by name"},
                                "recurse": {"type": "boolean", "description": "Recurse into subdirectories"},
                                },
                 "required": []
