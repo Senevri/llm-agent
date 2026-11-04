@@ -101,8 +101,8 @@ class SimpleLoopTask:
             next_task = self.task.pop(0)
             if not self.task:
                 self.task = next_task # Have the last item repeat
-            return next_task
-        return self.task
+            return f"{next_task}; Loop ends in {self.get_remaining_time()}\n\n" # TODO: add next_task
+        return f"{self.task}; Loop ends in {self.get_remaining_time()}\n\n"
 
     def is_running(self) -> bool:
         return (
@@ -295,9 +295,18 @@ def loop (repl, *args, **kwargs):
             console.print("[red]No loop task running[/red]")
 
     elif "simple" in args:
-        tasks = kwargs.get("task", None)
+        tasks = []
         if kwargs.get("note", None):
-            tasks = [kwargs.get("note"), tasks]
+            tasks = [kwargs.get("note")]
+        if kwargs.get("todo", None):
+            tasks = tasks or []
+            todo = [
+                t.get("task", None) for t in repl.tasks.values()
+                if t.get("status", None) == "pending"
+            ]
+            tasks.extend(list(t for t in todo if t))
+        tasks.extend([kwargs.get("task", None)])
+
         repl.loop_task = SimpleLoopTask(
             repl,
             tasks
