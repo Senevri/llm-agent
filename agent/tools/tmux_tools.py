@@ -320,11 +320,20 @@ tmux_kill_tool_definition = {
     },
 }
 
-if platform.system() == "Windows":
-    logger.warning("Tmux tools are not supported on Windows. All tmux tool calls will fail.")
-    TMUX_TOOL_MAP = {}
-    TMUX_TOOL_DEFINITION_MAP = {}
-else:
+def get_tools():
+    if platform.system() == "Windows":
+        # TODO: This is a hack.
+        # tmux support via psmux
+        # logger.warning("Tmux tools are not supported on Windows. All tmux tool calls will fail.")
+        from bash_tools import run_bash, run_command
+        tmux_version = run_bash("tmux --version")
+        returncode = run_command(r"echo %errorcode%")
+        if not (int(returncode) == 0 and "tmux" in tmux_version):
+            logger.warning("Tmux tools are not supported on Windows. All tmux tool calls will fail.")
+            TMUX_TOOL_MAP = {}
+            TMUX_TOOL_DEFINITION_MAP = {}
+        return TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
+
     TMUX_TOOL_MAP = {
         "tmux_create_session": tmux_create_session,
         "tmux_send": tmux_send,
@@ -340,3 +349,6 @@ else:
         "tmux_list": tmux_list_tool_definition,
         "tmux_kill": tmux_kill_tool_definition,
     }
+    return TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
+
+TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP = get_tools()
