@@ -267,7 +267,7 @@ class LLMAgent:
                     func_name = tool_call.function.name
                     try:
                         tool_args = json.loads(tool_call.function.arguments)
-                        tool_check = check_tool_call(func_name, tool_args)
+                        tool_check = self.check_tool_call(func_name, tool_args)
                         if tool_check[0] is False:
                             logger.error(tool_check[1])
                             result = tool_check[1]
@@ -413,7 +413,7 @@ def main():
         )
 
 
-    logger.info(f"Using system prompt: \n{system_prompt[:250]}")
+    logger.info(f"Using system prompt: \n{system_prompt[:320]}")
     logger.info(f"current role: {current_role}")
 
 

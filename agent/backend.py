@@ -3,7 +3,7 @@ import httpx2 as requests
 from urllib.parse import urlparse, urlsplit
 from openai import OpenAI
 from get_ip import get_gateway_ip
-from llm_utils import UsageTracker, discover_context_window
+from llm_utils import UsageTracker, discover_context_window, discover_candidate_dir
 from custom_logger import setup_logging
 from dotenv import load_dotenv
 from typing import Optional, Dict, Type
@@ -11,7 +11,8 @@ from pathlib import Path
 
 AGENT_DIR = os.getenv("AGENT_DIR", "/agent")
 if not Path(AGENT_DIR).exists():
-    AGENT_DIR = Path(__file__).resolve().parent
+    AGENT_DIR = discover_candidate_dir(Path(__file__).resolve().parent, Path("agent")) / "agent"
+
 load_dotenv(f"{AGENT_DIR}/.env")
 
 if not Path("/workspace").exists():
@@ -197,6 +198,7 @@ class LlamaApiEndpoint(APIEndpoint):
         if self.model not in model_names:
             logger.info(f"Setting default model to {models[0]['name']}")
             self.model = models[0]["model"]
+        return self.model
 
     def get_llama_models(self):
         # /api/v1/model
@@ -271,7 +273,7 @@ class LLMBackend:
         self.logger = logger
 
     def set_model(self, model: str):
-        self.model = model
+        self.model = modelget
 
     def _get_endpoint(self):
 
@@ -289,7 +291,7 @@ class LLMBackend:
         return self.endpoint
 
     def update_context_limit(self, context_limit: int):
-        self.context_limit = context_limit
+        self.context_limit = int(context_limit)
         self.usage.context_limit = context_limit
         logger.info(f"Context window set to: {context_limit}")
 

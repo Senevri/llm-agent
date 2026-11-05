@@ -331,6 +331,11 @@ def get_returncode(output):
 
 def get_tools():
     if platform.system() == "Windows":
+        # For now, this doesn't work, but iti is close.
+        TMUX_TOOL_MAP = {}
+        TMUX_TOOL_DEFINITION_MAP = {}
+        return TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
+
         # TODO: This is a hack.
         # tmux support via psmux
         # logger.warning("Tmux tools are not supported on Windows. All tmux tool calls will fail.")
@@ -340,9 +345,6 @@ def get_tools():
         logger.debug(f"returncode: {returncode}, tmux_version: {tmux_version}")
         if not (int(returncode) == 0 and "tmux" in tmux_version):
             logger.warning("Tmux tools are not supported on Windows. All tmux tool calls will fail.")
-            TMUX_TOOL_MAP = {}
-            TMUX_TOOL_DEFINITION_MAP = {}
-            return TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
 
     TMUX_TOOL_MAP = {
         "tmux_create_session": tmux_create_session,

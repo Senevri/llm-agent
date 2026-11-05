@@ -17,6 +17,7 @@ import queue
 import threading
 import atexit
 import yaml
+import urllib
 import re
 import uuid
 import shutil
@@ -58,11 +59,13 @@ LOG_FILE = Path(os.getenv("LLM_REPL_LOG_FILE", str(Path.cwd() / "llm_repl_v2.log
 MAX_CONTEXT_MESSAGES = int(os.getenv("LLM_REPL_MAX_CONTEXT", "40"))
 JOB_CLEANUP_INTERVAL = int(os.getenv("LLM_REPL_JOB_CLEANUP_INTERVAL", "3600"))
 
-sys.path.insert(0, str(SCRIPT_DIR))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 # Make /agent importable, mirroring run_agent.py.
-sys.path.insert(0, str(AGENT_DIR))
+if AGENT_DIR not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
 
-from llm_utils import size_bytes, estimate_tokens, normalize_messages
+from llm_utils import size_bytes, estimate_tokens, normalize_messages, discover_candidate_dir
 from profileworker import ProfileWorker
 
 def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
@@ -135,13 +138,15 @@ def get_gateway_ip() -> str:
     except Exception:
         return os.getenv("GATEWAY_IP", "127.0.0.1")
 
+candidate_dir = discover_candidate_dir(Path(__file__).parent.parent, Path("tools"))
+sys.path.insert(0, str(candidate_dir))
 
 try:
     from tools.internet_tools import (
         INTERNET_TOOL_DEFINITION_MAP, INTERNET_TOOL_MAP
     )
 except (ImportError, Exception) as e:
-    logger.warning("Failed to import internet tools.")
+    logger.warning("Failed to import internet tools.\nError: %s", str(e))
     INTERNET_TOOL_MAP = {}
     INTERNET_TOOL_DEFINITION_MAP = {}
     def search_internet(query: str, max_results: int = 5) -> str:  # type: ignore
@@ -307,13 +312,14 @@ def load_commands():
         "shell": {
             "help": "<command> execute shell command",
         },
-
         "repl": {
             "help": "execute repl method",
-        }
-
+        },
         "status": {
             "help": "show status",
+        },
+        "alias": {
+            "help": "<alias> set alias",
         }
     }
 
@@ -338,7 +344,8 @@ def load_commands():
         "config": config_command,
         "shell": shell_command,
         "repl": repl_command,
-        "status": status_command
+        "status": status_command,
+        "alias": alias_command
 
     }
 
@@ -348,7 +355,47 @@ def load_commands():
 
 # --- Commands for CommandDispatcher -------------------------------------------------------------
 
-from tools import run_bash
+from tools.bash_tools import run_bash
+
+class Script:
+    def __init__(self, repl, command, script, **kwargs):
+        self.repl = repl
+        self.command = command
+        self.script = script
+
+    def __call__(self, repl, *args, **kwargs):
+        #run_bash(self.script)
+        if self.command == "python":
+            result = exec(self.script)
+        else:
+            result = run_bash(self.script)
+        return result
+
+    def __str__(self):
+        if len(self.script) > 20:
+            return f"Script: ```{self.command}\n{self.script}\n```"
+        return f"Script: #{self.command}:{self.script}"
+
+    def __repr__(self):
+        return self.__str__()
+
+def alias_command(repl, *args, **kwargs):
+    if len(args) < 2:
+
+        console.print(f"[blue]Current aliases[/blue]:\n"
+                      f"{''.join([f'/{k}: {v}' for k, v in repl.aliases.items()])}\n")
+        return
+    if args[0] == "set" and len(args) > 2:
+        with repl._state_lock:
+            if args[2] in ["python", "bash"]:
+                repl.aliases[args[1]] = Script(repl, args[2], " ".join(args[3:]).strip())
+            else:
+                repl.aliases[args[1]] = f"{' '.join(args[2:])}".strip()
+    if args[1] in repl.cmd_dispatcher.commands:
+        repl.cmd_dispatcher.register(args[0], repl.cmd_dispatcher.commands[args[1]])
+        repl.aliases[args[0]] = args[1]
+
+    console.print(f"[yellow]Alias {args[1]} set to {args[2]}[/yellow]")
 
 def clear_command(repl, *args, **kwargs):
     with repl._state_lock:
@@ -484,6 +531,12 @@ def tools_command(repl, *args, **kwargs):
         repl.notools = False
         console.print("[yellow]Tools enabled.[/yellow]")
         return
+    elif args and len(args) > 1 and "allow" == args[0]:
+        repl.tool_registry.disable_tool("*")
+        for arg in args[1:]:
+            repl.tool_registry.allow_tool(arg)
+        return
+
     # console.print("[yellow]Available skills:[/yellow]")
     # console.print(repl.skills_manager.get_catalog_summary())
     # for skill_id, meta in repl.skills_manager.catalog.items() or {}:
@@ -525,6 +578,7 @@ def task_command(repl, *args, **kwargs):
 
 
 def config_command(repl, *args, **kwargs):
+    get_config_representation(repl)
     if "save" in args:
         save_config(repl)
         console.print("[yellow]Config saved.[/yellow]")
@@ -541,40 +595,44 @@ def config_command(repl, *args, **kwargs):
                 repl.api.update_context_limit(int(v))
                 repl._trim_context(int(v))
             repl.tasks = v if k == "todos" else repl.tasks
-
-
     else:
         console.print("[yellow]Config:[/yellow]")
-        console.print(f"  - backend: {repl.backend}")
-        console.print(f"  - port: {repl.api.port}")
-        console.print(f"  - model: {repl.api.model}")
-        console.print(f"  - base_url: {repl.api.base_url}")
+        yaml_str = yaml.dump(repl.config).replace("[", "\[").replace("]", "\]")
+        console.print(Markdown(f"```yaml\n{yaml_str}\n```"))
 
-def save_config(repl, *args, **kwargs):
-
-    with open(Path.cwd() / "llm_repl.yaml", "w") as f:
-        repl_representation = {
-            k:v if type(v) == dict else v for k, v in repl.__dict__.items() if not k.startswith("_") and k in
-            [
-                "backend",
-                "port",
-                "model",
-                "base_url",
-                "current_role",
-                "tasks",
-                ]
-
-        }
-        repl_representation["api"] = {
-            k:v for k, v in repl.api.__dict__.items()
-            if not k.startswith("_") and k in
-            [
-                "backend",
-                "port",
-                "model",
-                "base_url",
-                ]
+def get_config_representation(repl):
+    repl_representation = {
+        k:v if type(v) == dict else v for k, v in repl.__dict__.items() if not k.startswith("_")
+        and k in [
+            "backend",
+            "port",
+            "model",
+            "base_url",
+            "current_role",
+            "tasks",
+            ]
+    }
+    if getattr(repl, "aliases"):
+        repl_representation["aliases"] = {
+            k:{v.command: str(v.script)} for k, v in repl.__dict__.get("aliases", {}).items()
             }
+    repl_representation["api"] = {
+        k:v for k, v in repl.api.__dict__.items()
+        if not k.startswith("_") and k in
+        [
+            "backend",
+            "port",
+            "model",
+            "base_url",
+            ]
+        }
+    repl.config = repl_representation
+    return repl_representation
+def save_config(repl, *args, **kwargs):
+    repl_representation = get_config_representation(repl)
+
+    # console.print(Markdown(f"```yaml\n{yaml.dump(repl_representation)}\n```"))
+    with open(Path.cwd() / "llm_repl.yaml", "w") as f:
         yaml.dump(repl_representation, f)
 
 def load_config(repl, *args, **kwargs):
@@ -583,10 +641,16 @@ def load_config(repl, *args, **kwargs):
     if conf_path.is_file():
         with open(conf_path, "r") as f:
             conf = yaml.safe_load(f) or {}
+    repl.config = conf
     if conf:
         for k, v in conf.items():
-            repl.__dict__[k] = v or repl.__dict__[k]
+            repl.__dict__[k] = v if v is not None else repl.__dict__[k]
     repl.api = LLMBackend(backend=conf.get("backend", repl.backend))
+
+    repl.aliases = {}
+    for k, v in conf.get("aliases", {}).items():
+        cmd, script = list(v.items())[0]
+        repl.aliases[k] = Script(repl, cmd, script)
     if not os.getenv("DEBUG", "false").lower() == "true":
         repl.api.logger.setLevel(logger.level)
     repl.backend = repl.api.backend
@@ -700,6 +764,7 @@ class LLMRepl:
         self.tasks = {}
         self.max_context_messages = MAX_CONTEXT_MESSAGES
         self.current_bg_task = None
+        self.config = {}
 
         with _active_repls_lock:
             _active_repls += 1
@@ -966,23 +1031,21 @@ class LLMRepl:
         console.print(f"[dim]Trimmed from {orig_size} to {len(str(self.messages))}[/dim]")
         console.print(f"[dim]Trimmed: {self.api.usage.summary()}[/dim]")
         token_est = estimate_tokens(self.messages)
+        chars = self.check_all_context_use()
         console.print(
             f"[dim]Messages: {len(self.messages)}, characters {chars}, est. tokens: {token_est}[/dim]"
         )
 
     def _request_chat_completion(self, messages: List[Dict[str, Any]], tools=None, tool_choice=None):
-        if self.notools:
-            tools = []
-            tool_choice = "none"
-        if os.getenv("BITNET", "0") == "1":
+        if self.notools or os.getenv("BITNET", "0") == "1":
             return self.client.chat.completions.create(
                 model=self.model,
-                messages=self._normalize_messages(messages, self.backend)
+                messages=normalize_messages(messages, self.backend)
             )
 
         return self.client.chat.completions.create(
             model=self.model,
-            messages=self._normalize_messages(messages, self.backend),
+            messages=normalize_messages(messages, self.backend),
             tools=tools or [],
             tool_choice=tool_choice or "auto",
         )
@@ -1070,7 +1133,7 @@ class LLMRepl:
                 console.print(f"[dim]warning[dim]")
                 current_messages.append({"role": "system", "content": warning})
             try:
-                json.dumps(self.tool_schemas) # defensive validation
+                # json.dumps(self.tool_schemas) # defensive validation
                 response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
                 msg = response.choices[0].message
                 # print((self.api.model, self.api.port, self.api.base_url))
@@ -1422,6 +1485,15 @@ class LLMRepl:
 
                 self.current_bg_task = None # Clear it
 
+    def _process_command(self, command, args, params):
+        logger.info(("COMMAND:", command, args, params))
+        status = self.cmd_dispatcher.dispatch(command, args, params)
+        if status:
+            logger.info(f"Command status: {status}")
+            if status == "quit":
+                return "QUIT"
+            if isinstance(status, LoopTask):
+                self.loop_task = status
 
     def run(self) -> None:
         try:
@@ -1430,7 +1502,7 @@ class LLMRepl:
             self.cmd_dispatcher = CommandDispatcher(self)
 
             self.cmd_dispatcher.load(commands, command_definitions)
-
+            self.aliases = {}
 
             command_help = ",".join(
                 f'[bold]/{k}[/bold] {v.get("help", "")}'
@@ -1468,23 +1540,25 @@ class LLMRepl:
                                 self.loop_task = None
                                 continue
                             console.print(f"User(loop) > {user_input}\n")
-                        command, args, params, errors = parse_command(user_input) # type: ignore
+
 
                         if not user_input:
                             continue
 
-                        status = None
-                        if command in self.cmd_dispatcher.commands:
-                            logger.info(("COMMAND:", command, args, params))
-                            status = self.cmd_dispatcher.dispatch(command, args, params)
-                            if status:
-                                logger.info(f"Command status: {status}")
-                                if status == "quit":
+                        if user_input.startswith("/"):
+                            command, args, params, errors = parse_command(user_input) # type: ignore
+                            if command in self.cmd_dispatcher.commands:
+                                status = self._process_command(command, args, params)
+                                if status == "QUIT":
                                     break
-                                if isinstance(status, LoopTask):
-                                    self.loop_task = status
-                            continue
-                        elif user_input.startswith("/"):
+                                continue
+                            elif command in self.aliases:
+                                alias = self.aliases[command]
+                                if isinstance(alias, Script):
+                                    result = alias(self, args, params)
+                                    if result:
+                                        console.print(result)
+                                    continue
                             console.print(f"[bold red]Unknown command: {user_input}[/bold red]")
                             continue
 
@@ -1499,7 +1573,7 @@ class LLMRepl:
                         if response.startswith("API Error:"):
                             console.print(f"[bold red]{response}[/bold red]")
                             diagnostics = self.get_diagnostics()
-                            console.print(Panel(Markdown(diagnostics), title="Diagnostics"))
+                            console.print(Panel(Markdown(str(diagnostics)), title="Diagnostics"))
 
                         # if response:
                         #     console.print(Panel(Markdown(response), title="Assistant"))

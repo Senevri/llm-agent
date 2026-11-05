@@ -2,12 +2,21 @@
 import logging
 import requests
 from urllib.parse import urlparse
-
+import yaml
 from ddgs import DDGS
+from pathlib import Path
+import sys
+if Path(__file__).resolve().parent.parent not in sys.path:
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 try:
     from tools.bash_tools import run_bash
+    from tools.web_search import create_web_search_tool, search_internet_sync
 except ImportError:
     from bash_tools import run_bash
+    from web_search import create_web_search_tool, search_internet_sync
+from mediawikiapi import MediaWikiAPI, WikipediaPage
+mediawikiapi = MediaWikiAPI()
 
 logger = logging.getLogger("InternetTools")
 
@@ -122,6 +131,32 @@ def read_web_page(url: str) -> str:
     except Exception as e:
         return f"Error reading web page: {str(e)}"
 
+def wikipedia_lookup(topic: str, mode="summary") -> str:
+    """Read a Wikipedia summary and return its content as plain text using w3m."""
+    modes = {
+        "summary": mediawikiapi.summary,
+        "page": mediawikiapi.page,
+        "search": mediawikiapi.search
+    }
+
+    if mode not in modes:
+        raise ValueError(f"Invalid mode: {mode}. Valid modes: {list(modes.keys())}")
+    logger.info(f"Reading Wikipedia {mode}: {topic}")
+    try:
+        # PoC: curl -sL <url> | w3m -dump -T text/html
+        func = modes[mode]
+        print(func)
+        result = func(topic)
+        print(result)
+        if isinstance(result, list):
+            result = "Topics:\n```yaml\n" + yaml.safe_dump(result) + "```"
+        elif isinstance(result, WikipediaPage):
+            #print(dir(result), type(result))
+            result = result.content
+        return result
+    except Exception as e:
+        return f"Error reading Wikipedia summary: {str(e)}"
+
 # Tool definitions for the LLM
 internet_tool_definition = {
     "type": "function",
@@ -176,16 +211,66 @@ read_web_page_tool_definition = {
     }
 }
 
+wikipedia_lookup_tool_definition = {
+    "type": "function",
+    "function": {
+        "name": "wikipedia_lookup",
+        "description": "Search Wikipedia for information about a specific topic.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "The topic to search Wikipedia for or the exact Wikipedia page title."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["summary", "page", "search"],
+                    "description": "The mode of Wikipedia lookup. Valid modes: summary, page, search."
+                }
+            },
+            "required": ["topic"]
+        }
+    }
+}
+
+tool_def = create_web_search_tool()
+tool_def.pop("function")
+web_search_tool_definition = {
+    "type": "function",
+    "function": tool_def
+    }
+
+
 # Mapping for tool execution
 INTERNET_TOOL_MAP = {
-    "search_internet": search_internet,
+    #"search_internet": search_internet,
     "read_web_page": read_web_page,
-    "get_weather": get_weather
+    "get_weather": get_weather,
+    "web_search": search_internet_sync,
+    "wikipedia_lookup": wikipedia_lookup
 }
 
 # Mapping for tool definition
 INTERNET_TOOL_DEFINITION_MAP = {
-    "search_internet": internet_tool_definition,
+    #"search_internet": internet_tool_definition,
     "read_web_page": read_web_page_tool_definition,
-    "get_weather": weather_tool_definition
+    "get_weather": weather_tool_definition,
+    "web_search": web_search_tool_definition,
+    "wikipedia_lookup": wikipedia_lookup_tool_definition
 }
+
+if __name__ == "__main__":
+
+    # result = read_web_page("https://www.reddit.com/r/SillyTavernAI/comments/1oscvwr/silly_guide_to_get_started_with_local_chat/")
+    # print(result)
+    # result = wikipedia_lookup("sillytavern ai", mode="summary")
+    # print(result)
+    result = wikipedia_lookup("artifical intelligence", mode="search")
+    print(result)
+    yaml_of_topics = result[result.find("yaml")+4:].strip("```")
+    print(yaml_of_topics)
+    list_of_topics = yaml.safe_load(yaml_of_topics)
+    print(list_of_topics)
+    result = wikipedia_lookup(list_of_topics[0], mode="page")
+    print(result[:1000])

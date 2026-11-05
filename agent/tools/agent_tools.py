@@ -266,6 +266,25 @@ def write_or_append_file(path: str, content: str, mode: str = "a", message: str 
     except Exception as e:
         return f"Error appending to file: {e}"
 
+global _repl_state
+_repl_state = {}
+
+def python_repl(code: str) -> str:
+    """Execute Python code in a persistent REPL session."""
+    # Use RestrictedPython or subprocess with timeout
+    # Maintain session state between calls
+    global _repl_state
+    if not _repl_state:
+        with open(WORKSPACE_DIR / "repl_state.json", "r") as f:
+            _repl_state = json.load(f)
+    session_globals = _repl_state.get("globals", {})
+    session_locals = _repl_state.get("locals", {})
+    try:
+        result = exec(code, session_globals, session_locals)
+        return str(result) if result else "OK"
+    except Exception as e:
+        return f"Error: {e}"
+
 # Tool Mapping
 TOOL_MAP = {
     "run_bash": run_bash,
@@ -279,7 +298,8 @@ TOOL_MAP = {
     **INTERNET_TOOL_MAP,
     **TMUX_TOOL_MAP,
     **CONTEXT_TOOL_MAP,
-    "generate_cloud_image": generate_cloud_image
+    "generate_cloud_image": generate_cloud_image,
+    "python_repl": python_repl
 }
 
 bash_description = "Execute a bash command. Use /tmp or /workspace for writes."
@@ -288,6 +308,18 @@ if platform.system() == "Windows":
 
 # Tool definitions for the LLM
 tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "python_repl",
+            "description": "execute python code in a persistent REPL session",
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string"}},
+                "required": ["code"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -430,4 +462,5 @@ if __name__=="__main__":
     module_dir = Path(__file__).parent.parent
     if  not module_dir in sys.path:
         sys.path.append(str(module_dir))
+    print(pformat(TOOL_DEFINITIONS))
     print(json.dumps(TOOL_DEFINITIONS, indent=2))

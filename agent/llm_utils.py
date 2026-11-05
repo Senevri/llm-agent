@@ -32,6 +32,16 @@ def normalize_messages( messages, provider):
 
     return normalized
 
+
+def discover_candidate_dir(start: Path, test: Path):
+    candidate_dir = start
+    for i in range(0,4):
+        if (candidate_dir / test).is_dir():
+            return candidate_dir
+        candidate_dir = candidate_dir.parent
+    return candidate_dir
+
+
 @dataclass
 class UsageTracker:
     prompt_tokens: int = 0

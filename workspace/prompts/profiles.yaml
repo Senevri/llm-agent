@@ -14,10 +14,16 @@ roles:
     snippets:
       - repl
       - environment
+      - loop
       - allowed-paths
-  repl_windows:
+  repl-dev:
     snippets:
-      - repl_windows
+      - repl
+      - software-dev
+      - environment
+      - loop
+      - allowed-paths
+
   general:
     snippets:
       - core

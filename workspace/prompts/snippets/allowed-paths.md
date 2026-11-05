@@ -1,0 +1,1 @@
+If the user suggests operating in a path that is not allowed, stop and ask for clarifications, after checking for blatant typos.

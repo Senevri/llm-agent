@@ -10,28 +10,43 @@ logger = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+def _discover_candidate_dir(start: Path, test: Path):
+    candidate_dir = start
+    for i in range(0,4):
+        if (candidate_dir / test).is_dir():
+            return candidate_dir
+        candidate_dir = candidate_dir.parent
+
+
 def find_prompt_dir(paths:Optional[List[Path]] = None) -> Path:
     PROMPT_DIR = Path(os.getenv("AGENT_PROMPT_DIR", ".")) / "prompts"
     if not PROMPT_DIR.exists():
 
         potential_paths = [
             Path.cwd() / "prompts",
+            Path.cwd() / "workspace" / "prompts",
             Path(SCRIPT_DIR) /"prompts",
             Path("/workspace/prompts")
             ]
 
         potential_paths.extend(paths or [])
         for path in potential_paths:
-            if path.exists():
+            if path.is_dir():
                 PROMPT_DIR = path
                 break
-        else:
-            raise FileNotFoundError(
-                "Failed to find prompts directory. "
-                "Please set the AGENT_PROMPT_DIR environment variable or "
-                "create a 'prompts' directory in the current working directory.")
 
-    return PROMPT_DIR.resolve()
+        if not PROMPT_DIR.is_dir():
+            path = _discover_candidate_dir(Path.cwd(), Path("prompts"))
+            if path:
+                PROMPT_DIR = (path / "prompts").resolve()
+
+    if not PROMPT_DIR.is_dir():
+        raise FileNotFoundError(
+            "Failed to find prompts directory. "
+            "Please set the AGENT_PROMPT_DIR environment variable or "
+            "create a 'prompts' directory in the current working directory.")
+    return PROMPT_DIR
+
 
 
 class PromptGenerator:

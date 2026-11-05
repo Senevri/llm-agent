@@ -1,8 +1,10 @@
 
 import os
 import json
-from typing import Dict, Any, List, Optional, Callable
+import yaml
+from typing import Dict, Any, List, Optional, Callable, Tuple
 from pathlib import Path
+from pprint import pformat
 
 try:
     from custom_logger import setup_logging
@@ -13,22 +15,104 @@ except ImportError:
 
 class Tool:
     """A tool definition combining metadata and implementation."""
+    """ Schema:
+            tools = [
+            {
+                "type": "function",
+                "name": "get_horoscope",
+                "strict": True,
+                "description": "Get today's horoscope for an astrological sign.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sign": {
+                            "type": "string",
+                            "description": "An astrological sign like Taurus or Aquarius",
+                        },
+                    },
+                    "required": ["sign"],
+                    "additionalProperties": False,
+                },
+            },
+        ]
+
+    """
+
     def __init__(self, name: str, description: str, func: Callable, parameters: Dict[str, Any]):
         self.name = name
         self.description = description
         self.func = func
         self.parameters = parameters
 
+        # Validate parameters
+        if not isinstance(parameters, dict):
+            raise ValueError(f"Parameters for tool '{name}' must be a dictionary.")
+        parameters_json = json.dumps(parameters) # Validate JSON schema
+
     def to_openai_schema(self) -> Dict[str, Any]:
         """Convert tool metadata to OpenAI function calling schema."""
+        parameters_json = json.dumps(self.parameters) # Validate JSON schema
         return {
             "type": "function",
             "function": {
-                "name": self.name,
-                "description": self.description,
+                "name": str(self.name),
+                "description": str(self.description),
                 "parameters": self.parameters
             }
         }
+
+class ToolPolicyError(Exception):
+    pass
+
+
+class ToolCallResult(dict):
+    def __init__(self, *, tool_call_id, name, content, max_length=4000):
+        super().__init__(
+            role="tool",
+            tool_call_id=tool_call_id,
+            name=name,
+            content=content,
+        )
+        self.max_length = max_length
+
+    def to_message(self, max_length=None):
+        limit = max_length or self.max_length
+        content = self["content"]
+        omitted = len(content) - limit
+
+        try:
+            content = json.dumps(content, indent=2)
+        except TypeError:
+            content = pformat(content)
+
+        if len(content) > limit:
+            content = (
+                content[:limit//2]
+                + f"...[{omitted} characters omitted]..."
+                + content[-limit//2:]
+            )
+
+        return {
+            "role": self["role"],
+            "tool_call_id": self["tool_call_id"],
+            "name": self["name"],
+            "content": content,
+        }
+
+    def to_archive(self):
+        return dict(self)
+
+    @property
+    def tool_call_id(self):
+        return self["tool_call_id"]
+
+    @property
+    def name(self):
+        return self["name"]
+
+    @property
+    def content(self):
+        return self["content"]
 
 
 class PathAccessError(Exception):
@@ -72,10 +156,16 @@ class ToolRegistry:
 
     def disable_tool(self, name: str):
         """Disable a tool by name."""
+        if name == "*":
+            self._disabled_tools = set(self._tools.keys())
+            return
         self._disabled_tools.add(name)
 
     def enable_tool(self, name: str):
         """Enable a tool by name."""
+        if name == "*":
+            self._disabled_tools = set()
+            return
         self._disabled_tools.discard(name)
 
 
@@ -98,7 +188,6 @@ class ToolRegistry:
 
             # validate policy:
             kwargs = self._validate_policy(tool_name, tool, kwargs)
-
             result = tool.func(**kwargs)
 
             if result is None:
@@ -115,7 +204,7 @@ class ToolRegistry:
 
     def _validate_policy(self, tool_name, tool, kwargs) -> dict:
         if tool_name in self._disabled_tools:
-            return f"Error: Tool '{tool_name}' is disabled."
+            raise ToolPolicyError(f"Error: Tool '{tool_name}' is disabled.")
         # Check allowed paths
         for k, v in tool.parameters.get("properties", {}).items():
             if (k in ["path", "cwd"]
@@ -125,13 +214,13 @@ class ToolRegistry:
                     path = resolve_allowed_path(path, self._allowed_paths)
                     kwargs[k] = str(path)
             # check if v is path
-            try:
-                if v.get("type") == "string":
-                    path = Path(kwargs.get(k))
-                    # Still don't know if it is a path.
-            except Exception as e:
-                # Probably not a path
-                pass
+            # try:
+            #     if v.get("type") == "string":
+            #         path = Path(kwargs.get(k))
+            #         # Still don't know if it is a path.
+            # except Exception as e:
+            #     # Probably not a path
+            #     pass
         return kwargs
 
     def _get_required_params(self, parameters: Dict[str, Any]) -> List[str]:

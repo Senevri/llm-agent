@@ -50,7 +50,13 @@ def tool_run_bash(command: str) -> str:
 
 def tool_read_file(path: str) -> str:
     try:
-        safe_path = os.path.normpath(path)
+        ignored_extensions = [
+            ".pyc", ".pyo", ".pyd", ".pyclass",
+            "__pycache__", ".o"
+        ]
+        for i in ignored_extensions:
+            if path.removesuffix("\\").lower().endswith(i):
+                return f"Error: will not read files of type {path.split('.')[-1]}"
         with open(safe_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         if len(content) > 3000:
@@ -71,8 +77,13 @@ def tool_write_file(path: str, content: str) -> str:
 
 def tool_list_files(path: str = ".") -> str:
     try:
+        ignorelist = [
+            ".git", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".venv"
+        ]
         safe_path = os.path.normpath(path)
-        items = os.listdir(safe_path)
+        items = list(
+            item for item in os.listdir(safe_path) if item not in ignorelist
+        )
         return "\n".join(items) if items else "(empty)"
     except Exception as e:
         return f"Error listing directory: {e}"
