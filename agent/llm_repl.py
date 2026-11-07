@@ -366,10 +366,21 @@ class Script:
     def __call__(self, repl, *args, **kwargs):
         #run_bash(self.script)
         if self.command == "python":
-            result = exec(self.script)
+            result = self._execute_python(self.script)
         else:
             result = run_bash(self.script)
         return result
+
+    def _execute_python(self, script):
+        try:
+            code = compile(script, "<alias>", "eval")
+        except SyntaxError:
+            code = compile(script, "<alias>", "exec")
+            exec(code, globals())
+            return None
+        else:
+            print (code, globals())
+            return eval(code, globals())
 
     def __str__(self):
         if len(self.script) > 20:
@@ -1704,9 +1715,15 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
         conf_path = Path.cwd() / "tool_config.yaml"
         if conf_path.is_file():
             with open(conf_path, "r", encoding="utf-8") as f:
-                conf = yaml.safe_load(f)
-            os.environ["ALLOWED_PATHS"] = ",".join(conf["allowed_paths"])
+                conf = yaml.safe_load(f) or {}
+            if conf:
+                allowed_paths = list(conf.get("allowed_paths", []))
+                if allowed_paths:
+                    os.environ["ALLOWED_PATHS"] = ",".join(allowed_paths)
+            else:
+                logger.warning(f"No allowed paths found in {conf_path}.")
         else:
+            logger.warning(f"No tool_config.yaml found in {Path.cwd()}.")
             os.environ["ALLOWED_PATHS"] = str(Path.cwd().resolve())
 
     registry = ToolRegistry()
@@ -1733,6 +1750,8 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
             repl_functions.pop(fn, None)
         #definitions = [d for d in definitions if d.get("function", {}).get("name") != "dispatch_agent"]
 
+    if conf.get("enabled_tools"):
+        definitions = [d for d in definitions if d.get("function", {}).get("name") in conf["enabled_tools"]]
 
     # Use the existing implementation map; the definitions supply schemas.
     implementations = dict(BASE_TOOL_MAP or {})

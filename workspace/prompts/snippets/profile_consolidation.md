@@ -9,3 +9,4 @@ goals, expertise, constraints, recurring context).
 - Consolidate recurring context, keep what is explicit and clear.
 - KEEP user preferences, recent goals, projects, stated schedule and todos.
 - Profile is for user, not the assistant.
+- Keep the gist of past things.

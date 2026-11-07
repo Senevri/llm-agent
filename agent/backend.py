@@ -239,7 +239,8 @@ class MistralApiEndpoint(APIEndpoint):
         super().__init__(model, base_url=base_url)
         self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
         self.ctx_size = 32000
-        self.model = self.model or "ministral-14b-latest"
+        self.model = model or "ministral-14b-latest"
+        self.port = None
         self.api_key = os.getenv("MISTRAL_API_KEY")
         if not self.api_key:
             raise RuntimeError("MISTRAL_API_KEY not set.")
@@ -271,9 +272,11 @@ class LLMBackend:
         self.context_limit = self.endpoint.ctx_size
         self.base_url=self.endpoint.base_url
         self.logger = logger
+        self.client = None
 
     def set_model(self, model: str):
-        self.model = modelget
+        self.model = model or self.model
+        return self.model
 
     def _get_endpoint(self):
 
@@ -291,6 +294,7 @@ class LLMBackend:
         return self.endpoint
 
     def update_context_limit(self, context_limit: int):
+
         self.context_limit = int(context_limit)
         self.usage.context_limit = context_limit
         logger.info(f"Context window set to: {context_limit}")
@@ -299,7 +303,7 @@ class LLMBackend:
     def get_client(self) -> tuple[OpenAI, str]:
         """Initializes the correct endpoint, discovers context, and returns the client."""
 
-        endpoint = self._get_endpoint()
+        self.endpoint = self._get_endpoint()
         self.model = self.endpoint.model
         # 2. Discover context window (this updates the usage tracker)
         # Note: Removed `backend=self.backend` kwarg unless your discover_context_window explicitly requires it
@@ -326,6 +330,7 @@ class LLMBackend:
         client, resolved_model = self.endpoint.get_client()
         # print(resolved_model)
         self.model = resolved_model
+        self.client = client
 
         return client, resolved_model
         # return endpoint.get_client()
@@ -340,7 +345,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--backend", type=str, default=defaultbackend, help="LLM backend to use (ollama, mistral, koboldcpp, llamacpp)")
     parser.add_argument("--model", type=str, default="", help="Model name to use (if applicable)")
-    parser.add_argument("--port", type=int, default="5001", help="Port for the backend service (if applicable)")
+    parser.add_argument("--port", type=int, default=None, help="Port for the backend service (if applicable)")
     args=parser.parse_args()
 
     # backend="mistral"

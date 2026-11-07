@@ -275,10 +275,12 @@ def python_repl(code: str) -> str:
     # Maintain session state between calls
     global _repl_state
     if not _repl_state:
-        with open(WORKSPACE_DIR / "repl_state.json", "r") as f:
-            _repl_state = json.load(f)
-    session_globals = _repl_state.get("globals", {})
-    session_locals = _repl_state.get("locals", {})
+        _repl_state = {}
+        if os.path.exists(WORKSPACE_DIR / "repl_state.json"):
+            with open(WORKSPACE_DIR / "repl_state.json", "r") as f:
+                _repl_state = json.load(f)
+        session_globals = _repl_state.get("globals", {})
+        session_locals = _repl_state.get("locals", {})
     try:
         result = exec(code, session_globals, session_locals)
         return str(result) if result else "OK"

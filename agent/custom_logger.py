@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+
 class LoggerWrap:
     def __init__(self, name: str = "UnifiedAgent", level: str = "INFO", log_dir: Optional[Path] = None):
         self._logger = logging.getLogger(name)
@@ -68,5 +69,18 @@ class LoggerWrap:
         self._logger.info(f"Log directory changed. Now logging to {new_log_path}")
 
 
+class LoggerFactory:
+    loggers = {}
+
+    def __init__ (self):
+        pass
+
+    def get_logger(self, name: str = "UnifiedAgent", level: str = "INFO", log_dir: Optional[Path] = None) -> LoggerWrap:
+        if name not in self.loggers:
+            self.loggers[name] = LoggerWrap(name=name, level=level, log_dir=log_dir)
+        return self.loggers[name]
+
+factory = LoggerFactory()
+
 def setup_logging(name: str = "UnifiedAgent", level: str = "INFO", log_dir: Optional[Path] = None) -> LoggerWrap:
-    return LoggerWrap(name=name, level=level, log_dir=log_dir)
+    return factory.get_logger(name=name, level=level, log_dir=log_dir)

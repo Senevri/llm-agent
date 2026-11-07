@@ -57,6 +57,7 @@ class PromptGenerator:
         self._profiles = self._load_profiles()
         self.enabled_skills = ["all"]
         self.platform = "linux"
+        logger.info(f"Prompts directory: {self.prompts_dir}\n Available roles: {list(self._profiles.keys())}")
 
     def _load_profiles(self) -> Dict:
         if not self.profiles_path.exists():

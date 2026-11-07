@@ -215,8 +215,10 @@ class LLMAgent:
 
                 messages = trimmed.get("messages", [])
                 # Could compress and insert...
-                message = self.ai_compress(trimmed.get("removed_sections"))
-                messages.insert(2, {"role": "system", "content": message})
+                compress_target = trimmed.get("removed_sections", None)
+                if compress_target:
+                    message = self.ai_compress(compress_target)
+                    messages.insert(2, {"role": "system", "content": message})
 
             try:
                 response = client.chat.completions.create(
@@ -370,10 +372,10 @@ def main():
         api.context_limit = args.context_limit
 
     try:
-        if args.port:
+        if args.port and args.port != -1:
+
             logger.info(f"Using port override: {args.port}")
             api.port = int(args.port)
-
         client, default_model = api.get_client()
     except Exception as e:
         logger.error(f"Client initialization failed: {e}")
@@ -433,7 +435,9 @@ def main():
 
     agent = LLMAgent(client, api, max_turns=args.max_turns, logger=logger, sleep_time=sleep_time)
     logger.info(f"--- Starting Agent Loop via {args.backend} ({api.model}) ---")
-    agent.run_turns(messages)
+    messages = agent.run_turns(messages)
+    with open("agent_messages.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(messages, f, default_flow_style=False, allow_unicode=True)
     logger.info("--- Agent Loop Complete ---")
     path = Path.cwd() / "agent_config.yaml"
     with open(path, "w", encoding="utf-8") as f:
