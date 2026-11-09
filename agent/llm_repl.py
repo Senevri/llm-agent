@@ -776,6 +776,7 @@ class LLMRepl:
         self.max_context_messages = MAX_CONTEXT_MESSAGES
         self.current_bg_task = None
         self.config = {}
+        self.last_message_time = None # todo, make a message class
 
         with _active_repls_lock:
             _active_repls += 1
@@ -1048,12 +1049,17 @@ class LLMRepl:
         )
 
     def _request_chat_completion(self, messages: List[Dict[str, Any]], tools=None, tool_choice=None):
+        request_start_time = time.time()
+        if self.backend == "mistral":
+            if self.last_message_time and time.time() - self.last_message_time < 1:
+                time.sleep(request_start_time - self.last_message_time)
+
         if self.notools or os.getenv("BITNET", "0") == "1":
             return self.client.chat.completions.create(
                 model=self.model,
                 messages=normalize_messages(messages, self.backend)
             )
-
+        self.last_message_time = time.time()
         return self.client.chat.completions.create(
             model=self.model,
             messages=normalize_messages(messages, self.backend),

@@ -33,6 +33,19 @@ class BackgroundProcess:
         self._thread = threading.Thread(target=self._run_worker, daemon=True, name=f"BgProc-{self.func.__name__}")
         self._thread.start()
 
+    def stop(self) -> Any:
+        self._is_running = False
+        if self._thread:
+            self._thread.join()
+            self._thread = None
+        while not self.output_queue.empty():
+            try:
+                self.output_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.output_queue.put(None)
+        return self.result
+
     def _run_worker(self) -> None:
         try:
             # Inject a thread-safe callback so the function can push intermediate status

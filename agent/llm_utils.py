@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 import os
-import requests
+import httpx2
 from typing import Optional, Iterable
 
 import logging
@@ -123,17 +123,17 @@ def discover_context_window(base_url: str, model: str, default: int = 4096, back
         return discover_openai_context_window(base_url, model, default)
     elif backend == "mistral":
         return discover_mistral_context_window(base_url, model, default)
-    elif backend in ["raw", "koboldcpp", "llamacpp"]:
+    elif backend in ["openai", "koboldcpp", "llamacpp"]:
         return discover_llama_context_window(base_url, model, default)
 
 def discover_ollama_context_window(base_url, model, default=4096):
     root = base_url.rstrip("/")
     if root.endswith("/v1"):
-        root = root[:-3]
+        root = root.removesuffix("/v1")
 
     # 1. Live served value — the one that actually matters.
     try:
-        r = requests.get(f"{root}/api/ps", timeout=5)
+        r = httpx2.get(f"{root}/api/ps", timeout=5)
         r.raise_for_status()
         for m in r.json().get("models", []):
             if m.get("name") == model or m.get("model") == model:
@@ -143,7 +143,7 @@ def discover_ollama_context_window(base_url, model, default=4096):
 
     # 2. Model max, even if not loaded. Scan arch-prefixed keys.
     try:
-        r = requests.post(f"{root}/api/show", json={"model": model}, timeout=5)
+        r = httpx2.post(f"{root}/api/show", json={"model": model}, timeout=5)
         r.raise_for_status()
         info = r.json().get("model_info", {})
         for k, v in info.items():
@@ -161,22 +161,43 @@ def discover_llama_context_window(base_url, model, default=4096):
     # NOTE: also  curl -s localhost:5001/props | jq -r .default_generation_settings.n_ctx
     assert base_url.startswith("http"), "base_url must be a full URL, e.g. http://localhost:5001/v1"
     url = base_url.removesuffix("/v1") + "/props"
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-    props = response.json()
-
-    ctx_size = props["default_generation_settings"]["n_ctx"]
+    try:
+        response = httpx2.get(url, timeout=10)
+        response.raise_for_status()
+        props = response.json()
+        ctx_size = props["default_generation_settings"]["n_ctx"]
+    except Exception as e:
+        logger.error(f"Failed to retrieve context size from {base_url}: {e}")
+        ctx_size = None
     if __name__ == "__main__":
-        from logging import getLogger
-        logger = getLogger(__name__)
         logger.info("LLaMA context window size: %s", ctx_size)
     return ctx_size or default
 
 
 def discover_mistral_context_window(base_url, model, default=4096):
     # todo: not implemented
-    return default
+    return discover_openai_context_window(base_url, model, default)
 
+def get_openai_models(base_url, api_key):
+    root = base_url.rstrip("/")
+    if not root.endswith("/v1"):
+        root = f"{root}/v1"
+
+    # Resolve API key from arguments or environment
+    resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
+
+    headers = {}
+    if resolved_api_key:
+        headers["Authorization"] = f"Bearer {resolved_api_key}"
+    try:
+        # Query the standard OpenAI-compatible model list endpoint
+        r = httpx2.get(f"{root}/models", headers=headers, timeout=5)
+        r.raise_for_status()
+
+        return r.json().get("data", [])
+    except Exception:
+        # Silently fail and fall back to default (network error, bad key, or endpoint doesn't support it)
+        pass
 
 def discover_openai_context_window(
     base_url: str,
@@ -194,38 +215,23 @@ def discover_openai_context_window(
     :param api_key: Optional API key. Falls back to MISTRAL_API_KEY or OPENAI_API_KEY env vars.
     """
     # Ensure base_url is clean and points to the /v1 endpoint
-    root = base_url.rstrip("/")
-    if not root.endswith("/v1"):
-        root = f"{root}/v1"
+    models_data = get_openai_models(base_url, api_key)
+    if not models_data:
+        return default
 
-    # Resolve API key from arguments or environment
-    resolved_api_key = api_key or os.getenv("MISTRAL_API_KEY") or os.getenv("OPENAI_API_KEY")
-
-    headers = {}
-    if resolved_api_key:
-        headers["Authorization"] = f"Bearer {resolved_api_key}"
-
+    contex_window_keys = ["context_window", "n_ctx", "max_tokens"]
     try:
-        # Query the standard OpenAI-compatible model list endpoint
-        r = requests.get(f"{root}/models", headers=headers, timeout=5)
-        r.raise_for_status()
-
-        models_data = r.json().get("data", [])
         for m in models_data:
             # OpenAI/Mistral use "id" for the model identifier
             if m.get("id") == model:
-                # Mistral explicitly includes "context_window" in this response
-                if "context_window" in m:
-                    return int(m["context_window"])
+                for i in contex_window_keys:
+                    if i in m:
+                        return int(m[i])
 
-                # Fallback for other providers that might use a different key name
-                if "max_tokens" in m:
-                    return int(m["max_tokens"])
-
-            # Loose match fallback: e.g., user passes "mistral-small", API returns "mistral-small-latest"
             elif model in m.get("id", ""):
-                if "context_window" in m:
-                    return int(m["context_window"])
+                for i in contex_window_keys:
+                    if i in m:
+                        return int(m[i])
 
     except Exception:
         # Silently fail and fall back to default (network error, bad key, or endpoint doesn't support it)
@@ -262,7 +268,10 @@ except ImportError:
 
 if __name__ == "__main__":
     # Example usage of discover_context_window for different backends
+
     print("Ollama context window:", discover_context_window("http://localhost:11434/v1", "mistral-small-latest", backend="ollama"))
-    print("OpenAI context window:", discover_context_window("https://api.openai.com/v1", "gpt-4", backend="openai"))
+    #print("OpenAI context window:", discover_context_window("https://api.openai.com/v1", "gpt-4", backend="openai"))
+    print("OpenAI context window:", discover_context_window("https://localhost:8080/v1", "gpt-4", backend="openai"))
     print("Mistral context window:", discover_context_window("https://api.mistral.ai/v1", "mistral-small-latest", backend="mistral"))
     print("LLaMA context window:", discover_context_window("http://localhost:5001/v1", "llama-2-7b-chat", backend="llamacpp"))
+    print("OpenAI Models:", get_openai_models("http://localhost:8080/v1", "00000000"))
