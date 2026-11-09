@@ -17,7 +17,7 @@ class LoggerWrap:
             log_dir = log_dir or Path.cwd() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_path = log_dir / f"agent_{name}_{stamp}.log"
+            log_path = log_dir / f"{name}_{stamp}.log"
             fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
             # Only add stream handler if no handlers exist at all
@@ -82,5 +82,5 @@ class LoggerFactory:
 
 factory = LoggerFactory()
 
-def setup_logging(name: str = "UnifiedAgent", level: str = "INFO", log_dir: Optional[Path] = None) -> LoggerWrap:
-    return factory.get_logger(name=name, level=level, log_dir=log_dir)
+def setup_logging(name: str = "UnifiedAgent", prefix: str = "", level: str = "INFO", log_dir: Optional[Path] = None) -> LoggerWrap:
+    return factory.get_logger(name=f"{prefix}{name}", level=level, log_dir=log_dir)

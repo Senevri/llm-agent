@@ -64,7 +64,7 @@ except ImportError:
 load_dotenv(SCRIPT_DIR / ".env")
 
 
-logger = setup_logging("RunAgent")
+logger = setup_logging("RunAgent", prefix="agent_")
 
 
 # --- Tool Registration ---

@@ -49,7 +49,7 @@ class APIEndpoint:
         parsed = parsed._replace(netloc=f"{base_url}:{port}")
         # parsed = parsed._replace(port=port)
 
-        self.base_url = parsed.geturl()
+        self.base_url = parsed.geturl().rstrip("/")
         logger.info (f"Set base url to {self.base_url}")
         # raise Exception("debugging")
 
@@ -62,14 +62,14 @@ class OpenAIEndpoint(APIEndpoint):
         self.api_key = "00000000"
         self.ctx_size = 32768  # Sensible default fallback;
         self.model = model
-        self.set_base_url(base_url, port)
+        self.set_base_url(base_url.rstrip("/"), port)
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
         self.available_models = MODEL_CATALOGS["openai"]()
         self.try_get_model()
 
     def get_client(self) -> tuple[OpenAI, str]:
-        return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
+        return OpenAI(base_url=f"{self.base_url}", api_key=self.api_key), self.model
 
     def get_model(self):
         if not self.model:
@@ -271,5 +271,6 @@ BACKEND_MAP: Dict[str, Type[APIEndpoint]] = {
             "mistral": MistralApiEndpoint,
             "koboldcpp": KoboldCppApiendpoint,
             "llamacpp": LlamaApiEndpoint,
-            "openai": OpenAIEndpoint
+            "openai": OpenAIEndpoint,
+            "groq": OpenAIEndpoint
         }

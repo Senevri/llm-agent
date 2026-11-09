@@ -26,17 +26,6 @@ def list_ollama_models():
     except Exception as e:
         return [f"Error: {e}"]
 
-def list_llamacpp_models():
-    gateway_ip = get_gateway_ip()
-    url = f"http://{gateway_ip}:9931/api/v1/models"
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        return [m['id'] for m in data.get('data', [])]
-    except Exception as e:
-        return [f"Error: {e}"]
-
 def list_mistral_models(api_key=None):
     if not api_key:
         # Try to load from /agent/.env if not provided

@@ -170,7 +170,7 @@ DEFAULT_BASE_URL = os.getenv(
     "OPENAI_BASE_URL",
     os.getenv("LLM_BASE_URL", f"http://{get_gateway_ip()}:11434/v1"),
 )
-DEFAULT_API_KEY = os.getenv("LLM_REPL_API_KEY", "ollama")
+DEFAULT_API_KEY = os.getenv("LLM_REPL_API_KEY", "00000000")
 DEFAULT_BACKEND = os.getenv("LLM_REPL_BACKEND", "ollama")
 
 # --- Rich / prompt_toolkit with safe fallbacks -----------------------------------
@@ -330,11 +330,11 @@ def load_commands():
         "quit": quit_command,
         "clear": clear_command,
         "sys": system_prompt_command,
-        "model": model,
-        "history": history,
+        "model": model_command,
+        "history": history_command,
         "profile": profile_command,
         "role": role_command,
-        "backend": backend,
+        "backend": backend_command,
         "help" : help,
         "loop": loop,
         "read": read_command,
@@ -433,9 +433,11 @@ def status_command(repl, *args, **kwargs):
 
 def repl_command(repl, *args, **kwargs):
     if args[0] == "help":
-        attr = getattr(repl, args[0])
-        console.print(inspect.signature(attr))
-        console.print(inspect.getdoc(attr))
+        if len(args) > 1:
+            attr = getattr(repl, args[1])
+            console.print(inspect.signature(attr))
+            console.print(inspect.getdoc(attr))
+        console.print("/repl show displays repl dir\n/repl help <method> displays help for method")
         return
     attr = args[0]
 
@@ -498,9 +500,12 @@ def system_prompt_command(repl, *args, **kwargs):
         repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
     console.print("[yellow]System prompt updated.[/yellow]")
 
-def backend(repl, *args, **kwargs):
+def backend_command(repl, *args, **kwargs):
+    try:
+        old_backend = [repl.backend, repl.api.port, repl.api.model, repl.client]
+    except AttributeError:
+        old_backend = [repl.backend, None, None, None]
 
-    old_backend = [repl.backend, repl.api.port, repl.api.model, repl.client]
     if len(args) < 1:
         console.print(f"availabe backends: {', '.join(BACKEND_MAP.keys())} (default: {repl.backend})")
         return
@@ -515,9 +520,11 @@ def backend(repl, *args, **kwargs):
             api.model = kwargs.get("model", api.model)
             api.base_url = kwargs.get("base_url", api.base_url)
             repl.client, repl.model = api.get_client()
+            repl.api = api
         except (ConnectError, HTTPError) as e:
             console.print(f"[red]Failed to switch backend: {e}[/red]")
-            repl.backend, repl.api.port, repl.api.model, repl.client = old_backend
+            repl.backend = old_backend[0]
+            repl.api.port, repl.api.model, repl.client = old_backend[1:]
             return
 
         repl.prompt_gen.reload_profiles()
@@ -653,10 +660,26 @@ def load_config(repl, *args, **kwargs):
         with open(conf_path, "r") as f:
             conf = yaml.safe_load(f) or {}
     repl.config = conf
+    ports = [
+        repl.config.get("port", ""),
+        repl.config.get("api", {}).get("port", ""),
+        ]
+    for port in ports:
+        logger.info(f"Config port: {port}")
+        if port == "auto" or not str(port).isnumeric():
+            repl.config["port"] = None
+            repl.config.get("api", {})["port"] = None
+            pass
+
     if conf:
         for k, v in conf.items():
-            repl.__dict__[k] = v if v is not None else repl.__dict__[k]
-    repl.api = LLMBackend(backend=conf.get("backend", repl.backend))
+            repl.__dict__[k] = v if v is not None else repl.__dict__.get(k, None)
+    try:
+        repl.api = LLMBackend(backend=conf.get("backend", repl.backend))
+    except Exception as e:
+        console.print(f"[red]Failed to switch backend: {e}[/red]")
+        return
+    # validate some values
 
     repl.aliases = {}
     for k, v in conf.get("aliases", {}).items():
@@ -670,7 +693,7 @@ def load_config(repl, *args, **kwargs):
 
 
 
-def history(repl, *args, **kwargs):
+def history_command(repl, *args, **kwargs):
     table = Table(title="Conversation History")
     table.add_column("Role", style="cyan")
     table.add_column("Content", style="white")
@@ -696,7 +719,7 @@ def role_command(repl, *args, **kwargs):
         repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
     console.print(f"[yellow]Role switched to: {repl.current_role}[/yellow]")
 
-def model(repl, *args, **kwargs):
+def model_command(repl, *args, **kwargs):
     if len(args) < 1:
         console.print(f"availabe models: {', '.join(repl.api.endpoint.list_models())} (default: {repl.model})")
         return
@@ -754,11 +777,7 @@ def shell_command(repl, *args, **kwargs):
 
 # --- Main REPL --------------------------------------------------------------------
 class LLMRepl:
-    def __init__(self, model=DEFAULT_MODEL,
-                 base_url=DEFAULT_BASE_URL,
-                 api_key=DEFAULT_API_KEY,
-                 profile_path: Path = PROFILE_PATH
-                 ):
+    def __init__(self, profile_path: Path = PROFILE_PATH):
 
         global _active_repls
         self._state_lock = threading.RLock()
@@ -766,9 +785,10 @@ class LLMRepl:
         self._jobs = {}
         self._shutdown_done = False
         self._profile_path = Path(profile_path)
-        self.backend="ollama"
+        self.backend=None
         self.loop_task=None
         self.dispatcher=None
+        self.api=None
         self.condensed_prompt = None
         self.notools=False
         self.current_role = "repl"
@@ -776,22 +796,33 @@ class LLMRepl:
         self.max_context_messages = MAX_CONTEXT_MESSAGES
         self.current_bg_task = None
         self.config = {}
+        self.model = None
+        self.client = None
         self.last_message_time = None # todo, make a message class
 
         with _active_repls_lock:
             _active_repls += 1
 
+    def init(
+            self, repl_be=os.getenv("LLM_REPL_BASE_URL", "http://localhost"),
+            port=os.getenv("LLM_REPL_PORT", 8080),
+            model=None
+            ):
+
+        self.config["backend"] = os.getenv("LLM_REPL_BACKEND", repl_be)
+        self.config["port"] = port
+
         try:
             # Note: llm_repl mutates self.api, self.client,
             # and self.model based on the loaded config.
-            self.api = load_config(self, base_url=base_url, model=model)
-
-            self.client, discovered_model = self.api.get_client()
-
+            self.api = load_config(self, model=model)
+            self.client, discovered_model = self.api.get_client() # type: ignore
+            self.model = discovered_model
         except Exception as e:
-            raise StartupError(f"Failed to create OpenAI client: {e}") from e
+            logger.error(f"Failed to create OpenAI client: {e}")
+            console.print(f"Failed to create OpenAI client: {e}\n")
+            self.model = "(unknown)"
 
-        self.model = discovered_model
         try:
             self.profile_manager = UserProfileManager(profile_path=self._profile_path)
         except Exception as e:
@@ -856,9 +887,13 @@ class LLMRepl:
 
         # profile_bytes = sum(self.profile_manager.get_profile_string().encode("utf-8"))
         profile_bytes = 0 # included in system_prompt
-        prompt_bytes = sum(self.system_prompt.encode("utf-8"))
+        prompt_bytes = len(self.system_prompt.encode("utf-8"))
         total_bytes = messages_bytes + profile_bytes + prompt_bytes
         return total_bytes
+
+    def show(self):
+        console.print(self.get_diagnostics())
+        console.print(dir(self))
 
     def get_diagnostics(self):
         return {
@@ -961,7 +996,10 @@ class LLMRepl:
                         sections = [content, sections[-1]]
                         logger.warning (f"condensed system prompt to {content}")
             except APIConnectionError:
-                logger.warning(f"{self.api.backend}: {self.api.base_url} is not reachable")
+                if self.api:
+                    logger.warning(f"{self.api.backend}: {self.api.base_url} is not reachable")
+                else:
+                    logger.warning("API is not reachable")
         sections.append(f"workspace: {str(WORKSPACE_DIR)}")
         return "\n".join(sections)
 
@@ -981,16 +1019,17 @@ class LLMRepl:
     def _trim_context(self, n_ctx:int=0) -> None:
         # Safe to call with or without holding _state_lock (RLock).
         with self._state_lock:
-            orig_size = len(str(self.messages))
+            orig_size_tokens = estimate_tokens(self.messages)
+            orig_size_bytes = len(str(self.messages).encode("utf-8"))
 
             logger.debug(
                     "Context before trim: messages=%d chars=%d",
-                    len(self.messages), orig_size
+                    len(self.messages), orig_size_bytes
                 )
 
             if (
                 len(self.messages) <= self.max_context_messages
-                and orig_size <= self.api.context_limit
+                and orig_size_tokens <= self.api.context_limit
                 and not n_ctx
                 ):
                 return
@@ -1040,7 +1079,7 @@ class LLMRepl:
                 content = f"Historical context summary - not a new response: {content}"
                 tail = [{"role": "assistant", "content": content}] + tail
             self.messages = [self.messages[0]] + tail
-        console.print(f"[dim]Trimmed from {orig_size} to {len(str(self.messages))}[/dim]")
+        console.print(f"[dim]Trimmed from {orig_size_bytes} to {len(str(self.messages))}[/dim]")
         console.print(f"[dim]Trimmed: {self.api.usage.summary()}[/dim]")
         token_est = estimate_tokens(self.messages)
         chars = self.check_all_context_use()
@@ -1525,9 +1564,13 @@ class LLMRepl:
                 f'[bold]/{k}[/bold] {v.get("help", "")}'
                 for k, v in command_definitions.items()
                 )
+            try:
+                base_url =self.client.base_url
+            except Exception:
+                base_url = "(unset)"
 
             console.rule("[bold green]LLM REPL Started (Profiled V2)[/bold green]")
-            console.print(f"Model: [bold]{self.model}[/bold] | Base URL: [bold]{self.client.base_url}[/bold]")
+            console.print(f"Model: [bold]{self.model}[/bold] | Base URL: [bold]{base_url}[/bold]")
             console.print(f"Commands: {command_help}")
 
             try:
@@ -1540,10 +1583,17 @@ class LLMRepl:
             with patch_stdout(True):
                 while True:
                     # live update model
-                    self.model = self.api.model
+
                     # Write a statusbar
+                    try:
+                        self.model = self.api.model
+                        base_url = self.client.base_url
+                        n_ctx = self.api.context_limit
+                    except Exception:
+                        base_url = "(unset)"
+                        n_ctx = "(unset)"
                     console.rule(
-                        f"[turquoise4]{self.model}|{self.client.base_url}|{self.api.context_limit}|{self.backend}[/turquoise4]"
+                        f"[turquoise4]{self.model}|{base_url}|{n_ctx}|{self.backend}[/turquoise4]"
                     )
                     try:
                         if not self.loop_task:
@@ -1731,6 +1781,8 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
         else:
             logger.warning(f"No tool_config.yaml found in {Path.cwd()}.")
             os.environ["ALLOWED_PATHS"] = str(Path.cwd().resolve())
+            # Path(conf_path).touch() # Let's not, for now.
+            conf = {}
 
     registry = ToolRegistry()
 
@@ -1821,22 +1873,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run LLM REPL")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--backend", default=DEFAULT_BACKEND, help="LLM backend to use")
+    parser.add_argument("--port", default=9931, type=int, help="Port to use")
     args = parser.parse_args()
 
     if args.debug:
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug logging enabled")
 
-
-
-
     try:
-        repl = LLMRepl(
-            model=os.getenv("LLM_REPL_MODEL", DEFAULT_MODEL),
-            base_url=os.getenv("LLM_REPL_BASE_URL", DEFAULT_BASE_URL),
-            api_key=os.getenv("LLM_REPL_API_KEY", DEFAULT_API_KEY),
-        )
-        repl.backend=os.getenv("LLM_REPL_BACKEND", args.backend)
+        repl = LLMRepl()
+        repl.init(args.backend, args.port)
     except Exception as e:
         logger.exception("Failed to initialize REPL")
         try:

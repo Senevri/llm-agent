@@ -30,7 +30,7 @@ logger = setup_logging("Backend", level="INFO", log_dir=Path(LOG_DIR))
 
 
 class LLMBackend:
-    def __init__(self, backend: str = "mistral", config_file: str = "endpoints.yaml"):
+    def __init__(self, backend: str = "mistral", config_file: str = "endpoints.yaml", defer_init=False):
         self.available_models = []
         self.backend = backend
         self.endpoints = self.load_endpoints(config_file)
@@ -38,10 +38,17 @@ class LLMBackend:
         self.model = os.getenv("AGENT_MODEL", "")
         logger.info(f"Backend: {backend}, Model: {self.model or '(default)'}")
         self.backends = BACKEND_MAP.keys()
-        self.endpoint: Optional[APIEndpoint] = BACKEND_MAP[self.backend](model=self.model)
-        self.port: Optional[int] = self.endpoint.port
-        self.context_limit = self.endpoint.ctx_size
-        self.base_url=self.endpoint.base_url
+        if not defer_init:
+            self.endpoint: Optional[APIEndpoint] = BACKEND_MAP[self.backend](model=self.model)
+            self.port: Optional[int] = self.endpoint.port
+            self.context_limit = self.endpoint.ctx_size
+            self.base_url=self.endpoint.base_url
+            self.endpoint.api_key = os.getenv(f"{self.backend}_API_KEY", "00000000")
+        else:
+            self.endpoint = None
+            self.port = None
+            self.context_limit = -1
+            self.base_url = "http://localhost:8080"
         self.logger = logger
         self.client = None
 
@@ -66,17 +73,16 @@ class LLMBackend:
         return yaml.safe_load(open(config_file, encoding="utf-8"))
 
     def _get_endpoint(self):
-        endpoint_cls: Optional[Type[APIEndpoint]] = BACKEND_MAP.get(self.backend)
+        endpoint_cls = BACKEND_MAP.get(self.backend)
         if not endpoint_cls:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
-        # 1. Instantiate the specific endpoint with the current model state
-        self.endpoint = endpoint_cls(model=self.model, base_url=self.base_url, port=str(self.port))
-
-        if self.endpoint.base_url.find(f"{self.port}") == -1:
-            # print(dict(endpoint_cls))
-            self.endpoint.set_base_url(self.endpoint.base_url, self.port)
-            logger.info(f"Adjusted base URL to: {self.endpoint.base_url}")
+        # The constructor now receives the correct, final values immediately
+        self.endpoint = endpoint_cls(
+            model=self.model,
+            base_url=self.base_url,
+            port=str(self.port) # Pass as int or str depending on what your subclass expects
+        )
         return self.endpoint
 
     def update_context_limit(self, context_limit: int):
@@ -138,7 +144,7 @@ if __name__ == "__main__":
     # backend="mistral"
     # model="ministral-14b-latest"
 
-    llm_backend = LLMBackend(backend=args.backend)
+    llm_backend = LLMBackend(backend=args.backend, defer_init=True)
     llm_backend.port = args.port
 
 
