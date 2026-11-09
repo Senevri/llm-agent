@@ -4,9 +4,9 @@ import platform
 import sys
 import subprocess
 #import logging
+from typing import List, Union
 import json
 from pathlib import Path
-import platform
 
 try:
     import tools
@@ -43,6 +43,8 @@ from datetime import datetime, timezone
 TOOL_TIMEOUT = int(os.getenv("AGENT_TOOL_TIMEOUT", "60"))
 MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
 
+BG_TIMEOUT = TOOL_TIMEOUT
+
 from custom_logger import setup_logging
 
 
@@ -57,6 +59,34 @@ def _is_memory_file(path: str) -> bool:
         logger.error(f"Error checking memory file: {e}")
         return False
 
+class CacheFile:
+    def __init__(self, path: str, lines: List[str]):
+        self.path = path
+        self.lines = lines
+        # NOTE: could use st_mtime_ns instead
+        self.stat: os.stat_result = os.stat(path)
+
+class Files:
+    open_files = {}
+
+    def get_open_files(self):
+        return self.open_files
+
+    def add_file(self, path: Union[str, Path], lines: List[str]):
+        self.open_files[path] = CacheFile(str(path), lines)
+
+    def read_file(self, path: Union[str, Path]):
+        stat = os.stat(path)
+        if path in self.open_files:
+            cached=self.open_files[path]
+
+            if cached.stat.st_mtime == stat.st_mtime:
+                return cached.lines
+        self.add_file(path, _read_file_all(path))
+        return self.open_files[path].lines
+
+files = Files()
+
 # --- Tool Implementations ---
 
 def tool_now() -> str:
@@ -66,25 +96,31 @@ DEFAULT_READ_CHARS = 12_000
 MAX_READ_CHARS = 24_000
 
 
+def _read_file_all(path: Union[str, Path],) -> List[str]:
+    path = _relative_paths_helper(str(path))
+
+    p = Path(path).expanduser().resolve()
+
+    if not p.exists():
+        raise FileNotFoundError(f"Error: file does not exist: {p}")
+    if not p.is_file():
+        raise FileNotFoundError(f"Error: not a regular file: {p}")
+
+    lines = []
+    # Read text, not a fixed number of bytes.
+    with p.open("r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+
+    return lines
+
 def read_file(
     path: str,
     start_line: int = 1,
     max_lines: int = 0,
-    max_chars: int = DEFAULT_READ_CHARS,
-) -> str:
-    """Read a local UTF-8 text file with explicit paging metadata."""
-    path = _relative_paths_helper(path)
+    max_chars: int = DEFAULT_READ_CHARS,):
+    """ Read lines from a file. with paging and utf-8 encoding. """
     try:
-
-        p = Path(path).expanduser().resolve()
-
-        if not p.is_file():
-            return f"Error: not a regular file: {p}"
-
-        # Read text, not a fixed number of bytes.
-        with p.open("r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-
+        lines = files.read_file(path)
         total_lines = len(lines)
         if start_line < 1 or start_line > total_lines + 1:
             return (
@@ -95,22 +131,18 @@ def read_file(
         max_chars = max(1, min(max_chars, MAX_READ_CHARS))
         start_idx = start_line - 1
         end_idx = total_lines if max_lines <= 0 else min(
-            total_lines, start_idx + max_lines
-        )
+            total_lines, start_idx + max_lines)
+
 
         selected = []
         chars = 0
         next_line = None
 
+
         for idx in range(start_idx, end_idx):
             line = lines[idx]
-            if chars + len(line) > max_chars:
-                remaining = max_chars - chars
-                if remaining > 0:
-                    selected.append(line[:remaining])
-                next_line = idx + 1
+            if selected and chars + len(line) > max_chars:
                 break
-
             selected.append(line)
             chars += len(line)
 
@@ -118,10 +150,11 @@ def read_file(
             next_line = end_idx + 1
 
         actual_end = start_idx + len(selected)
+
         header = (
-            f"File: {p}\n"
+            f"File: {path}\n"
             f"Total lines: {total_lines}\n"
-            f"Showing from line {start_line}; "
+            f"Showing lines {start_line} - {actual_end}; "
             f"returned {len(selected)} line(s).\n"
         )
 
@@ -134,9 +167,37 @@ def read_file(
             header += "End of requested content reached.\n"
 
         return header + "\n--- CONTENT ---\n" + "".join(selected)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
 
     except Exception as e:
         return f"Error reading {path}: {e}"
+
+def replace_lines_in_file(path: Union[str, Path], lines: List[str], start_line: int, orig_lines: List[str]) -> str:
+    path = _relative_paths_helper(str(path))
+    try:
+        file_lines = files.read_file(path)
+        check_lines = file_lines[start_line-1:start_line-1+len(orig_lines)]
+        logger.debug (f"Check lines:{check_lines}")
+        if len(check_lines) != len(orig_lines):
+            return "Error: original lines do not match"
+        for i, line in enumerate(check_lines):
+            if line.rstrip() != orig_lines[i].rstrip():
+                return f"Error: lines do not match"
+        new_lines = file_lines[:start_line - 1] + [f"{l.rstrip()}\n" for l in lines] + file_lines[start_line-1+len(orig_lines):]
+        logger.debug(f"New lines: {new_lines}")
+        with open(f"{path}.tmp", 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+        tmp_path = Path(f"{path}.tmp")
+        if not tmp_path.exists():
+            raise IOError("Temporary file was not created")
+        if tmp_path.read_text(encoding="utf-8") != "".join(new_lines):
+            raise IOError("Temporary file verification failed")
+        os.replace(tmp_path, path)
+        files.open_files.pop(path, None)
+        return f"Successfully replaced lines in {path}"
+    except Exception as e:
+        return f"Error replacing lines in file: {e}"
 
 
 def read_file_lines(path: str, start_line: int = 1, end_line: int = None) -> str:
@@ -156,9 +217,6 @@ def read_file_lines(path: str, start_line: int = 1, end_line: int = None) -> str
     except Exception as e:
         return f"Error reading lines: {str(e)}"
 
-def find_file(path: str, filename: str) -> str:
-    return list_files(path, filename)
-
 def search_file(path: str, query: str) -> str:
     """Search for a string within a file and return matching lines with line numbers."""
     path = _relative_paths_helper(path)
@@ -168,7 +226,7 @@ def search_file(path: str, query: str) -> str:
         with open(path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f, 1):
                 if query in line:
-                    matches.append(f"{i}: {line}")
+                    matches.append(f'line {i}: found "{line}"')
         return matches
 
     try:
@@ -183,6 +241,8 @@ def search_file(path: str, query: str) -> str:
                 return f"Searched files in {path}:\n{result}"
                 # return f"Error: not a regular file: {path} were you trying to search a directory?"
             return f"Error: not a regular file: {path} were you trying to search a directory?"
+
+        matches = _search_file(path, query)
 
         if not matches:
             return "No matches found."
@@ -230,26 +290,12 @@ def write_file(path: str, content: str) -> str:
             "Use update_memory to append an entry."
         )
 
+    if path in files.open_files:
+        del files.open_files[path]
+
     logger.info("Writing file: %s", path)
     return write_or_append_file(
         path, content, mode="w", message=f"Successfully wrote {len(content)} chars to {path}")
-
-def replace_lines(
-    path="/workspace/tagdb_tui/main.py",
-    start_line=42,
-    end_line=48,
-    content="def search_tags(query):\n    ..."
-):
-    ...
-
-def insert_lines(
-    path="/workspace/tagdb_tui/main.py",
-    before_line=42,
-    content="# Search functionality\n"
-):
-    # Insert content before a specific line
-    pass # Implementation would go here
-
 
 def append_file(path: str, content: str) -> str:
     """Append content to a file."""
@@ -279,10 +325,22 @@ def python_repl(code: str) -> str:
         if os.path.exists(WORKSPACE_DIR / "repl_state.json"):
             with open(WORKSPACE_DIR / "repl_state.json", "r") as f:
                 _repl_state = json.load(f)
-        session_globals = _repl_state.get("globals", {})
-        session_locals = _repl_state.get("locals", {})
+    session_globals = _repl_state.get("globals", {})
+    session_locals = _repl_state.get("locals", {})
     try:
-        result = exec(code, session_globals, session_locals)
+        # timeout = 10 # TODO: Make this configurable
+        from background_util import run_in_background
+        import time
+
+        bg = run_in_background(lambda: exec(code, session_globals, session_locals))
+        try:
+            result = bg.wait(timeout=BG_TIMEOUT)
+        except Exception as e:
+            logger.error(f"Error in python_repl: {e}")
+            results = bg.stop()
+            return f"Error: {e}; results: {results}"
+        _repl_state["globals"] = session_globals
+        _repl_state["locals"] = session_locals
         return str(result) if result else "OK"
     except Exception as e:
         return f"Error: {e}"
@@ -292,9 +350,11 @@ TOOL_MAP = {
     "run_bash": run_bash,
     "read_file": read_file,
     "read_file_lines": read_file_lines,
+    "replace_lines": replace_lines_in_file,
     "search_file": search_file,
     "list_files": list_files,
     "write_file": write_file,
+    "append_file": append_file,
     "install_deb_package": install_deb_package,
     "now": tool_now,
     **INTERNET_TOOL_MAP,
@@ -310,6 +370,23 @@ if platform.system() == "Windows":
 
 # Tool definitions for the LLM
 tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_lines",
+            "description": "Replace lines in a file. Safe for large files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "lines": {"type": "array", "items": {"type": "string"}},
+                    "start_line": {"type": "integer"},
+                    "orig_lines": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["path", "lines", "start_line", "orig_lines"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -417,6 +494,21 @@ tools = [
     {
         "type": "function",
         "function": {
+            "name": "append_file",
+            "description": "Append content to a file by path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "now",
             "description": "Get the current date and time in ISO 8601 format.",
             "parameters": {
@@ -459,10 +551,5 @@ tools.append(CLOUD_IMAGE_GEN_TOOL_DEFINITION)
 TOOL_DEFINITIONS = tools
 
 if __name__=="__main__":
-    from pprint import pprint, pformat
-    import json
-    module_dir = Path(__file__).parent.parent
-    if  not module_dir in sys.path:
-        sys.path.append(str(module_dir))
-    print(pformat(TOOL_DEFINITIONS))
-    print(json.dumps(TOOL_DEFINITIONS, indent=2))
+    pass
+# Moved test to tests; have not tested since.
