@@ -46,7 +46,7 @@ def list_mistral_models(api_key=None):
     try:
         client = Mistral(api_key=api_key)
         models_response = client.models.list()
-        return [m.id for m in models_response.data]
+        return [m.id for m in models_response.data] # type: ignore
     except Exception as e:
         return [f"Error: {e}"]
 
@@ -65,12 +65,71 @@ def list_koboldcpp_models():
     except Exception as e:
         return [f"Error: {e} (Backend likely not running)"]
 
+def get_openai_models(base_url, api_key):
+
+    root = base_url.rstrip("/")
+    if not root.endswith("/v1"):
+        root = f"{root}/v1"
+
+    # Resolve API key from arguments or environment
+    resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
+
+    headers = {}
+    if resolved_api_key:
+        headers["Authorization"] = f"Bearer {resolved_api_key}"
+    try:
+        # Query the standard OpenAI-compatible model list endpoint
+        r = requests.get(f"{root}/models", headers=headers, timeout=5)
+        r.raise_for_status()
+
+        return r.json().get("data", [])
+    except Exception:
+        # Silently fail and fall back to default (network error, bad key, or endpoint doesn't support it)
+        pass
+
+def list_openai_models():
+    models = get_openai_models(
+        f"{os.getenv('OPENAI_BASE_URL', 'http://localhost:8080')}/v1",
+        os.getenv("OPENAI_API_KEY")
+        )
+    if models:
+        return [m['id'] for m in models]
+
+def list_llamacpp_models():
+    gateway_ip = get_gateway_ip()
+    url = f"http://{gateway_ip}"
+    try:
+        response = get_llamacpp_models(url, port=os.getenv("LLAMA_PORT", "9931"))
+        data = response.json()
+        return [m['id'] for m in data.get('data', [])]
+    except Exception as e:
+        return [f"Error: {e}"]
+
+def get_llamacpp_models(base_url, port="9931"):
+    # /api/v1/model
+    if not base_url:
+        gateway_ip = get_gateway_ip()
+        base_url = f"http://{gateway_ip}:{port}"
+    available_models = requests.get(base_url + "/models")
+    # format: {"result": "<model_name
+    return available_models.json().get("models", [])
+
+
 def get_all_models():
     return {
         "ollama": list_ollama_models(),
         "mistral": list_mistral_models(),
-        "koboldcpp": list_koboldcpp_models()
+        "koboldcpp": list_koboldcpp_models(),
+        "openai": list_openai_models()
     }
+
+MODEL_CATALOGS = {
+    "ollama": list_ollama_models,
+    "mistral": list_mistral_models,
+    "koboldcpp": list_koboldcpp_models,
+    "llamacpp": list_llamacpp_models,
+    "openai": list_openai_models
+}
 
 def main():
     print("Fetching available models...")
@@ -80,7 +139,9 @@ def main():
     backend_map = {
         "ollama": list_ollama_models,
         "mistral": list_mistral_models,
-        "koboldcpp": list_koboldcpp_models
+        "koboldcpp": list_koboldcpp_models,
+        "llamacpp": list_llamacpp_models,
+        "openai": list_openai_models
     }
 
     if len(sys.argv) > 1:

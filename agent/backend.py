@@ -1,13 +1,17 @@
 import os
-import httpx2 as requests
+from pathlib import Path
+from typing import Dict, Optional, Type
 from urllib.parse import urlparse, urlsplit
-from openai import OpenAI
-from get_ip import get_gateway_ip
-from llm_utils import UsageTracker, discover_context_window, discover_candidate_dir
+
+import httpx2 as requests
+import yaml
 from custom_logger import setup_logging
 from dotenv import load_dotenv
-from typing import Optional, Dict, Type
-from pathlib import Path
+from get_ip import get_gateway_ip
+from llm_utils import (UsageTracker, discover_candidate_dir,
+                       discover_context_window)
+from api_endpoint import APIEndpoint, BACKEND_MAP
+from openai import OpenAI
 
 AGENT_DIR = os.getenv("AGENT_DIR", "/agent")
 if not Path(AGENT_DIR).exists():
@@ -23,246 +27,13 @@ else:
 logger = setup_logging("Backend", level="INFO", log_dir=Path(LOG_DIR))
 
 
-class APIEndpoint:
-    """Base class for LLM API endpoints."""
-    def __init__(self, model: str = "", base_url: str = ""):
-        self.model = model
-        self.base_url = base_url
-        self.port = -1
-        self.api_key = ""
-        self.ctx_size = 4096  # Sensible default fallback
-
-    def get_models(self) -> list[str]:
-        raise NotImplementedError("Subclasses must implement get_models()")
-
-    def get_client(self) -> tuple[OpenAI, str]:
-        raise NotImplementedError("Subclasses must implement get_client()")
-
-    def set_base_url(self, base_url, port=None):
-        #parsed = urlsplit(base_url)
-        #print (f"Setting base URL to {base_url} with port {port}")
-        logger.info(f"Setting base URL to {base_url} with port {port}")
-        parsed = urlparse(base_url)
-
-        if not port:
-            raise ValueError("Port is required")
-
-        base_url =  parsed.netloc.split(":")[0] or parsed.netloc
-        parsed = parsed._replace(netloc=f"{base_url}:{port}")
-        # parsed = parsed._replace(port=port)
-
-        self.base_url = parsed.geturl()
-        logger.info (f"Set base url to {self.base_url}")
-        # raise Exception("debugging")
-
-class RawEndpoint(APIEndpoint):
-
-    def __init__(self, model: str = "", base_url: str = "http://localhost"):
-
-        super().__init__(model, base_url)
-        self.api_key = "00000000"
-        self.ctx_size = 4096  # Sensible default fallback
-        self.model = model
-        self.try_get_model()
-
-    def get_client(self) -> tuple[OpenAI, str]:
-        return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
-
-    def get_model(self):
-        return self.try_get_model()
-
-    def try_get_model(self) -> str:
-        self_model = self.model or ""
-        try:
-            response = requests.get(f"{self.base_url}/models", timeout=5)
-            response.raise_for_status()
-            models_data = response.json().get("data", [])
-            available_models = [m.get("id") for m in models_data if "id" in m]
-            self.model = next((m for m in available_models if m.startswith(self_model)), self.model)
-        except Exception as e:
-            logger.error(f"Failed to retrieve models from {self.base_url}: {e}")
-        try:
-            url = self.base_url.removesuffix("/v1")  + "/api/v1/model"
-            current_model = requests.get(url)
-            if current_model:
-                self.model = current_model.json().get("result", self.model)
-        except Exception as e:
-            logger.error(f"Failed to retrieve current model from {self.base_url}: {e}")
-        try:
-            url = self.base_url.removesuffix("/v1")  + "/models"
-            models = requests.get(url)
-            models = models.json()["models"]
-            model_names = [model["name"] for model in models]
-            if self.model not in model_names:
-                logger.info(f"Setting default model to {models[0]['name']}")
-                self.model = models[0]["model"]
-        except Exception as e:
-            logger.error(f"Failed to retrieve available models from {self.base_url}: {e}")
-
-        return self.model
-
-
-class KoboldCppApiendpoint(APIEndpoint):
-    def __init__(self, model: str = "", base_url: str = ""):
-        super().__init__(model, base_url)
-        self.port = os.getenv("KOBOLD_PORT", "5001")
-        if not base_url:
-            host_ip = get_gateway_ip()
-            self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:{self.port}/")
-        self.ctx_size = 8192
-        self.api_key = "kobold"
-        try:
-            self.model = self.get_kobold_model()
-            self.ctx_size = self.get_kobold_ctx()
-        except Exception as e:
-            logger.error(f"Failed to get Kobold model: {e}")
-            self.model = ""
-
-    def get_kobold_ctx(self):
-        # /api/extra/true_max_context_length
-        current_ctx = requests.get(self.base_url + "/api/extra/true_max_context_length")
-        return current_ctx.json()["value"]
-
-    def get_models(self):
-        self.get_kobold_model()
-
-    def get_kobold_model(self):
-        # /api/v1/model
-        current_model = requests.get(self.base_url + "/api/v1/model")
-        # format: {"result": "<model_name>"}
-        return current_model.json()["result"]
-
-    def get_client(self) -> tuple[OpenAI, str]:
-        # Return openapi compatible way for now
-        return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
-
-class LlamaApiEndpoint(APIEndpoint):
-    """ TODO:
-    implement wrappers maybe?
-        Endpoint	Purpose
-        GET /health	Liveness check: 200 when ready, 503 while loading
-        POST /completion	Native completion with the full llama.cpp option set (token arrays, n_probs logprobs, id_slot pinning, per-request LoRA scales, …)
-        POST /tokenize / POST /detokenize	Convert between text and tokens
-        POST /apply-template	Apply the model’s chat template without running inference
-        POST /infill	Fill-in-the-middle code completion from input_prefix and input_suffix
-        GET /props	Server and model properties (context size, chat template, modalities)
-        GET /slots	Current state of each processing slot
-        GET /metrics	Prometheus metrics (requires --metrics)
-        GET /lora-adapters / POST /lora-adapters	List and set LoRA adapter scales at runtime
-    """
-    def __init__(self, model: str = "", base_url: str = ""):
-        super().__init__(model, base_url)
-        self.port = os.getenv("LLAMA_PORT", "9931")
-        if not base_url:
-            host_ip = get_gateway_ip()
-            self.base_url = os.getenv(
-                "LLAMA_BASE_URL",
-                f"http://{host_ip}:{self.port}/v1"
-        ).rstrip("/")
-        if os.getenv("DEBUG", "false").lower() == "true":
-            logger.info(self.base_url)
-        self.api_key = "llama"
-        # Can be overwritten by args
-        self.ctx_size = 32768
-        # Empty means resolve the model from the server.
-        self.model = model
-
-
-    def get_context_size(self) -> int:
-        url = self.base_url.removesuffix("/v1") + "/props"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-
-        props = response.json()
-        return props["default_generation_settings"]["n_ctx"]
-
-    def get_client(self) -> tuple[OpenAI, str]:
-        self.set_default_model()
-        self.ctx_size = self.get_context_size()
-        return OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-        ), self.model
-
-    def get_model(self):
-        if not self.model:
-            self.set_default_model()
-        return self.model
-
-    def set_default_model(self):
-        models = self.get_llama_models()
-        if not models:
-            logger.warning("No models found from LLaMA endpoint.")
-            return
-        model_names = [model["name"] for model in models]
-        if self.model not in model_names:
-            logger.info(f"Setting default model to {models[0]['name']}")
-            self.model = models[0]["model"]
-        return self.model
-
-    def get_llama_models(self):
-        # /api/v1/model
-        if not self.base_url:
-            return []
-        available_models = requests.get(self.base_url + "/models")
-        # format: {"result": "<model_name
-        return available_models.json().get("models", [])
-
-class OllamaApiEndpoint(APIEndpoint):
-    def __init__(self, model: str = "", base_url: str = ""):
-        super().__init__(model, base_url)
-        self.port = os.getenv("OLLAMA_PORT", "11434")
-
-        if not base_url:
-            host_ip = get_gateway_ip()
-            self.base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1")
-        self.api_key = "ollama"
-        self.ctx_size = 8192  # Ollama default, but will be overwritten by discovery
-        self.model = self.model or "gemma4:31b-cloud"
-
-    def get_client(self) -> tuple[OpenAI, str]:
-        # Resolve default model at the last possible moment
-        return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
-
-    def get_model(self):
-        self.model = self.get_ollama_model()
-
-    def get_ollama_model(self):
-        # /apimodel
-        current_model = requests.get(self.base_url + "/api/v1/model")
-        # format: {"result": "<model_name>"}
-        return current_model.json()["result"]
-
-
-class MistralApiEndpoint(APIEndpoint):
-    def __init__(self, model: str = "", base_url: str = ""):
-        super().__init__(model, base_url=base_url)
-        self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
-        self.ctx_size = 32000
-        self.model = model or "ministral-14b-latest"
-        self.port = None
-        self.api_key = os.getenv("MISTRAL_API_KEY")
-        if not self.api_key:
-            raise RuntimeError("MISTRAL_API_KEY not set.")
-
-
-    def get_client(self) -> tuple[OpenAI, str]:
-        logger.info(f"Mistral model resolved to: {self.model}")
-        return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
-
-
-BACKEND_MAP: Dict[str, Type[APIEndpoint]] = {
-            "ollama": OllamaApiEndpoint,
-            "mistral": MistralApiEndpoint,
-            "koboldcpp": KoboldCppApiendpoint,
-            "llamacpp": LlamaApiEndpoint,
-            "raw": RawEndpoint
-        }
 
 
 class LLMBackend:
-    def __init__(self, backend: str = "mistral"):
+    def __init__(self, backend: str = "mistral", config_file: str = "endpoints.yaml"):
+        self.available_models = []
         self.backend = backend
+        self.endpoints = self.load_endpoints(config_file)
         self.usage = UsageTracker()
         self.model = os.getenv("AGENT_MODEL", "")
         logger.info(f"Backend: {backend}, Model: {self.model or '(default)'}")
@@ -278,16 +49,31 @@ class LLMBackend:
         self.model = model or self.model
         return self.model
 
-    def _get_endpoint(self):
+    def load_endpoints(self, config_file: str) -> Dict:
+        """_summary_
 
+        # format:
+        ```yaml
+        endpoints:
+            openai:
+                base_url: https://api.openai.com/v1
+                chat_models:
+                    gpt-3.5-turbo: chat, tools
+                    gpt-4: chat, coding <other tags>
+        ```
+        """
+        Path(config_file).touch(exist_ok=True)
+        return yaml.safe_load(open(config_file, encoding="utf-8"))
+
+    def _get_endpoint(self):
         endpoint_cls: Optional[Type[APIEndpoint]] = BACKEND_MAP.get(self.backend)
         if not endpoint_cls:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
         # 1. Instantiate the specific endpoint with the current model state
-        self.endpoint = endpoint_cls(model=self.model, base_url=self.base_url)
+        self.endpoint = endpoint_cls(model=self.model, base_url=self.base_url, port=str(self.port))
 
-        if self.port:
+        if self.endpoint.base_url.find(f"{self.port}") == -1:
             # print(dict(endpoint_cls))
             self.endpoint.set_base_url(self.endpoint.base_url, self.port)
             logger.info(f"Adjusted base URL to: {self.endpoint.base_url}")
@@ -303,7 +89,8 @@ class LLMBackend:
     def get_client(self) -> tuple[OpenAI, str]:
         """Initializes the correct endpoint, discovers context, and returns the client."""
 
-        self.endpoint = self._get_endpoint()
+        if not self.endpoint:
+            raise ValueError(f"Unsupported backend: {self.backend}")
         self.model = self.endpoint.model
         # 2. Discover context window (this updates the usage tracker)
         # Note: Removed `backend=self.backend` kwarg unless your discover_context_window explicitly requires it
@@ -337,8 +124,8 @@ class LLMBackend:
 
 
 if __name__ == "__main__":
-    from pprint import pprint
     from argparse import ArgumentParser
+    from pprint import pprint
 
 
     defaultbackend = os.getenv("AGENT_BACKEND", "llamacpp")
@@ -359,6 +146,8 @@ if __name__ == "__main__":
         llm_backend.set_model(args.model)
 
     llm_backend._get_endpoint()
+    if not llm_backend.endpoint:
+        raise ValueError(f"Unsupported backend: {llm_backend.backend}")
     print(f"Context window: {llm_backend.context_limit} tokens")
     llm_backend.context_limit = discover_context_window(
         llm_backend.endpoint.base_url,
