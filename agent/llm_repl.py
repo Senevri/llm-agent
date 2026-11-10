@@ -8,6 +8,7 @@ import shlex
 import json
 import logging
 import tempfile
+import asyncio
 from datetime import timedelta, datetime
 import subprocess
 import secrets
@@ -179,6 +180,7 @@ try:
     from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.table import Table
+    from rich import box
     console = Console(
         file=sys.__stdout__,
         force_terminal=True,
@@ -195,7 +197,7 @@ except Exception:
         def __init__(self, text):
             self.text = text
     class Panel:  # type: ignore
-        def __init__(self, content, title=None):
+        def __init__(self, content, title=None, **kwargs):
             self.content = content
             self.title = title
     class Table:  # type: ignore
@@ -223,10 +225,15 @@ try:
             break
     else:
         history_path = Path.cwd() / ".repl_history"
-    prompt_session = PromptSession(history=FileHistory(str(history_path)))
 except Exception:
     logger.error("Failed to import prompt_toolkit")
     prompt_session = None
+
+try:
+    from prompt_toolkit.patch_stdout import patch_stdout
+except ImportError:
+    from contextlib import nullcontext as patch_stdout
+
 
 
 # --- Error hierarchy ---------------------------------------------------------------
@@ -432,6 +439,24 @@ def status_command(repl, *args, **kwargs):
     console.print(f"[faded]{repl.api.usage.summary()}[/faded]")
 
 def repl_command(repl, *args, **kwargs):
+    def _parse_attr(attr):
+        if "." in attr:
+            class_chain = attr.split(".")
+            attr = getattr(repl, class_chain[0])
+            for c in class_chain[1:]:
+                attr = getattr(attr, c)
+        else:
+            attr = getattr(repl, attr)
+        return attr
+    if len(args) == 0:
+        if len(kwargs)>0:
+            for k, v in kwargs.items():
+                attr = _parse_attr(k)
+                if v in ["True", "False"]:
+                    v = True if v == "True" else False
+                if attr:
+                    attr = v
+        return
     if args[0] == "help":
         if len(args) > 1:
             attr = getattr(repl, args[1])
@@ -439,15 +464,8 @@ def repl_command(repl, *args, **kwargs):
             console.print(inspect.getdoc(attr))
         console.print("/repl show displays repl dir\n/repl help <method> displays help for method")
         return
-    attr = args[0]
+    attr = _parse_attr(args[0])
 
-    if "." in attr:
-        class_chain = attr.split(".")
-        attr = getattr(repl, class_chain[0])
-        for c in class_chain[1:]:
-            attr = getattr(attr, c)
-    else:
-        attr = getattr(repl, attr)
     if not attr:
         console.print("[red]Command not found.[/red]")
         return
@@ -1107,170 +1125,190 @@ class LLMRepl:
         )
     def _execute_tools(self, tool_calls: List[Any]) -> List[ToolCallResult]:
         results: List[ToolCallResult] = []
+        with patch_stdout():
+            console.print(
+                f"[bold blue][*] Model requested {len(tool_calls)} tool call(s).[/bold blue]")
 
-        console.print(
-            f"[bold blue][*] Model requested {len(tool_calls)} tool call(s).[/bold blue]")
+            for tc in tool_calls:
+                name = getattr(tc.function, "name", "")
 
-        for tc in tool_calls:
-            name = getattr(tc.function, "name", "")
-
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-                if not isinstance(args, dict):
-                    raise ValueError("Tool arguments must be a JSON object.")
-
-
-                log_args = str(args)
-                #let's not print all the args...
-                if len(log_args) > 240:
-                    log_args = log_args[:249] + "[...]"
-
-                logger.info("Executing tool %s with %s", name, log_args)
-                logger.debug("full args: %s", args)
-
-                preview = str(args)
-
-                if len(preview) > 200:
-                    preview = preview[:200] + "..."
-                console.print(f"  [blue]tool:[/blue] {name}({preview})")
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                    if not isinstance(args, dict):
+                        raise ValueError("Tool arguments must be a JSON object.")
 
 
-                result = self.tool_registry.execute(name, **args)
+                    log_args = str(args)
+                    #let's not print all the args...
+                    if len(log_args) > 240:
+                        log_args = log_args[:249] + "[...]"
 
-                if result is None:
-                    result = "Error: tool returned no result (None)."
+                    logger.info("Executing tool %s with %s", name, log_args)
+                    logger.debug("full args: %s", args)
 
-                content = result if isinstance(result, str) else str(result)
-                console.print(f"  [green]result:[/green] {content}")
+                    preview = str(args)
 
-            except Exception as e:
-                logger.exception("Tool %s failed", name)
-                content = f"Error executing tool {name} with args {args}: {e}"
+                    if len(preview) > 200:
+                        preview = preview[:200] + "..."
+                    console.print(f"  [blue]tool:[/blue] {name}({preview})")
+
+                    result = self.tool_registry.execute(name, **args)
+
+                    if result is None:
+                        result = "Error: tool returned no result (None)."
+
+                    content = result if isinstance(result, str) else str(result)
+                    response_str = f"  [green]result:[/green] {content}"
+                    panel = Panel(response_str, box = box.SIMPLE_HEAVY,
+                                        border_style="none", padding=(0, 1, 2, 1))
+
+                    console.print(response_str)
+
+                except Exception as e:
+                    logger.exception("Tool %s failed", name)
+                    content = f"Error executing tool {name} with args {args}: {e}"
 
             # Always return a result, including for malformed arguments and errors.
             results.append(ToolCallResult(tool_call_id=tc.id, name=name, content=content))
 
         return results
 
+    def _get_tool_results(self, tool_calls) -> Optional[List[ToolCallResult]]:
+        from pprint import pformat
+        MAX_TOOL_RESULTS_CHARS = 4000
+
+        tool_results = self._execute_tools(tool_calls)
+        if not tool_results:
+            logger.info("Tool call returned no results")
+            return None
+        with self._state_lock:
+            global tool_logger
+            if not tool_logger:
+                tool_logger = setup_logging("ReplToolLogger", level="WARNING")
+            tool_logger.info("Tool results: %s", pformat(str(tool_results)))
+            result_length = len(str(tool_results))
+            if  result_length> MAX_TOOL_RESULTS_CHARS:
+                _mtr = MAX_TOOL_RESULTS_CHARS
+                # generate hash
+                _id =  f"#{secrets.token_hex(8)}"
+                # msg was warning; changed to info since it _currently works_
+                tool_logger.info(
+                    "Tool results too long %s: %s",
+                    _id,
+                    pformat([t for t in tool_results])
+                    )
+                # truncate tool results
+                for i, result in enumerate(tool_results):
+                    result["content"] = (
+                        f"Tool output truncated; original: {result_length} chars. "
+                        f"see {tool_logger.log_file} for "
+                        f"full output. tag: {_id}\n"
+                        f"{result.to_message(_mtr).get('content')}"
+                        )
+                    tool_results[i] = result
+        return tool_results
+
 
 
     def send_message(self, user_input: str) -> str:
 
         with self._state_lock:
-            self.messages.append({"role": "user", "content": user_input})
             if self.api.usage.last_prompt_tokens >= self.api.context_limit*0.85:
                 self._request_chat_completion(
                     [{"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": "running low on context, update and compress memories and todos"}],
                     tools=None, tool_choice=None
                     )
-            self._trim_context()
-            current_messages = list(self.messages)
+                self._trim_context()
+        if user_input:
+            self.messages.append({"role": "user", "content": user_input})
+        current_messages = list(self.messages)
 
         # Start timing the entire turn (includes tool calls and retries)
         start_time = time.time()
 
         SEND_TIMEOUT = 60
-        MAX_TOOL_RESULTS_CHARS = 4000
+        with patch_stdout():
+            while True:
+                console.print(f"[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
+                if self.api.usage.context_pct >= 85.0:
+                    # warn llm.
+                    warning = self.prompt_gen.generate_prompt(
+                        "warning", {
+                            "snippets": ["context_size_warning"]
+                        },
+                        context_pct=self.api.usage.context_pct,
+                        remaining_tokens=self.api.usage.remaining_tokens
+                        )
+                    console.print(f"[dim]warning[dim]")
+                    current_messages.append({"role": "system", "content": warning})
+                try:
+                    # json.dumps(self.tool_schemas) # defensive validation
+                    response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
+                    msg = response.choices[0].message
+                    # print((self.api.model, self.api.port, self.api.base_url))
+                    # print("CONTENT:", repr(msg.content))
+                    # print("TOOL CALLS:", msg.tool_calls)
+                    # print("FINISH REASON:", response.choices[0].finish_reason)
+                    assistant_msg = msg.model_dump(exclude_none=True)
+                    # console.print((pformat(str(assistant_msg))))
+                    if msg.tool_calls:
+                        with self._state_lock:
+                            self.messages.append(assistant_msg)
+                        current_messages.append(assistant_msg)
+                        self.api.usage.record(response.usage, turn=len(self.messages))
+                        console.print(f"[dim]{self.api.usage.summary()}[/dim]")
 
+                        tool_results = self._get_tool_results(msg.tool_calls)
+                        if not tool_results:
+                            continue
 
+                        with self._state_lock:
+                            self.messages.extend(tool_results)
+                        current_messages.extend(tool_results)
 
-        while True:
-            console.print(f"[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
-            if self.api.usage.context_pct >= 85.0:
-                # warn llm.
-                warning = self.prompt_gen.generate_prompt(
-                    "warning", {
-                        "snippets": ["context_size_warning"]
-                    },
-                    context_pct=self.api.usage.context_pct,
-                    remaining_tokens=self.api.usage.remaining_tokens
-                    )
-                console.print(f"[dim]warning[dim]")
-                current_messages.append({"role": "system", "content": warning})
-            try:
-                # json.dumps(self.tool_schemas) # defensive validation
-                response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
-                msg = response.choices[0].message
-                # print((self.api.model, self.api.port, self.api.base_url))
-                # print("CONTENT:", repr(msg.content))
-                # print("TOOL CALLS:", msg.tool_calls)
-                # print("FINISH REASON:", response.choices[0].finish_reason)
-                assistant_msg = msg.model_dump(exclude_none=True)
-                from pprint import pformat
-                # console.print((pformat(str(assistant_msg))))
-                if msg.tool_calls:
-                    with self._state_lock:
-                        self.messages.append(assistant_msg)
-                    current_messages.append(assistant_msg)
-                    self.api.usage.record(response.usage, turn=len(self.messages))
-                    console.print(f"[dim]{self.api.usage.summary()}[/dim]")
-                    tool_results = self._execute_tools(msg.tool_calls)
-                    if not tool_results:
-                        logger.info("Tool call returned no results")
+                        # DEBUG: line below
+                        #console.print(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
+                        elapsed = time.time() - start_time
                         continue
+
+                    content = msg.content or ""
                     with self._state_lock:
-                        global tool_logger
-                        if not tool_logger:
-                            tool_logger = setup_logging("ReplToolLogger", level="WARNING")
-                        tool_logger.info("Tool results: %s", pformat(str(tool_results)))
-                        result_length = len(str(tool_results))
-                        if  result_length> MAX_TOOL_RESULTS_CHARS:
-                            _mtr = MAX_TOOL_RESULTS_CHARS
-                            # generate hash
-                            _id =  f"#{secrets.token_hex(8)}"
-                            # msg was warning; changed to info since it _currently works_
-                            tool_logger.info(
-                                "Tool results too long %s: %s",
-                                _id,
-                                pformat([t for t in tool_results])
-                                )
-                            # truncate tool results
-                            for i, result in enumerate(tool_results):
-                                result["content"] = (
-                                    f"Tool output truncated; original: {result_length} chars. "
-                                    f"see {tool_logger.log_file} for "
-                                    f"full output. tag: {_id}\n"
-                                    f"{result.to_message(MAX_TOOL_RESULTS_CHARS).get('content')}"
-                                    )
-                                tool_results[i] = result
-                        self.messages.extend(tool_results)
-                    current_messages.extend(tool_results)
+                        self.messages.append({"role": "assistant", "content": content})
 
-                    # DEBUG: line below
-                    #console.print(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
+                    # Calculate elapsed time
                     elapsed = time.time() - start_time
-                    continue
+                    if ("/tool" in content):
+                        tools_command(self, "on")
+                    if content:
+                        console.print("\n") # newline, seems hacky
+                        console.print(Panel(Markdown(content), title="Assistant"))
+                        self.agent_active = False
+                    else:
+                        console.print("[bold red]Assistant: (No response)[/bold red]")
 
-                content = msg.content or ""
-                with self._state_lock:
-                    self.messages.append({"role": "assistant", "content": content})
+                    # Only print time if it exceeds 5 seconds
+                    if elapsed > 5.0:
+                        console.print(f"[dim]⏱️  Turn completed in {elapsed:.2f}s[/dim]")
+                        # self.redraw_prompt = True
+                        self._write_statusbar()
+                        # Hack:
+                        prefix = self.get_input_prompt_prefix()
+                        console.print(prefix, end="")
 
-                # Calculate elapsed time
-                elapsed = time.time() - start_time
-                if ("/tool" in content):
-                    tools_command(self, "on")
-                if content:
-                    console.print(Panel(Markdown(content), title="Assistant"))
-                else:
-                    console.print("[bold red]Assistant: (No response)[/bold red]")
 
-                # Only print time if it exceeds 5 seconds
-                if elapsed > 5.0:
-                    console.print(f"[dim]⏱️  Turn completed in {elapsed:.2f}s[/dim]")
+                    self._enqueue_profile_snapshot(user_input, content)
+                    return content
 
-                self._enqueue_profile_snapshot(user_input, content)
-                return content
+                except Exception as e:
+                    if isinstance(e, InternalServerError):
+                        return f"API Error: {e}"
+                    elapsed = time.time() - start_time
+                    if elapsed > SEND_TIMEOUT:
+                        raise APIError(f"Response timed out after {elapsed:.2f}s")
 
-            except Exception as e:
-                if isinstance(e, InternalServerError):
-                    return f"API Error: {e}"
-                elapsed = time.time() - start_time
-                if elapsed > SEND_TIMEOUT:
-                    raise APIError(f"Response timed out after {elapsed:.2f}s")
-
-                if not self._handle_api_error(e):
-                    return f"API Error: {e}"
+                    if not self._handle_api_error(e):
+                        return f"API Error: {e}"
 
     def _handle_api_error(self, e: Exception) -> bool:
         try:
@@ -1541,6 +1579,17 @@ class LLMRepl:
 
                 self.current_bg_task = None # Clear it
 
+
+    def _on_send_done(self, result):
+        self.agent_active = False
+        try:
+            content = result
+            # console.print(Panel(Markdown(content), title="Assistant"))
+        except Exception as e:
+            console.print(f"[bold red]API Error: {e}[/bold red]")
+            diagnostics = self.get_diagnostics()
+            console.print(Panel(Markdown(str(diagnostics)), title="Diagnostics"))
+
     def _process_command(self, command, args, params):
         logger.info(("COMMAND:", command, args, params))
         status = self.cmd_dispatcher.dispatch(command, args, params)
@@ -1551,7 +1600,40 @@ class LLMRepl:
             if isinstance(status, LoopTask):
                 self.loop_task = status
 
+    def get_input_prompt_prefix(self):
+        agent = "(👣)" if self.agent_active else ""
+        return f"{agent}User > "
+    async def get_user_prompt(self, prompt_session):
+        try:
+            input_prompt = self.get_input_prompt_prefix()
+            if prompt_session is not None:
+                user_input = await prompt_session.prompt_async(input_prompt)
+            else:
+                user_input = input(input_prompt).strip()
+            self.user_messages.append(user_input)
+        except EOFError:
+            return None
+        except KeyboardInterrupt:
+            self.agent_active = False
+            raise KeyboardInterrupt("User interrupted")
+        return user_input
+
+    def _write_statusbar(self):
+        try:
+            self.model = self.api.model
+            base_url = self.client.base_url
+            n_ctx = self.api.context_limit
+        except Exception:
+            base_url = "(unset)"
+            n_ctx = "(unset)"
+        rule_str=f"[turquoise4]{self.model}|{base_url}|{n_ctx}|{self.backend}[/turquoise4]"
+        console.rule(rule_str)
+
+
     def run(self) -> None:
+        asyncio.run(self._run())
+
+    async def _run(self):
         try:
             commands, command_definitions = self._load_commands()
 
@@ -1573,44 +1655,37 @@ class LLMRepl:
             console.print(f"Model: [bold]{self.model}[/bold] | Base URL: [bold]{base_url}[/bold]")
             console.print(f"Commands: {command_help}")
 
-            try:
-                from prompt_toolkit.patch_stdout import patch_stdout
-            except ImportError:
-                from contextlib import nullcontext as patch_stdout
-
             self.loop_task = None
+            self.agent_active = False
+            prompt_session = PromptSession(history=FileHistory(str(history_path)), refresh_interval=1)
 
+            cb = None
+
+            self.user_messages=[]
             with patch_stdout(True):
                 while True:
                     # live update model
-
                     # Write a statusbar
+                    self._write_statusbar()
                     try:
-                        self.model = self.api.model
-                        base_url = self.client.base_url
-                        n_ctx = self.api.context_limit
-                    except Exception:
-                        base_url = "(unset)"
-                        n_ctx = "(unset)"
-                    console.rule(
-                        f"[turquoise4]{self.model}|{base_url}|{n_ctx}|{self.backend}[/turquoise4]"
-                    )
-                    try:
-                        if not self.loop_task:
-                            if prompt_session is not None:
-                                user_input = prompt_session.prompt("\nUser > ").strip()
-                            else:
-                                user_input = input("\nUser > ").strip()
-                        elif isinstance(self.loop_task, SimpleLoopTask):
-                            user_input = self.loop_task.get_next_input()
-                            if user_input is None:
-                                self.loop_task = None
-                                continue
-                            console.print(f"User(loop) > {user_input}\n")
+                        user_input = ""
+                        while not user_input or user_input == "":
+                            if not self.loop_task:
+                                user_input = await self.get_user_prompt(prompt_session)
+                                # logger.warning(user_input)
+                                if user_input in self.user_messages:
+                                    self.user_messages.pop(self.user_messages.index(user_input))
+                                for msg in self.user_messages:
+                                    if isinstance(msg, str):
+                                        user_input += msg
+                            elif isinstance(self.loop_task, SimpleLoopTask):
+                                if not self.agent_active: # Only inject if the agent is done
+                                    user_input = self.loop_task.get_next_input() or ""
+                                    if user_input == "":
+                                        self.loop_task = ""
+                                        continue
+                                console.print(f"User(loop) > {user_input}\n")
 
-
-                        if not user_input:
-                            continue
 
                         if user_input.startswith("/"):
                             command, args, params, errors = parse_command(user_input) # type: ignore
@@ -1633,15 +1708,31 @@ class LLMRepl:
                         loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
                                         if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
                         console.rule(f"{loop_remains}")
-                        self.agent_active = True
-                        response = self.send_message(user_input)
-                        self.agent_active = False
 
-                        if response.startswith("API Error:"):
-                            console.print(f"[bold red]{response}[/bold red]")
-                            diagnostics = self.get_diagnostics()
-                            console.print(Panel(Markdown(str(diagnostics)), title="Diagnostics"))
-
+                        # async def wrapper(repl, user_input):
+                        #     return repl.send_message(user_input)
+                        # Add message to what agent reads
+                        with self._state_lock:
+                                self.messages.append(
+                                    {"role": "user", "content": user_input}
+                                )
+                        if not self.agent_active:
+                            self.agent_active = True
+                            # --- sync mode ---
+                            # result = self.send_message(user_input)
+                            # --- async mode ---
+                            cb = run_in_background(self.send_message)(None)
+                            await asyncio.sleep(0.1)
+                            result = ""
+                            if cb.is_running:
+                                result = "\n".join(cb.get_pending_output())
+                            else:
+                                self.agent_active = False
+                            if result:
+                                self._on_send_done(result)
+                        else:
+                            with self._state_lock:
+                                self.messages.append({"role": "user", "content": user_input})
                         # if response:
                         #     console.print(Panel(Markdown(response), title="Assistant"))
                     except EOFError:
@@ -1788,7 +1879,7 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
 
     # The definitions in agent_tools are the source of truth for the
     # core, internet, tmux, and context tools.
-    definitions = BASE_TOOL_SCHEMAS
+    definitions = list(BASE_TOOL_SCHEMAS)
 
     logger.debug("Definitions: %s", definitions)
 

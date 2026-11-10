@@ -4,6 +4,11 @@ import traceback
 import time
 from typing import Callable, Any, Optional, List
 
+import logging
+from custom_logger import setup_logging
+
+logger = setup_logging(__name__)
+
 class BackgroundProcess:
     def __init__(self, func: Callable, *args, **kwargs):
         self.func = func
@@ -30,7 +35,8 @@ class BackgroundProcess:
             except queue.Empty:
                 break
 
-        self._thread = threading.Thread(target=self._run_worker, daemon=True, name=f"BgProc-{self.func.__name__}")
+        self._thread = threading.Thread(
+            target=self._run_worker, daemon=True, name=f"BgProc-{self.func.__name__}")
         self._thread.start()
 
     def stop(self) -> Any:
@@ -49,12 +55,17 @@ class BackgroundProcess:
     def _run_worker(self) -> None:
         try:
             # Inject a thread-safe callback so the function can push intermediate status
+            # BUG: No guarantee the function accepts a new keyword argument
             def push_output(msg: str) -> None:
                 if self._is_running:
                     self.output_queue.put(f"[{time.strftime('%H:%M:%S')}] {msg}")
-
-            self.kwargs['push_output'] = push_output
-            self.result = self.func(*self.args, **self.kwargs)
+            try:
+                kwargs = self.kwargs.copy()
+                kwargs['push_output'] = push_output
+                self.result = self.func(*self.args, **self.kwargs)
+            except Exception as e:
+                logger.warning("no push_output in function kwargs")
+                self.result = self.func(*self.args, **self.kwargs)
         except Exception as e:
             self.error = e
             self.output_queue.put(f"❌ ERROR: {e}\n{traceback.format_exc()}")
@@ -98,4 +109,6 @@ def run_in_background(func: Callable) -> Callable:
         proc = BackgroundProcess(func, *args, **kwargs)
         proc.start()
         return proc
+
+
     return wrapper

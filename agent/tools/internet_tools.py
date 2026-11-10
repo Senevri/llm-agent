@@ -6,6 +6,7 @@ import yaml
 from ddgs import DDGS
 from pathlib import Path
 import sys
+import platform
 if Path(__file__).resolve().parent.parent not in sys.path:
     sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -116,16 +117,22 @@ def get_weather(location: str) -> str:
 
 
 def read_web_page(url: str) -> str:
-    """Read a web page and return its content as plain text using w3m."""
+    """Read a web page and return its content as plain text"""
 
     if urlparse(url).scheme not in ("http", "https"):
         return "Error: only http(s) URLs are supported."
 
     logger.info(f"Reading web page: {url}")
+
     try:
-        # PoC: curl -sL <url> | w3m -dump -T text/html
-        command = f"curl -sL {url} | w3m -dump -T text/html"
-        # Use run_bash to benefit from its timeout and output handling
+        if platform.system() == "Windows":
+            # Hack of sorts:
+            url = f"https://r.jina.ai/{url}"
+            command = f"curl -sL {url}"
+        else:
+            # PoC: curl -sL <url> | w3m -dump -T text/html
+            command = f"curl -sL {url} | w3m -dump -T text/html"
+            # Use run_bash to benefit from its timeout and output handling
         result = run_bash(command)
         return result
     except Exception as e:
