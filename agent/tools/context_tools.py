@@ -158,9 +158,9 @@ def compress_memory(compressed_content: str) -> str:
         return f"Error compressing memory: {e}"
 
 def _tail_memory(n: int) -> str:
-    path = MEMORY_PATH
+    path = Path(MEMORY_PATH).resolve()
     try:
-        if path.is_file():
+        if not path.is_file():
             return f"Error: memory file not found: {path}"
 
         with open(path, "r", encoding="utf-8") as f:

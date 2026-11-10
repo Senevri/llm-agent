@@ -761,15 +761,19 @@ def _read_file(fname: str) -> str:
         console.print(f"[red]Failed to read file: {e}[/red]")
 
 def load_command(repl, *args, **kwargs):
-        fname = args[0].strip()
-        contents = _read_file(fname)
+    fname = args[0].strip()
+    contents = _read_file(fname)
+    if not contents:
+        return
 
-        with repl._state_lock:
-            fence = _make_fence(contents)
-            message = f"Contents of {fname}:\n{fence}\n{contents}\n{fence}\n"
-            console.print(message)
-            repl.send_message(str(message))
+    fence = _make_fence(contents)
+    message = f"Contents of {fname}:\n{fence}\n{contents}\n{fence}\n"
+    console.print(message)
 
+    # Fire it to the background queue instead of blocking
+    repl.pending_user_inputs.put(message)
+    if not repl.agent_active:
+        repl._start_background_send(message)
 def read_command(repl, *args, **kwargs):
     if len(args) < 1:
         cwd = Path.cwd()
@@ -817,9 +821,14 @@ class LLMRepl:
         self.model = None
         self.client = None
         self.last_message_time = None # todo, make a message class
+        self.pending_user_inputs = queue.Queue()
+        self.input_queue = queue.Queue()
+        self.agent_active = False
+        self.current_bg_task = None
 
         with _active_repls_lock:
             _active_repls += 1
+
 
     def init(
             self, repl_be=os.getenv("LLM_REPL_BASE_URL", "http://localhost"),
@@ -1025,7 +1034,7 @@ class LLMRepl:
         task_message = [
             {"role": "system",
              "content": f"You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for maximum of {max_tokens} tokens."},
-            {"role": "user", "content": "\n\n".join(sections[:-1])}],
+            {"role": "user", "content": "\n\n".join(sections[:-1])}]
 
         response =  self.client.chat.completions.create(
                 model=self.model,
@@ -1096,6 +1105,8 @@ class LLMRepl:
                 content = self.ai_compress(sections, max_tokens=self.api.context_limit*1//3)
                 logger.info(f"condensed context to {content}")
             if content:
+                with open(Path(WORKSPACE_DIR) / "condensed_context.txt", "a+", encoding="utf-8") as f:
+                    f.write(content + "\n\n------\n\n")
                 content = f"Historical context summary - not a new response: {content}"
                 tail = [{"role": "assistant", "content": content}] + tail
             self.messages = [self.messages[0]] + tail
@@ -1210,22 +1221,31 @@ class LLMRepl:
                     tool_results[i] = result
         return tool_results
 
+    def _start_background_send(self, user_input: str) -> None:
+        self.agent_active = True
+        self.current_bg_task = run_in_background(self.send_message)(user_input)
 
 
     def send_message(self, user_input: str) -> str:
 
+        needs_trim = False
         with self._state_lock:
-            if self.api.usage.last_prompt_tokens >= self.api.context_limit*0.85:
-                self._request_chat_completion(
-                    [{"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": ("running low on context, update and compress memories and todos, "
-                                                 "create a gist file, emergency trim at 90 percent context usage")}],
-                    tools=None, tool_choice=None
-                    )
-                self._trim_context()
-        if user_input:
-            self.messages.append({"role": "user", "content": user_input})
-        current_messages = list(self.messages)
+            if self.api.usage.last_prompt_tokens >= self.api.context_limit * 0.85:
+                needs_trim = True
+        # Release state lock
+
+        if needs_trim:
+            self._request_chat_completion(
+                [{"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": ("running low on context, update and compress memories and todos, "
+                                                "create a gist file, emergency trim at 90 percent context usage")}],
+                tools=None, tool_choice=None
+                )
+            self._trim_context()
+        with self._state_lock:
+            if user_input:
+                self.messages.append({"role": "user", "content": user_input})
+            current_messages = list(self.messages)
 
         # Start timing the entire turn (includes tool calls and retries)
         start_time = time.time()
@@ -1300,7 +1320,6 @@ class LLMRepl:
                     if content:
                         console.print("\n") # newline, seems hacky
                         console.print(Panel(Markdown(content), title="Assistant"))
-                        self.agent_active = False
                     else:
                         console.print("[bold red]Assistant: (No response)[/bold red]")
 
@@ -1582,20 +1601,40 @@ class LLMRepl:
          return commands, command_definitions
 
     def _poll_background_tasks(self) -> None:
-        """Non-blocking check for background task updates."""
-        if hasattr(self, 'current_bg_task') and self.current_bg_task:
-            new_outputs = self.current_bg_task.get_pending_output()
-            for msg in new_outputs:
-                console.print(f"[dim]⚙️  {msg}[/dim]")
+        """Non-blocking check for background send completion/output."""
+        proc = self.current_bg_task
+        if not proc:
+            return
 
-            if not self.current_bg_task.is_running():
-                if self.current_bg_task.error:
-                    console.print(f"[bold red]Background task failed: {self.current_bg_task.error}[/bold red]")
-                else:
-                    console.print(f"[bold green]Background task completed. Result: {self.current_bg_task.result}[/bold green]")
+        for msg in proc.get_pending_output():
+            console.print(f"[dim]⚙️  {msg}[/dim]")
 
-                self.current_bg_task = None # Clear it
+        # IMPORTANT: is_running is a property, not a method.
+        if proc.is_running:
+            return
 
+        self.current_bg_task = None
+        self.agent_active = False
+
+        if proc.error:
+            console.print(f"[bold red]Background task failed: {proc.error}[/bold red]")
+        else:
+            self._on_send_done(proc.result)
+
+        # If the user typed stuff while the model was busy, start the next turn now.
+        try:
+            next_input = self.pending_user_inputs.get_nowait()
+        except queue.Empty:
+            return
+
+        console.print("[dim]Starting queued user input...[/dim]")
+        console.print(f'[dim][i]"{next_input}"[/i][/dim]')
+        self._start_background_send(next_input)
+
+    async def _background_ui_pump(self) -> None:
+        while not self._shutdown_done:
+            self._poll_background_tasks()
+            await asyncio.sleep(0.05)
 
     def _on_send_done(self, result):
         self.agent_active = False
@@ -1651,6 +1690,7 @@ class LLMRepl:
 
     async def _run(self):
         try:
+            ui_pump = None
             commands, command_definitions = self._load_commands()
 
             self.cmd_dispatcher = CommandDispatcher(self)
@@ -1678,6 +1718,8 @@ class LLMRepl:
             cb = None
             result = ""
             self.user_messages=[]
+            ui_pump = asyncio.create_task(self._background_ui_pump())
+
             with patch_stdout(True):
                 while True:
                     # live update model
@@ -1733,30 +1775,15 @@ class LLMRepl:
                         # async def wrapper(repl, user_input):
                         #     return repl.send_message(user_input)
                         # Add message to what agent reads
-                        with self._state_lock:
-                            self.messages.append(
-                                {"role": "user", "content": user_input}
-                            )
+                        # with self._state_lock:
+                        #     self.messages.append(
+                        #         {"role": "user", "content": user_input}
+                        #     )
                         if not self.agent_active:
-                            self.agent_active = True
-                            # --- sync mode ---
-                            # result = self.send_message(user_input)
-                            # --- async mode ---
-                            cb = run_in_background(self.send_message)(None)
-                            await asyncio.sleep(0.1)
-                            result = ""
-                            if cb.is_running:
-                                result = "\n".join(cb.get_pending_output())
-                            else:
-                                self.agent_active = False
-                            if result:
-                                self._on_send_done(result)
+                            self._start_background_send(user_input)
                         else:
-                            # with self._state_lock:
-                            #     self.messages.append({"role": "user", "content": user_input})
-                            pass
-                        # if response:
-                        #     console.print(Panel(Markdown(response), title="Assistant"))
+                            self.pending_user_inputs.put(user_input)
+                            console.print("[dim]Queued input; assistant is still processing.[/dim]")
                     except EOFError:
                         console.print("[bold red]Goodbye![/bold red]")
                         break
@@ -1767,22 +1794,29 @@ class LLMRepl:
                                 logger.warning("Loop task interrupted!")
                             except Exception as e:
                                 logger.error(f"Error stopping loop task: {e}")
-                            self.loop_task = None
-                            continue # avoid exit _once_
-                        if self.agent_active:
-                            logger.warning("Interrupted by user")
-                            if cb:
-                                res = cb.stop()
-                            if res:
-                                self._on_send_done(res)
-                            self.agent_active = False
-                            continue
+                                self.loop_task = None
+                                continue # avoid exit _once_
+                            except KeyboardInterrupt:
+                                if self.agent_active and self.current_bg_task:
+                                    logger.warning("Interrupted by user")
+                                    self.current_bg_task.stop()
+                                    self.current_bg_task = None
+                                    self.agent_active = False
+                                    console.print("[dim]Background task interrupted.[/dim]")
+                        continue
                         console.print("\n[bold red]Goodbye![/bold red]")
                         break
                     except Exception as e:
                         logger.exception(f"Unexpected error during REPL loop: {e}")
                         console.print(f"[bold red]Unexpected error: {e}[/bold red]")
         finally:
+            if ui_pump:
+                ui_pump.cancel()
+                try:
+                    await ui_pump
+                except asyncio.CancelledError:
+                    pass
+
             self.shutdown()
 
 
@@ -1882,6 +1916,7 @@ REPL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
     """Build a per-REPL registry from existing tool definitions and callables."""
 
+    conf = None
     # Load allowed paths from environment
     if not os.getenv("ALLOWED_PATHS"):
         # Load from yaml
@@ -1924,9 +1959,9 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
         for fn in ["dispatch_agent", "check_job", "list_jobs"]:
             repl_functions.pop(fn, None)
         #definitions = [d for d in definitions if d.get("function", {}).get("name") != "dispatch_agent"]
-
-    if conf.get("enabled_tools"):
-        definitions = [d for d in definitions if d.get("function", {}).get("name") in conf["enabled_tools"]]
+    if conf:
+        if conf.get("enabled_tools"):
+            definitions = [d for d in definitions if d.get("function", {}).get("name") in conf["enabled_tools"]]
 
     # Use the existing implementation map; the definitions supply schemas.
     implementations = dict(BASE_TOOL_MAP or {})

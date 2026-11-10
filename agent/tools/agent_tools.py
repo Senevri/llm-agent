@@ -434,7 +434,8 @@ tools = [
         "type": "function",
         "function": {
             "name": "read_file_lines",
-            "description": "Read specific lines of a file (1-indexed), with added line numbers. Useful for large files.",
+            "description": "Read specific lines of a file (1-indexed), with added line numbers. Useful for large files"
+                " or to figure out what lines to replace when editing code. ",
             "parameters": {
                 "type": "object",
                 "properties": {

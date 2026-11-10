@@ -1,73 +1,101 @@
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+from logging import Handler
+
+LevelLike = Union[int, str]
+
+
+def _to_level(level: LevelLike) -> int:
+    if isinstance(level, int):
+        return level
+    value = logging.getLevelName(level.upper())   # "WARN" -> 30, "Warn" -> 30
+    if not isinstance(value, int):
+        raise ValueError(f"Unknown log level: {level!r}")
+    return value
+
+
+def _is_file(h: logging.Handler) -> bool:
+    return isinstance(h, logging.FileHandler)
+
+
+def _is_console(h: logging.Handler) -> bool:
+    # FileHandler subclasses StreamHandler, so isinstance(h, StreamHandler)
+    # matches files too. Exclude them explicitly.
+    return isinstance(h, logging.StreamHandler) and not _is_file(h)
 
 
 class LoggerWrap:
-    def __init__(self, name: str = "UnifiedAgent", level: str = "INFO", log_dir: Optional[Path] = None):
+    FORMAT = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+
+    def __init__(self, name: str = "UnifiedAgent", level: LevelLike = "INFO",
+                 log_dir: Optional[Path] = None, file_level: LevelLike = "DEBUG"):
         self._logger = logging.getLogger(name)
-        self._logger.setLevel(getattr(logging, level.upper()))
         self._logger.propagate = False
+        console_level = _to_level(level)
+        file_lvl = _to_level(file_level)
+        # Logger passes the union; handlers do the real filtering.
+        self._logger.setLevel(min(console_level, file_lvl))
 
-        # Check specifically for FileHandler to prevent duplicate file writes on re-init
-        has_file_handler = any(isinstance(h, logging.FileHandler) for h in self._logger.handlers)
+        fmt = logging.Formatter(self.FORMAT)
 
-        if not has_file_handler:
-            log_dir = log_dir or Path.cwd() / "logs"
+        if not any(_is_console(h) for h in self._logger.handlers):
+            sh = logging.StreamHandler()
+            sh.setFormatter(fmt)
+            sh.setLevel(console_level)
+            self._logger.addHandler(sh)
+
+        if not any(_is_file(h) for h in self._logger.handlers):
+            log_dir = Path(log_dir) if log_dir else Path.cwd() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             log_path = log_dir / f"{name}_{stamp}.log"
-            fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-
-            # Only add stream handler if no handlers exist at all
-            if not self._logger.handlers:
-                stream_handler = logging.StreamHandler()
-                stream_handler.setFormatter(fmt)
-                self._logger.addHandler(stream_handler)
-
-            file_handler = logging.FileHandler(log_path, encoding="utf-8")
-            file_handler.setFormatter(fmt)
-            self._logger.addHandler(file_handler)
-
-            self._logger.info(f"{name} logging initialized at {log_path}")
+            fh = logging.FileHandler(log_path, encoding="utf-8")
+            fh.setFormatter(fmt)
+            fh.setLevel(file_lvl)
+            self._logger.addHandler(fh)
+            self._logger.info("%s logging initialized at %s", name, log_path)
 
     def __getattr__(self, name: str):
-        """Cleanly delegates standard logging calls to the underlying logger."""
         return getattr(self._logger, name)
+
+    def set_console_level(self, level: LevelLike) -> None:
+        """What the REPL's loglevel command should call. Never touches the file."""
+        lvl = _to_level(level)
+        for h in self._logger.handlers:
+            if _is_console(h):
+                h.setLevel(lvl)
+        file_lvls = [h.level for h in self._logger.handlers if _is_file(h)]
+        self._logger.setLevel(min([lvl, *file_lvls]))
 
     @property
     def log_file(self) -> Optional[Path]:
-        for handler in self._logger.handlers:
-            if isinstance(handler, logging.FileHandler):
-                return Path(handler.baseFilename)
+        for h in self._logger.handlers:
+            if _is_file(h):
+                return Path(h.baseFilename)
         return None
 
     @property
     def log_dir(self) -> Optional[Path]:
-        if self.log_file:
-            return self.log_file.parent
-        return None
+        return self.log_file.parent if self.log_file else None
 
     def set_log_dir(self, new_log_dir: Path) -> None:
         new_log_dir = Path(new_log_dir)
         new_log_dir.mkdir(parents=True, exist_ok=True)
 
-        handlers_to_remove = [h for h in self._logger.handlers if isinstance(h, logging.FileHandler)]
-        for handler in handlers_to_remove:
-            self._logger.removeHandler(handler)
-            handler.close()
+        old = [h for h in self._logger.handlers if _is_file(h)]
+        for h in old:
+            self._logger.removeHandler(h)
+            h.close()
 
-        old_filename = handlers_to_remove[0].baseFilename.split('/')[-1] if handlers_to_remove else f"agent_{self._logger.name}.log"
-        new_log_path = new_log_dir / old_filename
-
-        new_file_handler = logging.FileHandler(new_log_path, encoding="utf-8")
-        fmt = self._logger.handlers[0].formatter if self._logger.handlers else logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        new_file_handler.setFormatter(fmt)
-
-        self._logger.addHandler(new_file_handler)
-        self._logger.info(f"Log directory changed. Now logging to {new_log_path}")
-
+        filename = Path(old[0].baseFilename).name if old else \
+            f"{self._logger.name}_{datetime.now():%Y%m%d_%H%M%S}.log"
+        fh = logging.FileHandler(new_log_dir / filename, encoding="utf-8")
+        fh.setFormatter(old[0].formatter if old else logging.Formatter(self.FORMAT))
+        fh.setLevel(old[0].level if old else logging.DEBUG)   # keep the file's own level
+        self._logger.addHandler(fh)
+        self._logger.info("Log directory changed. Now logging to %s", fh.baseFilename)
 
 class LoggerFactory:
     loggers = {}
@@ -84,3 +112,12 @@ factory = LoggerFactory()
 
 def setup_logging(name: str = "UnifiedAgent", prefix: str = "", level: str = "INFO", log_dir: Optional[Path] = None) -> LoggerWrap:
     return factory.get_logger(name=f"{prefix}{name}", level=level, log_dir=log_dir)
+
+if __name__ == "__main__":
+    log = setup_logging("test", level="WARNING", log_dir=Path.cwd() / "logs")
+    log.debug("test")
+    log.info("test")
+    log.warning("test")
+    log.error("test")
+    log.critical("test")
+    # Test: do messages go to files?

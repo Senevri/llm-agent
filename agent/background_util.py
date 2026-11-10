@@ -3,11 +3,28 @@ import queue
 import traceback
 import time
 from typing import Callable, Any, Optional, List
-
+import inspect
 import logging
 from custom_logger import setup_logging
 
 logger = setup_logging(__name__)
+
+try:
+    from rich.console import Console
+    import logging
+    from rich.logging import RichHandler
+
+    FORMAT = "%(message)s"
+    logging.basicConfig(
+        level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()]
+    )
+except ImportError:
+    class console:
+        def print(self, msg, *args, **kwargs):
+            print(msg, *args, **kwargs)
+
+        def rule(self, title):
+            print(f"--- {title} ---")
 
 class BackgroundProcess:
     def __init__(self, func: Callable, *args, **kwargs):
@@ -52,26 +69,45 @@ class BackgroundProcess:
         self.output_queue.put(None)
         return self.result
 
+    def _accepts_push_output(self) -> bool:
+        try:
+            sig = inspect.signature(self.func)
+        except (TypeError, ValueError):
+            return False
+
+        for p in sig.parameters.values():
+            if p.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+
+        p = sig.parameters.get("push_output")
+        return (
+            p is not None
+            and p.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        )
+
     def _run_worker(self) -> None:
         try:
-            # Inject a thread-safe callback so the function can push intermediate status
-            # BUG: No guarantee the function accepts a new keyword argument
             def push_output(msg: str) -> None:
                 if self._is_running:
                     self.output_queue.put(f"[{time.strftime('%H:%M:%S')}] {msg}")
-            try:
-                kwargs = self.kwargs.copy()
-                kwargs['push_output'] = push_output
-                self.result = self.func(*self.args, **kwargs)
-            except TypeError as e:
-                logger.warning(f"no push_output in function kwargs, {e}")
-                self.result = self.func(*self.args, **self.kwargs)
+
+            kwargs = self.kwargs.copy()
+
+            if self._accepts_push_output():
+                kwargs["push_output"] = push_output
+
+            self.result = self.func(*self.args, **kwargs)
+
         except Exception as e:
             self.error = e
             self.output_queue.put(f"❌ ERROR: {e}\n{traceback.format_exc()}")
+
         finally:
             self._is_running = False
-            self.output_queue.put(None)  # Sentinel value indicating completion
+            self.output_queue.put(None)
 
     @property
     def is_running(self) -> bool:
