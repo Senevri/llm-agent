@@ -62,8 +62,8 @@ class BackgroundProcess:
             try:
                 kwargs = self.kwargs.copy()
                 kwargs['push_output'] = push_output
-                self.result = self.func(*self.args, **self.kwargs)
-            except Exception as e:
+                self.result = self.func(*self.args, **kwargs)
+            except TypeError as e:
                 logger.warning("no push_output in function kwargs")
                 self.result = self.func(*self.args, **self.kwargs)
         except Exception as e:
