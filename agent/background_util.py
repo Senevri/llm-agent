@@ -64,7 +64,7 @@ class BackgroundProcess:
                 kwargs['push_output'] = push_output
                 self.result = self.func(*self.args, **kwargs)
             except TypeError as e:
-                logger.warning("no push_output in function kwargs")
+                logger.warning(f"no push_output in function kwargs, {e}")
                 self.result = self.func(*self.args, **self.kwargs)
         except Exception as e:
             self.error = e

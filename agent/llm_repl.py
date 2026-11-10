@@ -719,7 +719,7 @@ def history_command(repl, *args, **kwargs):
         snapshot = list(repl.messages)
     for m in snapshot:
         role = _role(m)
-        content = m["content"] if isinstance(m, dict) else (getattr(m, "content", "") or "")
+        content = m.get("content") if isinstance(m, dict) else (getattr(m, "content", "") or "")
         content = str(content or "")
         if len(content) > 100:
             content = content[:100] + "..."
@@ -1024,7 +1024,7 @@ class LLMRepl:
     def ai_compress(self, sections, max_tokens=2000):
         task_message = [
             {"role": "system",
-             "content": f"You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for max {max_tokens} tokens."},
+             "content": f"You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for maximum of {max_tokens} tokens."},
             {"role": "user", "content": "\n\n".join(sections[:-1])}],
 
         response =  self.client.chat.completions.create(
@@ -1045,12 +1045,12 @@ class LLMRepl:
                     len(self.messages), orig_size_bytes
                 )
 
-            if (
-                len(self.messages) <= self.max_context_messages
-                and orig_size_tokens <= self.api.context_limit
-                and not n_ctx
-                ):
-                return
+            # if (
+            #     len(self.messages) <= self.max_context_messages
+            #     and orig_size_tokens <= self.api.context_limit*0.8
+            #     and not n_ctx
+            #     ):
+            #     return
 
             try:
                 usage_ratio = self.api.usage.context_pct
@@ -1059,7 +1059,10 @@ class LLMRepl:
                     return
             except Exception as e:
                 logger.warning(f"Could not get usage ratio: {e}")
-                pass
+                # if (not n_ctx
+                # and len(self.messages) < self.max_context_messages
+                # and orig_size_tokens < self.api.context_limit*0.8):
+                #     return
 
             self.save_conversation_history()
             keep_count = max(self.max_context_messages - 1, 3)
@@ -1072,14 +1075,14 @@ class LLMRepl:
 
             # Guesstimate tokens; not exact
             if (n_ctx
-                or self.api.usage.last_prompt_tokens > self.api.context_limit*0.85):
+                or self.api.usage.last_prompt_tokens > self.api.context_limit*0.80):
                 # Average token length = 4
-                while (len(str(tail))//4 > self.api.context_limit//2 and len(tail) > 0):
+                while (estimate_tokens(tail) > self.api.context_limit*2//3 and len(tail) > 1):
                     sections.append(tail[0])
                     tail = tail[1:]
                     if not tail:
                         break
-            compress_target = sections
+            compress_target = list(sections)
             logger.debug(f"Compress target: {len(compress_target)} messages, characters={len(str(compress_target))}")
 
             def format_for_compression(msg: dict) -> str:
@@ -1087,11 +1090,10 @@ class LLMRepl:
                     return f"[TOOL RESULT: {msg.get('name', 'unknown')} (ID: {msg.get('tool_call_id')})]\n{msg.get('content')}"
                 return f"{msg['role']}: {msg.get('content', '')}"
 
-            for c in compress_target:
-                sections.append(format_for_compression(c))
+            sections = [format_for_compression(c) for c in compress_target]
             content = None
             if sections:
-                content = self.ai_compress(sections, max_tokens=self.api.context_limit//2)
+                content = self.ai_compress(sections, max_tokens=self.api.context_limit*1//3)
                 logger.info(f"condensed context to {content}")
             if content:
                 content = f"Historical context summary - not a new response: {content}"
@@ -1162,7 +1164,7 @@ class LLMRepl:
                     panel = Panel(response_str, box = box.SIMPLE_HEAVY,
                                         border_style="none", padding=(0, 1, 2, 1))
 
-                    console.print(response_str)
+                    console.print(panel)
 
                 except Exception as e:
                     logger.exception("Tool %s failed", name)
@@ -1216,7 +1218,8 @@ class LLMRepl:
             if self.api.usage.last_prompt_tokens >= self.api.context_limit*0.85:
                 self._request_chat_completion(
                     [{"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": "running low on context, update and compress memories and todos"}],
+                    {"role": "user", "content": ("running low on context, update and compress memories and todos, "
+                                                 "create a gist file, emergency trim at 90 percent context usage")}],
                     tools=None, tool_choice=None
                     )
                 self._trim_context()
@@ -1226,12 +1229,12 @@ class LLMRepl:
 
         # Start timing the entire turn (includes tool calls and retries)
         start_time = time.time()
-
+        warning_sent = False
         SEND_TIMEOUT = 60
         with patch_stdout():
             while True:
                 console.print(f"[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
-                if self.api.usage.context_pct >= 85.0:
+                if self.api.usage.context_pct >= 80.0 and not warning_sent:
                     # warn llm.
                     warning = self.prompt_gen.generate_prompt(
                         "warning", {
@@ -1240,8 +1243,9 @@ class LLMRepl:
                         context_pct=self.api.usage.context_pct,
                         remaining_tokens=self.api.usage.remaining_tokens
                         )
-                    console.print(f"[dim]warning[dim]")
+                    console.rule(f"[dim]warning - {self.api.usage.summary()}[dim]")
                     current_messages.append({"role": "system", "content": warning})
+                    warning_sent = True
                 try:
                     # json.dumps(self.tool_schemas) # defensive validation
                     response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
@@ -1266,6 +1270,19 @@ class LLMRepl:
                         with self._state_lock:
                             self.messages.extend(tool_results)
                         current_messages.extend(tool_results)
+
+                        if self.api.usage.context_pct >= 90.0:
+                            # Emergency trim
+                            self._trim_context()
+                            console.rule(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]")
+                            current_messages.append({"role": "system", "content": "Emergency trim context."})
+                            with self._state_lock:
+                                current_messages = list(self.messages)
+                                current_messages.append({
+                                    "role": "system",
+                                    "content": "Your conversation history has been compressed. "
+                                            "Continue from the supplied historical summary."
+                                })
 
                         # DEBUG: line below
                         #console.print(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
@@ -1374,7 +1391,7 @@ class LLMRepl:
         self._apply_profile_update("", "", prompt = consolidation_prompt)
         console.print("[faded]Profile consolidated.[/faded]")
 
-    def _apply_profile_update(self, user_input: str, assistant_response: str, prompt="") -> None:
+    def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:
         """_summary_
 
         Args:
@@ -1614,7 +1631,6 @@ class LLMRepl:
         except EOFError:
             return None
         except KeyboardInterrupt:
-            self.agent_active = False
             raise KeyboardInterrupt("User interrupted")
         return user_input
 
@@ -1660,13 +1676,14 @@ class LLMRepl:
             prompt_session = PromptSession(history=FileHistory(str(history_path)), refresh_interval=1)
 
             cb = None
-
+            result = ""
             self.user_messages=[]
             with patch_stdout(True):
                 while True:
                     # live update model
                     # Write a statusbar
-                    self._write_statusbar()
+                    if cb == None or self.agent_active or result != "":
+                        self._write_statusbar()
                     try:
                         user_input = ""
                         while not user_input or user_input == "":
@@ -1679,13 +1696,16 @@ class LLMRepl:
                                     if isinstance(msg, str):
                                         user_input += msg
                             elif isinstance(self.loop_task, SimpleLoopTask):
-                                if not self.agent_active: # Only inject if the agent is done
-                                    user_input = self.loop_task.get_next_input() or ""
-                                    if user_input == "":
-                                        self.loop_task = ""
-                                        continue
-                                console.print(f"User(loop) > {user_input}\n")
+                                if self.agent_active:
+                                    time.sleep(1)
+                                    continue
 
+                                user_input = self.loop_task.get_next_input() or ""
+                                if not user_input:
+                                    self.loop_task = ""
+                                    continue
+
+                                console.print(f"User(loop) > {user_input}\n")
 
                         if user_input.startswith("/"):
                             command, args, params, errors = parse_command(user_input) # type: ignore
@@ -1705,17 +1725,18 @@ class LLMRepl:
                             continue
 
                         # Let's mark that the message was sent
-                        loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
-                                        if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
-                        console.rule(f"{loop_remains}")
+                        if not self.agent_active or (result != "" or user_input==""):
+                            loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
+                                            if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
+                            console.rule(f"{loop_remains}")
 
                         # async def wrapper(repl, user_input):
                         #     return repl.send_message(user_input)
                         # Add message to what agent reads
                         with self._state_lock:
-                                self.messages.append(
-                                    {"role": "user", "content": user_input}
-                                )
+                            self.messages.append(
+                                {"role": "user", "content": user_input}
+                            )
                         if not self.agent_active:
                             self.agent_active = True
                             # --- sync mode ---
@@ -1731,8 +1752,9 @@ class LLMRepl:
                             if result:
                                 self._on_send_done(result)
                         else:
-                            with self._state_lock:
-                                self.messages.append({"role": "user", "content": user_input})
+                            # with self._state_lock:
+                            #     self.messages.append({"role": "user", "content": user_input})
+                            pass
                         # if response:
                         #     console.print(Panel(Markdown(response), title="Assistant"))
                     except EOFError:
@@ -1749,6 +1771,10 @@ class LLMRepl:
                             continue # avoid exit _once_
                         if self.agent_active:
                             logger.warning("Interrupted by user")
+                            if cb:
+                                res = cb.stop()
+                            if res:
+                                self._on_send_done(res)
                             self.agent_active = False
                             continue
                         console.print("\n[bold red]Goodbye![/bold red]")

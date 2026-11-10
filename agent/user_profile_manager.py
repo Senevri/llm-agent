@@ -10,6 +10,7 @@ from custom_logger import setup_logging
 
 
 DEFAULT_PROFILE_PATH=Path(".llm_user_profile.json")
+DEFAULT_PROFILE_GIST=Path("llm_user_profile_gist.json")
 logger = setup_logging("UserProfileManager")
 logger.setLevel(logging.WARNING)
 
@@ -88,26 +89,57 @@ class UserProfileManager:
     """Thread-safe manager for user preferences and profile data."""
 
     def __init__(self, profile_path: Path = DEFAULT_PROFILE_PATH):
-
+        self.gist_path = Path(DEFAULT_PROFILE_GIST)
         self.profile_path = Path(profile_path)
         #logger.set_log_path(str(self.profile_path.parent))
         self._lock = threading.RLock()
         with self._lock:
             self._profile_data: Dict[str, Any] = self._load_profile()
+            self._gist_data: Dict[str, Any] = self._load_gist()
+
+    def _load_gist(self) -> Dict[str, Any]:
+        try:
+            json_str = self._load_json(self.gist_path)
+        except Exception as e:
+            logging.error(f"Failed to load gist: {e}")
+            return {}
+        if json_str:
+            return json_str
+        else:
+            logging.error("Gist file did not contain a JSON object; ignoring.")
+        return {}
+
+    def _load_json(self, path: Path) -> Dict[str, Any]:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            return {}
+        return {}
 
     def _load_profile(self) -> Dict[str, Any]:
-        if self.profile_path.exists():
-            try:
-                with open(self.profile_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-                logging.error("Profile file did not contain a JSON object; ignoring.")
-                return {}
-            except Exception as e:
-                logging.error(f"Failed to load profile: {e}")
-                return {}
+        try:
+            json_str = self._load_json(self.profile_path)
+        except Exception as e:
+            logging.error(f"Failed to load profile: {e}")
+            return {}
+        if json_str:
+            return json_str
+        else:
+            logging.error("Profile file did not contain a JSON object; ignoring.")
         return {}
+
+    def save_gist(self) -> None:
+        # backs up gist changes, too.
+        logger.info("Saving gist", self.get_gist_json_string())
+        with self._lock:
+            try:
+                self.gist_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.gist_path, "w", encoding="utf-8") as f:
+                    json.dump(self._gist_data, f, indent=2)
+            except Exception as e:
+                logging.error(f"Error saving gist: {e}")
 
     def save_profile(self) -> None:
         # backs up profile changes, too.
@@ -122,11 +154,24 @@ class UserProfileManager:
             except Exception as e:
                 logging.error(f"Error saving profile: {e}")
 
-    def get_profile_json_string(self) -> str:
+    def _get_json_string(self, data: Dict[str, Any]) -> str:
         with self._lock:
-            if not self._profile_data:
-                return "No user profile available."
-            return json.dumps(self._profile_data, indent    =2)
+            if not data:
+                return ""
+            return json.dumps(data, indent    =2)
+
+    def get_gist_json_string(self) -> str:
+        json_str = self._get_json_string(self._gist_data)
+        if not json_str:
+            return "No gist available."
+        return json.dumps(self._profile_data, indent    =2)
+
+
+    def get_profile_json_string(self) -> str:
+        json_str = self._get_json_string(self._profile_data)
+        if not json_str:
+            return "No user profile available."
+        return json.dumps(self._profile_data, indent    =2)
 
     def get_profile_string(self) -> str:
         with self._lock:
