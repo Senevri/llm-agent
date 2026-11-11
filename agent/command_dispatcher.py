@@ -29,7 +29,10 @@ class CommandDispatcher:
         if entry is None:
             return None
         logger.debug("Executing command: %s", entry)
-        return entry["handler"](self.repl, *args, **kwargs)
+        try:
+            return entry["handler"](self.repl, *args, **kwargs)
+        except TypeError as e:
+            return f"Error: {e} {entry} with args {args} and kwargs {kwargs}"
 
     def load(self, commands_dict: Dict[str, Callable], command_definitions: Dict[str, Dict[str, Any]]):
         for name, handler in commands_dict.items():

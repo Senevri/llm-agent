@@ -1,6 +1,7 @@
 import threading
 import queue
 import time
+import json
 from typing import List, Dict
 from user_profile_manager import ContextSnapshot
 import logging
@@ -16,6 +17,7 @@ class ProfileWorker(threading.Thread):
     def __init__(self, repl, q: queue.Queue, batch_size: int = 3, time_threshold: float = 0.5):
         super().__init__(daemon=True, name="ProfileWorker")
         self.repl = repl
+        self.profile_manager = repl.profile_manager
         self.queue = q
         self.batch_size = batch_size
         self.time_threshold = time_threshold

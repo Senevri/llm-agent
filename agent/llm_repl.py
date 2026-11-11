@@ -22,6 +22,7 @@ import urllib
 import re
 import uuid
 import shutil
+from pprint import pformat
 from httpx2 import ConnectError, HTTPError
 #from requests.exceptions import HTTPError
 from logging.handlers import RotatingFileHandler
@@ -66,7 +67,9 @@ if SCRIPT_DIR not in sys.path:
 if AGENT_DIR not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
-from llm_utils import size_bytes, estimate_tokens, normalize_messages, discover_candidate_dir
+from llm_utils import (
+    size_bytes, estimate_tokens, normalize_messages, discover_candidate_dir,
+    robust_json_extract, balanced_braces_extract, _role)
 from profileworker import ProfileWorker
 
 def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
@@ -186,28 +189,9 @@ try:
         force_terminal=True,
         color_system="auto",
     )
-#FIXME why so defensive coding?
 except Exception:
-    class Console:  # type: ignore
-        def print(self, msg, *args, **kwargs):
-            print(msg)
-        def rule(self, title):
-            print(f"--- {title} ---")
-    class Markdown:  # type: ignore
-        def __init__(self, text):
-            self.text = text
-    class Panel:  # type: ignore
-        def __init__(self, content, title=None, **kwargs):
-            self.content = content
-            self.title = title
-    class Table:  # type: ignore
-        def __init__(self, title=None):
-            self.title = title
-        def add_column(self, *a, **k):
-            pass
-        def add_row(self, *a, **k):
-            pass
-    console = Console()
+    logger.error("Failed to import rich")
+    exit(1)
 
 try:
     from prompt_toolkit import PromptSession
@@ -326,7 +310,7 @@ def load_commands():
             "help": "show status",
         },
         "alias": {
-            "help": "<alias> set alias",
+            "help": "<alias> <command> <args> set alias | <alias set <alias> <python|bash> <script>> | <alias set <alias> <command string>>",
         }
     }
 
@@ -399,19 +383,28 @@ class Script:
 
 def alias_command(repl, *args, **kwargs):
     if len(args) < 2:
-
-        console.print(f"[blue]Current aliases[/blue]:\n"
-                      f"{''.join([f'/{k}: {v}' for k, v in repl.aliases.items()])}\n")
+        # note: Print has implicit newlines
+        console.print(f"[blue]Current aliases[/blue]:")
+        [console.print(f'/{k}: {v}') for k, v in repl.aliases.items()]
         return
-    if args[0] == "set" and len(args) > 2:
-        with repl._state_lock:
-            if args[2] in ["python", "bash"]:
-                repl.aliases[args[1]] = Script(repl, args[2], " ".join(args[3:]).strip())
-            else:
-                repl.aliases[args[1]] = f"{' '.join(args[2:])}".strip()
+    if len(args) > 2:
+        if args[0] == "set":
+            with repl._state_lock:
+                if args[2] in ["python", "bash", "repl"]:
+                    repl.aliases[args[1]] = Script(repl, args[2], " ".join(args[3:]).strip())
+                if args[2] == "alias":
+                    return "cannot alias alias"
+                else:
+                    repl.aliases[args[1]] = f"{' '.join(args[2:])}".strip()
+        if args[0] == "rm":
+            if args[1] in repl.aliases:
+                repl.aliases.pop(args[1])
+            return "removed alias"
+
     if args[1] in repl.cmd_dispatcher.commands:
-        repl.cmd_dispatcher.register(args[0], repl.cmd_dispatcher.commands[args[1]])
+        repl.cmd_dispatcher.register(args[0], args[1])
         repl.aliases[args[0]] = args[1]
+        return f"registered new alias for /{args[0]}: {args[1]}"
 
     console.print(f"[yellow]Alias {args[1]} set to {args[2]}[/yellow]")
 
@@ -455,6 +448,10 @@ def repl_command(repl, *args, **kwargs):
                 if v in ["True", "False"]:
                     v = True if v == "True" else False
                 if attr:
+                    msg = f"Setting {k} to {v}"
+                    setattr(attr, k, v)
+                    logger.info(msg)
+                    console.print(f"[yellow]{msg}[/yellow]")
                     attr = v
         return
     if args[0] == "help":
@@ -466,9 +463,9 @@ def repl_command(repl, *args, **kwargs):
         return
     attr = _parse_attr(args[0])
 
-    if not attr:
+    if attr == None:
         console.print("[red]Command not found.[/red]")
-        return
+        return attr
     if callable(attr):
         #result = getattr(repl, args[0])(*args[1:], **kwargs)
         repl_args = list(args[1:])
@@ -477,7 +474,8 @@ def repl_command(repl, *args, **kwargs):
         if hasattr(attr, "__dict__"):
             attr = vars(attr)
         result = attr
-    console.print(result)
+    # logger.debug(result)
+    return result
 
 
 def profile_command(repl, *args, **kwargs):
@@ -648,10 +646,15 @@ def get_config_representation(repl):
             "tasks",
             ]
     }
-    if getattr(repl, "aliases"):
-        repl_representation["aliases"] = {
-            k:{v.command: str(v.script)} for k, v in repl.__dict__.get("aliases", {}).items()
-            }
+    if aliases := getattr(repl, "aliases"):
+        if isinstance(aliases, Script):
+            repl_representation["aliases"] = {
+                k:{v.command: str(v.script)} for k, v in repl.__dict__.get("aliases", {}).items()
+                }
+        else:
+            repl_representation["aliases"] = {
+                k:v for k, v in repl.__dict__.get("aliases", {}).items()
+                }
     repl_representation["api"] = {
         k:v for k, v in repl.api.__dict__.items()
         if not k.startswith("_") and k in
@@ -691,6 +694,8 @@ def load_config(repl, *args, **kwargs):
 
     if conf:
         for k, v in conf.items():
+            if k == "aliases":
+                continue
             repl.__dict__[k] = v if v is not None else repl.__dict__.get(k, None)
     try:
         repl.api = LLMBackend(backend=conf.get("backend", repl.backend))
@@ -701,8 +706,11 @@ def load_config(repl, *args, **kwargs):
 
     repl.aliases = {}
     for k, v in conf.get("aliases", {}).items():
-        cmd, script = list(v.items())[0]
-        repl.aliases[k] = Script(repl, cmd, script)
+        if isinstance(v, dict) and "command" in v and "script" in v:
+            cmd, script = list(v.items())[0]
+            repl.aliases[k] = Script(repl, cmd, script)
+        else:
+            repl.aliases[k] = v
     if not os.getenv("DEBUG", "false").lower() == "true":
         repl.api.logger.setLevel(logger.level)
     repl.backend = repl.api.backend
@@ -821,10 +829,11 @@ class LLMRepl:
         self.model = None
         self.client = None
         self.last_message_time = None # todo, make a message class
+        self.no_reply = False
         self.pending_user_inputs = queue.Queue()
         self.input_queue = queue.Queue()
         self.agent_active = False
-        self.current_bg_task = None
+        self.status = "ok"
 
         with _active_repls_lock:
             _active_repls += 1
@@ -946,7 +955,10 @@ class LLMRepl:
         with self._state_lock:
             logger.info("Saving conversation history...")
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = Path.cwd() / f"repl_messages-{stamp}.yaml"
+            repl_archive = Path.cwd() / "repl_messages"
+            if not repl_archive.exists():
+                repl_archive.mkdir()
+            path = repl_archive / f"repl_messages-{stamp}.yaml"
             logger.info("Saving to %s", path)
             with open(path, "w", encoding="utf-8") as f:
                 # Leave off system prompt
@@ -1232,14 +1244,28 @@ class LLMRepl:
         return tool_results
 
     def _start_background_send(self, user_input: str) -> None:
+        if self.status == "stop":
+            return
         self.agent_active = True
         self.current_bg_task = run_in_background(self.send_message)(user_input)
+
+    def _draw_end_rule(self, newline=False):
+        # Let's mark that the message was sent
+        loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
+        if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
+        if newline:
+            console.print("\n")
+        console.rule(f"{loop_remains}")
+        self.no_reply = False
+
 
 
     def send_message(self, user_input: str) -> str:
 
         needs_trim = False
         with self._state_lock:
+            if self.status == "stop":
+                return "stopped"
             if self.api.usage.last_prompt_tokens >= self.api.context_limit * 0.85:
                 needs_trim = True
         # Release state lock
@@ -1263,7 +1289,13 @@ class LLMRepl:
         SEND_TIMEOUT = 60
         with patch_stdout():
             while True:
+                # Let's mark that the message was sent
+                self._draw_end_rule()
                 console.print(f"[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
+                if self.status == "stop":
+                    self.current_bg_task.stop()
+                    return "stopped"
+                self.no_reply = False
                 if self.api.usage.context_pct >= 80.0 and not warning_sent:
                     # warn llm.
                     warning = self.prompt_gen.generate_prompt(
@@ -1328,16 +1360,22 @@ class LLMRepl:
                     if ("/tool" in content):
                         tools_command(self, "on")
                     if content:
+                        self._draw_end_rule()
                         console.print("\n") # newline, seems hacky
                         console.print(Panel(Markdown(content), title="Assistant"))
+
+
                     else:
                         console.print("[bold red]Assistant: (No response)[/bold red]")
+                    with self._state_lock:
+                        self.no_reply = False
 
                     # Only print time if it exceeds 5 seconds
                     if elapsed > 5.0:
                         console.print(f"[dim]⏱️  Turn completed in {elapsed:.2f}s[/dim]")
                         # self.redraw_prompt = True
-                        self._write_statusbar()
+                        self.no_reply = False
+                        self._draw_statusbar()
                         # Hack:
                         prefix = self.get_input_prompt_prefix()
                         console.print(prefix, end="")
@@ -1345,18 +1383,21 @@ class LLMRepl:
 
                     self._enqueue_profile_snapshot(user_input, content)
                     return content
-
                 except Exception as e:
+                    self.no_reply = False
                     if isinstance(e, InternalServerError):
                         return f"API Error: {e}"
                     elapsed = time.time() - start_time
                     if elapsed > SEND_TIMEOUT:
                         raise APIError(f"Response timed out after {elapsed:.2f}s")
-
                     if not self._handle_api_error(e):
                         return f"API Error: {e}"
 
+
     def _handle_api_error(self, e: Exception) -> bool:
+        with self._state_lock:
+            if self.current_bg_task == None or self.status == "stop":
+                return False
         try:
             action, delay = classify_api_error(e)
         except Exception:
@@ -1364,7 +1405,6 @@ class LLMRepl:
         if action in (Action.RETRY, Action.BACKOFF):
             logger.warning(f"API error {action}: {e}. Waiting {delay}s...")
             try:
-                time.sleep(delay)
                 if (e.response.status_code == 500 # type: ignore
                     and "Failed to parse tool call arguments as JSON" in str(e)):
                     self.notools = True
@@ -1373,6 +1413,9 @@ class LLMRepl:
                             {"role": "system", "content": "disabled tool calls. re-enable with /tools"}
                             )
                         tools_command(self, "reload")
+                time.sleep(delay)
+            except KeyboardInterrupt:
+                return False
             except Exception:
                 pass
             return True
@@ -1417,158 +1460,9 @@ class LLMRepl:
             return
         self.prompt_gen.reload_profiles()
         consolidation_prompt = self.prompt_gen.generate_prompt("profile_consolidation")
-        self._apply_profile_update("", "", prompt = consolidation_prompt)
+        self.profile_manager._apply_profile_update("", "", prompt = consolidation_prompt)
         console.print("[faded]Profile consolidated.[/faded]")
 
-    # def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:
-    #     """_summary_
-
-    #     Args:
-    #         user_input (str): _description_
-    #         assistant_response (str): _description_
-    #         prompt (str, optional): _description_. Defaults to "". Not actually optional
-    #     """
-    #     try:
-    #         profile_data = self.profile_manager.profile_data
-    #         prompt = prompt.replace(
-    #                 "{profile_json}", json.dumps(profile_data, indent=2)).replace("{user_input}", user_input)
-    #         response = self._request_chat_completion(
-    #             [{"role": "system", "content": "You are a helpful assistant that outputs ONLY JSON."},
-    #              {"role": "user", "content": prompt}],
-    #             tools=None,
-    #             tool_choice=None,
-    #         )
-    #         content = response.choices[0].message.content
-    #         updated_json=None
-    #         if content:
-    #             updated_json = self._robust_json_extract(content)
-    #         if updated_json is None:
-    #             raise ValueError("Profile worker returned invalid JSON.")
-
-    #         with self._state_lock:
-    #             self.profile_manager.set_profile_data(updated_json)
-    #             self.system_prompt = self._build_system_prompt()
-    #             if self.messages and _role(self.messages[0]) == "system":
-    #                 self.messages[0] = {"role": "system", "content": self.system_prompt}
-    #         logger.debug("User profile updated by worker.")
-    #     except Exception as e:
-    #         logger.error(f"Profile update failed: {e}")
-
-    def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:
-        try:
-            profile_data = self.profile_manager.profile_data
-
-            # Inject all possible placeholders
-            prompt = prompt.replace("{profile_json}", json.dumps(profile_data, indent=2)) \
-                           .replace("{user_input}", user_input) \
-                           .replace("{assistant_response}", assistant_response)
-
-            if not prompt.strip():
-                logger.error("Profile update prompt is empty after substitution!")
-                return
-
-            response = self._request_chat_completion(
-                [{"role": "system", "content": "You are a helpful assistant that outputs ONLY valid JSON representing the user profile."},
-                 {"role": "user", "content": prompt}],
-                tools=None,
-                tool_choice=None,
-            )
-            content = response.choices[0].message.content
-
-            # DEBUG: See what the LLM actually returned
-
-            updated_json = None
-            if content:
-                logger.debug(f"LLM raw profile response: {content[:300]}...")
-                updated_json = self._robust_json_extract(content)
-
-            if updated_json is None:
-                logger.error(f"Profile worker returned invalid JSON. Raw content: {content}")
-                raise ValueError("Profile worker returned invalid JSON.")
-
-            with self._state_lock:
-                self.profile_manager.set_profile_data(updated_json)
-                self.system_prompt = self._build_system_prompt()
-                if self.messages and _role(self.messages[0]) == "system":
-                    self.messages[0] = {"role": "system", "content": self.system_prompt}
-            logger.info("✅ User profile updated by worker.")
-
-        except Exception as e:
-            logger.exception(f"❌ Profile update failed: {e}")
-
-
-    # def _robust_json_extract(self, text: str) -> Optional[Dict[str, Any]]:
-    #     if not isinstance(text, str):
-    #         return None
-    #     # Fenced code block first.
-    #     pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
-    #     match = re.search(pattern, text, re.DOTALL)
-    #     if match:
-    #         json_str = match.group(1)
-    #     else:
-    #         start = text.find("{")
-    #         end = text.rfind("}")
-    #         if start != -1 and end != -1 and end > start:
-    #             json_str = text[start:end + 1]
-    #         else:
-    #             json_str = text.strip()
-
-    #     try:
-    #         parsed = json.loads(json_str)
-    #         if isinstance(parsed, dict):
-    #             return parsed
-    #         return None
-    #     except json.JSONDecodeError:
-    #         return self._balanced_braces_extract(text)
-
-    #qwersion
-    def _robust_json_extract(self, text: str) -> Optional[Dict[str, Any]]:
-        if not isinstance(text, str):
-            return None
-
-        # Primary method: Find the outermost braces. This handles nested JSON perfectly.
-        start = text.find("{")
-        end = text.rfind("}")
-
-        if start != -1 and end != -1 and end > start:
-            json_str = text[start:end + 1]
-        else:
-            # Fallback: Try to strip markdown fences if no braces found (shouldn't happen)
-            pattern = r"```(?:json)?\s*(\{.*\})\s*```" # Note: greedy .* instead of .*?
-            match = re.search(pattern, text, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-            else:
-                return None
-
-        try:
-            parsed = json.loads(json_str)
-            if isinstance(parsed, dict):
-                return parsed
-            return None
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON Decode failed on extracted string: {e}\nString snippet: {json_str[:200]}")
-            return self._balanced_braces_extract(text)
-
-    def _balanced_braces_extract(self, text: str) -> Optional[Dict[str, Any]]:
-        start = text.find("{")
-        if start == -1:
-            return None
-        count = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                count += 1
-            elif text[i] == "}":
-                count -= 1
-            if count == 0:
-                try:
-                    parsed = json.loads(text[start:i + 1])
-                    if isinstance(parsed, dict):
-                        return parsed
-                    return None
-                except json.JSONDecodeError:
-                    return None
-        return None
 
     # --- Job management -----------------------------------------------------------
 
@@ -1733,11 +1627,10 @@ class LLMRepl:
         logger.info(("COMMAND:", command, args, params))
         status = self.cmd_dispatcher.dispatch(command, args, params)
         if status:
-            logger.info(f"Command status: {status}")
-            if status == "quit":
-                return "QUIT"
+            # logger.info(f"Command status: {status}")
             if isinstance(status, LoopTask):
                 self.loop_task = status
+            return status
 
     def get_input_prompt_prefix(self):
         agent = "(👣)" if self.agent_active else ""
@@ -1753,10 +1646,12 @@ class LLMRepl:
         except EOFError:
             return None
         except KeyboardInterrupt:
-            raise KeyboardInterrupt("User interrupted")
+            return "keyboard_interrupt"
         return user_input
 
-    def _write_statusbar(self):
+    def _draw_statusbar(self):
+        if self.no_reply:
+            return
         try:
             self.model = self.api.model
             base_url = self.client.base_url
@@ -1766,10 +1661,48 @@ class LLMRepl:
             n_ctx = "(unset)"
         rule_str=f"[turquoise4]{self.model}|{base_url}|{n_ctx}|{self.backend}[/turquoise4]"
         console.rule(rule_str)
+        self.no_reply=True
+
 
 
     def run(self) -> None:
         asyncio.run(self._run())
+
+
+    def process_slash_commands(self, user_input) -> (bool, Any):
+        def _is_command(command):
+            return command in self.cmd_dispatcher.commands
+
+        def _alias_script(alias):
+            if isinstance(alias, Script):
+                result = alias(self, args, params)
+                if result:
+                    console.print(result)
+                return (True, result)
+            return (False, None)
+
+        if user_input.startswith("/"):
+            command, args, params, errors = parse_command(user_input) # type: ignore
+            if _is_command(command):
+                result = self._process_command(command, args, params)
+                return (True, result)
+            elif command in self.aliases.keys():
+                alias = self.aliases.get(command,"")
+                is_alias, result = _alias_script(alias)
+                if is_alias:
+                    return (True, result)
+                # Let's try to parse it as a final fallback:
+                alias_cmd, args, params, errors = parse_command(f"/{alias}") # type: ignore
+                logger.info(f"Alias: {command} = {alias_cmd} {args} {params}")
+                if _is_command(alias_cmd):
+                    result = self._process_command(alias_cmd, args, params)
+                    return (True, result)
+                console.print(f"Failed to process alias: {alias}")
+            else:
+                console.print(f"[bold red]Unknown command: {user_input}[/bold red]")
+                return (True, None)
+        return (False, None)
+
 
     async def _run(self):
         try:
@@ -1804,67 +1737,71 @@ class LLMRepl:
             ui_pump = asyncio.create_task(self._background_ui_pump())
 
             with patch_stdout(True):
+                self.no_reply=False
                 while True:
-                    # live update model
-                    if  self.agent_active or result != "":
-                        self._write_statusbar()
                     try:
+                        # live update model
+                        self._draw_statusbar()
+
                         # Get User Input
                         user_input = ""
-                        if user_input==False or user_input == "":
-                            if isinstance(self.loop_task, SimpleLoopTask):
-                                print("angrish")
-                                user_input = self.loop_task.get_next_input() or ""
-                                if not user_input:
-                                    self.loop_task = ""
-                                    break
+                        if isinstance(self.loop_task, SimpleLoopTask):
+                            user_input = self.loop_task.get_next_input() or ""
+                            if user_input:
                                 console.print(f"User(loop) > {user_input}\n")
-
-                                 # Fire it and wait for completion
+                                # Fire it and wait for completion
                                 self._start_background_send(user_input)
+                            else:
+                                self.loop_task.cleanup()
 
-                                while self.agent_active:
-                                    time.sleep(1)
-                                continue
-
-                        if not user_input or user_input == "":
-                            user_input = await self.get_user_prompt(prompt_session)
-                                # logger.warning(user_input)
-                            if user_input in self.user_messages:
-                                self.user_messages.pop(self.user_messages.index(user_input))
-                            for msg in self.user_messages:
-                                if isinstance(msg, str):
-                                    user_input += msg
-                                    self.user_messages = []
-
-                            if not user_input:
-                                # Existing agent sessions are still active
-                                continue
-
-                        # Got userinput, parse
-
-                        if user_input.startswith("/"):
-                            command, args, params, errors = parse_command(user_input) # type: ignore
-                            if command in self.cmd_dispatcher.commands:
-                                status = self._process_command(command, args, params)
-                                if status == "QUIT":
-                                    break
-                                continue
-                            elif command in self.aliases:
-                                alias = self.aliases[command]
-                                if isinstance(alias, Script):
-                                    result = alias(self, args, params)
+                            while self.agent_active:
+                                # time.sleep(1)
+                                # experimental: wait for user input(async)
+                                self._draw_statusbar()
+                                _user_input = await self.get_user_prompt(prompt_session)
+                                if _user_input in ["keyboard_interrupt", "stop", "quit"]:
+                                    self._draw_end_rule()
+                                    raise KeyboardInterrupt("Agent Interrupted by User")
+                                status, result = self.process_slash_commands(_user_input)
+                                if status:
+                                    self.user_messages.pop(self.user_messages.index(_user_input))
+                                    if result == "quit":
+                                        break
                                     if result:
                                         console.print(result)
-                                    continue
-                            console.print(f"[bold red]Unknown command: {user_input}[/bold red]")
+                                        self.no_reply = False
+
+                                # NOTE: Input went to message queue
+
+                        if not user_input or user_input == "":
+                            self.status="run"
+                            user_input = await self.get_user_prompt(prompt_session)
+                                # logger.warning(user_input)
+                            if user_input in ["keyboard_interrupt", "stop", "quit"]:
+                                self._draw_end_rule()
+                                raise KeyboardInterrupt("Interrupted by User")
+                            if user_input in self.user_messages:
+                                self.user_messages.pop(self.user_messages.index(user_input))
+
+                        for msg in self.user_messages:
+                            if not user_input:
+                                user_input = ""
+                            if isinstance(msg, str):
+                                user_input += msg
+                                self.user_messages = []
+
+                        if not user_input:
+                            # Existing agent sessions are still active. Or not. Regardless
                             continue
 
-                        # Let's mark that the message was sent
-                        if not self.loop_task or not self.agent_active or (result != "" or user_input==""):
-                            loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
-                                            if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
-                            console.rule(f"{loop_remains}")
+                        # Got userinput, parse
+                        status, result = self.process_slash_commands(user_input)
+                        if status == True:
+                            if result == "quit": # was slashcommand, do not pass go
+                                break
+                            console.print(result)
+                            continue
+
 
                         # Pass to LLM
 
@@ -1876,28 +1813,34 @@ class LLMRepl:
                     except EOFError:
                         console.print("[bold red]Goodbye![/bold red]")
                         break
-                    except KeyboardInterrupt:
+                    except KeyboardInterrupt as ke:
+                        self.no_reply = False
                         if self.loop_task:
                             try:
                                 self.loop_task.stop()
                                 logger.warning("Loop task interrupted!")
+                                continue
                             except Exception as e:
                                 logger.error(f"Error stopping loop task: {e}")
                                 self.loop_task = None
-                                continue # avoid exit _once_
-                            except KeyboardInterrupt:
-                                if self.agent_active and self.current_bg_task:
-                                    logger.warning("Interrupted by user")
-                                    self.current_bg_task.stop()
-                                    self.current_bg_task = None
-                                    self.agent_active = False
-                                    console.print("[dim]Background task interrupted.[/dim]")
-                        continue
+                            continue # avoid exit _once_
+                        if self.agent_active and self.current_bg_task:
+                            with self._state_lock:
+                                self.status = "stop"
+                            logger.warning("Interrupted by user")
+                            with self._state_lock:
+                                self.messages.append({"role": "user", "content": "stop"})
+                            if self.current_bg_task:
+                                self.current_bg_task.stop()
+                                self.current_bg_task = None
+                            console.print("[dim]Background task interrupted.[/dim]")
+                            continue
                         console.print("\n[bold red]Goodbye![/bold red]")
                         break
                     except Exception as e:
                         logger.exception(f"Unexpected error during REPL loop: {e}")
                         console.print(f"[bold red]Unexpected error: {e}[/bold red]")
+                        self.no_reply = False
         finally:
             if ui_pump:
                 ui_pump.cancel()
@@ -1909,10 +1852,47 @@ class LLMRepl:
             self.shutdown()
 
 
-def _role(m: Any) -> str:
-    if isinstance(m, dict):
-        return str(m.get("role", ""))
-    return str(getattr(m, "role", ""))
+    def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:
+        try:
+            profile_data = self.profile_manager.profile_data
+
+            # Inject all possible placeholders
+            prompt = prompt.replace("{profile_json}", json.dumps(profile_data, indent=2)) \
+                           .replace("{user_input}", user_input) \
+                           .replace("{assistant_response}", assistant_response)
+
+            if not prompt.strip():
+                logger.error("Profile update prompt is empty after substitution!")
+                return
+
+            response = self._request_chat_completion(
+                [{"role": "system", "content": "You are a helpful assistant that outputs ONLY valid JSON representing the user profile."},
+                 {"role": "user", "content": prompt}],
+                tools=None,
+                tool_choice=None,
+            )
+            content = response.choices[0].message.content
+
+            # DEBUG: See what the LLM actually returned
+            logger.debug(f"LLM raw profile response: {content[:300]}...")
+
+            updated_json = None
+            if content:
+                updated_json = robust_json_extract(content)
+
+            if updated_json is None:
+                logger.error(f"Profile worker returned invalid JSON. Raw content: {content}")
+                raise ValueError("Profile worker returned invalid JSON.")
+
+            with self._state_lock:
+                self.profile_manager.set_profile_data(updated_json)
+                self.system_prompt = self._build_system_prompt()
+                if self.messages and _role(self.messages[0]) == "system":
+                    self.messages[0] = {"role": "system", "content": self.system_prompt}
+            logger.info("✅ User profile updated by worker.")
+
+        except Exception as e:
+            logger.error(f"Profile update failed: {e}")
 
 
 # --- Module-level tool helpers ----------------------------------------------------

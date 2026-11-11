@@ -187,7 +187,6 @@ class LoopTask(SimpleLoopTask):
                         #self.repl.messages += [{"role": "assistant", "content": output}]
 
                     if self.check_timeout():
-
                         dispatcher.shutdown(stop_owned_jobs=True)
                         break
                     else:

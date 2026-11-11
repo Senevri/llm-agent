@@ -7,6 +7,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from custom_logger import setup_logging
+from llm_utils import normalize_messages, robust_json_extract, _role
 
 
 DEFAULT_PROFILE_PATH=Path(".llm_user_profile.json")
@@ -88,13 +89,13 @@ def render_profile(profile: dict) -> str:
 class UserProfileManager:
     """Thread-safe manager for user preferences and profile data."""
 
-    def __init__(self, profile_path: Path = DEFAULT_PROFILE_PATH):
+    def __init__(self, profile_path: Path = DEFAULT_PROFILE_PATH, gist_path: Path = DEFAULT_PROFILE_GIST):
         self.gist_path = Path(DEFAULT_PROFILE_GIST)
         self.profile_path = Path(profile_path)
         #logger.set_log_path(str(self.profile_path.parent))
         self._lock = threading.RLock()
         with self._lock:
-            self._profile_data: Dict[str, Any] = self._load_profile()
+            self._profile_data: Dict[str, Any] = self.load_profile()
             self._gist_data: Dict[str, Any] = self._load_gist()
 
     def _load_gist(self) -> Dict[str, Any]:
@@ -118,7 +119,7 @@ class UserProfileManager:
             return {}
         return {}
 
-    def _load_profile(self) -> Dict[str, Any]:
+    def load_profile(self) -> Dict[str, Any]:
         try:
             json_str = self._load_json(self.profile_path)
         except Exception as e:
@@ -154,24 +155,25 @@ class UserProfileManager:
             except Exception as e:
                 logging.error(f"Error saving profile: {e}")
 
+
     def _get_json_string(self, data: Dict[str, Any]) -> str:
         with self._lock:
             if not data:
                 return ""
-            return json.dumps(data, indent    =2)
+            return json.dumps(data, indent=2)
 
     def get_gist_json_string(self) -> str:
         json_str = self._get_json_string(self._gist_data)
         if not json_str:
             return "No gist available."
-        return json.dumps(self._profile_data, indent    =2)
+        return json.dumps(self._gist_data, indent=2)
 
 
     def get_profile_json_string(self) -> str:
         json_str = self._get_json_string(self._profile_data)
         if not json_str:
             return "No user profile available."
-        return json.dumps(self._profile_data, indent    =2)
+        return json.dumps(self._profile_data, indent=2)
 
     def get_profile_string(self) -> str:
         with self._lock:

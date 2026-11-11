@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
+import re
 import os
 import httpx2
-from typing import Optional, Iterable
+from typing import Optional, Iterable, Dict, Any
 
 import logging
 from pathlib import Path
@@ -18,6 +19,12 @@ except ImportError:
     logger.warning("Could not import tiktoken. Using len(str(m)) as a fallback.")
     def estimate_tokens(messages: list) -> int:
         return sum(size_bytes(m) for m in messages) // 4
+
+def _role(m: Any) -> str:
+    if isinstance(m, dict):
+        return str(m.get("role", ""))
+    return str(getattr(m, "role", ""))
+
 
 def normalize_messages( messages, provider):
     normalized = []
@@ -100,6 +107,55 @@ class UsageTracker:
             ),
             "tool_count": len(tools or []),
         }
+
+def robust_json_extract(text: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(text, str):
+            return None
+
+        # Primary method: Find the outermost braces. This handles nested JSON perfectly.
+        start = text.find("{")
+        end = text.rfind("}")
+
+        if start != -1 and end != -1 and end > start:
+            json_str = text[start:end + 1]
+        else:
+            # Fallback: Try to strip markdown fences if no braces found (shouldn't happen)
+            pattern = r"```(?:json)?\s*(\{.*\})\s*```" # Note: greedy .* instead of .*?
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            else:
+                return None
+
+        try:
+            parsed = json.loads(json_str)
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON Decode failed on extracted string: {e}\nString snippet: {json_str[:200]}")
+            return balanced_braces_extract(text)
+
+def balanced_braces_extract(text: str) -> Optional[Dict[str, Any]]:
+    start = text.find("{")
+    if start == -1:
+        return None
+    count = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            count += 1
+        elif text[i] == "}":
+            count -= 1
+        if count == 0:
+            try:
+                parsed = json.loads(text[start:i + 1])
+                if isinstance(parsed, dict):
+                    return parsed
+                return None
+            except json.JSONDecodeError:
+                return None
+    return None
+
 
 def size_bytes(value):
     if value is None:

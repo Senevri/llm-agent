@@ -31,7 +31,6 @@ logger = setup_logging("Backend", level="INFO", log_dir=Path(LOG_DIR))
 
 class LLMBackend:
     def __init__(self, backend: str = "mistral", config_file: str = "endpoints.yaml", defer_init=False):
-        self.available_models = []
         self.backend = backend
         self.endpoints = self.load_endpoints(config_file)
         self.usage = UsageTracker()
@@ -55,6 +54,13 @@ class LLMBackend:
     def set_model(self, model: str):
         self.model = model or self.model
         return self.model
+
+    @property
+    def available_models(self) -> list[str]:
+        try:
+            return self.endpoint.available_models
+        except:
+            return []
 
     def load_endpoints(self, config_file: str) -> Dict:
         """_summary_
