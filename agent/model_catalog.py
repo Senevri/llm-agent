@@ -86,22 +86,23 @@ def list_openai_models():
 
 def list_llamacpp_models():
     gateway_ip = get_gateway_ip()
-    url = f"http://{gateway_ip}"
+    url = f"http://{gateway_ip}:{os.getenv('LLAMACPP_PORT', '9931')}"
     try:
-        response = get_llamacpp_models(url, port=os.getenv("LLAMA_PORT", "9931"))
-        data = response.json()
-        return [m['id'] for m in data.get('data', [])]
+        response = get_llamacpp_models(url)
+        data = response
+        return [{m['id']: m} for m in data.get('data', [])]
     except Exception as e:
         return [f"Error: {e}"]
 
 def get_llamacpp_models(base_url, port="9931"):
     # /api/v1/model
+    assert port=="9931"
     if not base_url:
         gateway_ip = get_gateway_ip()
         base_url = f"http://{gateway_ip}:{port}"
     available_models = requests.get(base_url + "/models")
     # format: {"result": "<model_name
-    return available_models.json().get("models", [])
+    return available_models.json()
 
 
 def get_all_models():
@@ -109,6 +110,7 @@ def get_all_models():
         "ollama": list_ollama_models(),
         "mistral": list_mistral_models(),
         "koboldcpp": list_koboldcpp_models(),
+        "llamacpp": list_llamacpp_models(),
         "openai": list_openai_models()
     }
 

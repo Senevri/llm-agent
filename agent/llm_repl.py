@@ -658,17 +658,17 @@ def get_config_representation(repl):
                 k: f"{v.command} {v.script}" if isinstance(v, Script) else v
                 for k, v in aliases.items()
             }
-
-    repl_representation["api"] = {
-        k:v for k, v in repl.api.__dict__.items()
-        if not k.startswith("_") and k in
-        [
-            "backend",
-            "port",
-            "model",
-            "base_url",
-            ]
-        }
+    if getattr(repl, "api"):
+        repl_representation["api"] = {
+            k:v for k, v in repl.api.__dict__.items()
+            if not k.startswith("_") and k in
+            [
+                "backend",
+                "port",
+                "model",
+                "base_url",
+                ]
+            }
     repl.config = repl_representation
     return repl_representation
 def save_config(repl, *args, **kwargs):
@@ -698,7 +698,7 @@ def load_config(repl, *args, **kwargs):
 
     if conf:
         for k, v in conf.items():
-            if k == "aliases":
+            if k in ["aliases", "api"]:
                 continue
             repl.__dict__[k] = v if v is not None else repl.__dict__.get(k, None)
     try:
@@ -1294,7 +1294,7 @@ class LLMRepl:
         with patch_stdout():
             while True:
                 # Let's mark that the message was sent
-                self._draw_end_rule()
+                self._draw_end_rule(True)
                 console.print(f"[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
                 if self.status == "stop":
                     self.current_bg_task.stop()

@@ -172,7 +172,12 @@ class LlamaApiEndpoint(APIEndpoint):
         self.api_key = "llama"
         # Can be overwritten by args
         self.ctx_size = 32768
-        self.available_models = MODEL_CATALOGS["openai"]()
+        # Futureproofs
+        self.available_model_data = MODEL_CATALOGS["llamacpp"]()
+        if isinstance(self.available_model_data, dict):
+            self.available_models = self.available_model_data.keys()
+        else:
+            self.available_models = self.available_model_data
         # Empty means resolve the model from the server.
         self.model = model
         if not self.model:
