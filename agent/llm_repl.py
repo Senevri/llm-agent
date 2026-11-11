@@ -390,7 +390,7 @@ def alias_command(repl, *args, **kwargs):
     if len(args) > 2:
         if args[0] == "set":
             with repl._state_lock:
-                if args[2] in ["python", "bash", "repl"]:
+                if args[2] in ["python", "bash"]:
                     repl.aliases[args[1]] = Script(repl, args[2], " ".join(args[3:]).strip())
                 if args[2] == "alias":
                     return "cannot alias alias"
@@ -636,7 +636,9 @@ def config_command(repl, *args, **kwargs):
 
 def get_config_representation(repl):
     repl_representation = {
-        k:v if type(v) == dict else v for k, v in repl.__dict__.items() if not k.startswith("_")
+        k:v
+        for k, v in repl.__dict__.items()
+        if not k.startswith("_")
         and k in [
             "backend",
             "port",
@@ -647,14 +649,16 @@ def get_config_representation(repl):
             ]
     }
     if aliases := getattr(repl, "aliases"):
-        if isinstance(aliases, Script):
+        repl_representation["aliases"] = {}
+
+        for k, v in repl.__dict__.get("aliases", {}).items():
+            if k.startswith("_"):
+                continue
             repl_representation["aliases"] = {
-                k:{v.command: str(v.script)} for k, v in repl.__dict__.get("aliases", {}).items()
-                }
-        else:
-            repl_representation["aliases"] = {
-                k:v for k, v in repl.__dict__.get("aliases", {}).items()
-                }
+                k: f"{v.command} {v.script}" if isinstance(v, Script) else v
+                for k, v in aliases.items()
+            }
+
     repl_representation["api"] = {
         k:v for k, v in repl.api.__dict__.items()
         if not k.startswith("_") and k in
@@ -1460,7 +1464,7 @@ class LLMRepl:
             return
         self.prompt_gen.reload_profiles()
         consolidation_prompt = self.prompt_gen.generate_prompt("profile_consolidation")
-        self.profile_manager._apply_profile_update("", "", prompt = consolidation_prompt)
+        self._apply_profile_update("", "", prompt = consolidation_prompt)
         console.print("[faded]Profile consolidated.[/faded]")
 
 
