@@ -922,6 +922,16 @@ class LLMRepl:
         console.print(self.get_diagnostics())
         console.print(dir(self))
 
+    def _check_profile_worker_health(self):
+        if not self.worker.is_alive():
+            logger.error("Profile worker thread is DEAD! Restarting...")
+            self.worker = ProfileWorker(self, self.profile_queue)
+            self.worker.start()
+
+        queue_size = self.profile_queue.qsize()
+        if queue_size > 10:
+            logger.warning(f"Profile queue is backing up: {queue_size} items")
+
     def get_diagnostics(self):
         return {
             "model": self.model,
@@ -1410,29 +1420,70 @@ class LLMRepl:
         self._apply_profile_update("", "", prompt = consolidation_prompt)
         console.print("[faded]Profile consolidated.[/faded]")
 
-    def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:
-        """_summary_
+    # def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:
+    #     """_summary_
 
-        Args:
-            user_input (str): _description_
-            assistant_response (str): _description_
-            prompt (str, optional): _description_. Defaults to "". Not actually optional
-        """
+    #     Args:
+    #         user_input (str): _description_
+    #         assistant_response (str): _description_
+    #         prompt (str, optional): _description_. Defaults to "". Not actually optional
+    #     """
+    #     try:
+    #         profile_data = self.profile_manager.profile_data
+    #         prompt = prompt.replace(
+    #                 "{profile_json}", json.dumps(profile_data, indent=2)).replace("{user_input}", user_input)
+    #         response = self._request_chat_completion(
+    #             [{"role": "system", "content": "You are a helpful assistant that outputs ONLY JSON."},
+    #              {"role": "user", "content": prompt}],
+    #             tools=None,
+    #             tool_choice=None,
+    #         )
+    #         content = response.choices[0].message.content
+    #         updated_json=None
+    #         if content:
+    #             updated_json = self._robust_json_extract(content)
+    #         if updated_json is None:
+    #             raise ValueError("Profile worker returned invalid JSON.")
+
+    #         with self._state_lock:
+    #             self.profile_manager.set_profile_data(updated_json)
+    #             self.system_prompt = self._build_system_prompt()
+    #             if self.messages and _role(self.messages[0]) == "system":
+    #                 self.messages[0] = {"role": "system", "content": self.system_prompt}
+    #         logger.debug("User profile updated by worker.")
+    #     except Exception as e:
+    #         logger.error(f"Profile update failed: {e}")
+
+    def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:
         try:
             profile_data = self.profile_manager.profile_data
-            prompt = prompt.replace(
-                    "{profile_json}", json.dumps(profile_data, indent=2)).replace("{user_input}", user_input)
+
+            # Inject all possible placeholders
+            prompt = prompt.replace("{profile_json}", json.dumps(profile_data, indent=2)) \
+                           .replace("{user_input}", user_input) \
+                           .replace("{assistant_response}", assistant_response)
+
+            if not prompt.strip():
+                logger.error("Profile update prompt is empty after substitution!")
+                return
+
             response = self._request_chat_completion(
-                [{"role": "system", "content": "You are a helpful assistant that outputs ONLY JSON."},
+                [{"role": "system", "content": "You are a helpful assistant that outputs ONLY valid JSON representing the user profile."},
                  {"role": "user", "content": prompt}],
                 tools=None,
                 tool_choice=None,
             )
             content = response.choices[0].message.content
-            updated_json=None
+
+            # DEBUG: See what the LLM actually returned
+
+            updated_json = None
             if content:
+                logger.debug(f"LLM raw profile response: {content[:300]}...")
                 updated_json = self._robust_json_extract(content)
+
             if updated_json is None:
+                logger.error(f"Profile worker returned invalid JSON. Raw content: {content}")
                 raise ValueError("Profile worker returned invalid JSON.")
 
             with self._state_lock:
@@ -1440,32 +1491,63 @@ class LLMRepl:
                 self.system_prompt = self._build_system_prompt()
                 if self.messages and _role(self.messages[0]) == "system":
                     self.messages[0] = {"role": "system", "content": self.system_prompt}
-            logger.debug("User profile updated by worker.")
-        except Exception as e:
-            logger.error(f"Profile update failed: {e}")
+            logger.info("✅ User profile updated by worker.")
 
+        except Exception as e:
+            logger.exception(f"❌ Profile update failed: {e}")
+
+
+    # def _robust_json_extract(self, text: str) -> Optional[Dict[str, Any]]:
+    #     if not isinstance(text, str):
+    #         return None
+    #     # Fenced code block first.
+    #     pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+    #     match = re.search(pattern, text, re.DOTALL)
+    #     if match:
+    #         json_str = match.group(1)
+    #     else:
+    #         start = text.find("{")
+    #         end = text.rfind("}")
+    #         if start != -1 and end != -1 and end > start:
+    #             json_str = text[start:end + 1]
+    #         else:
+    #             json_str = text.strip()
+
+    #     try:
+    #         parsed = json.loads(json_str)
+    #         if isinstance(parsed, dict):
+    #             return parsed
+    #         return None
+    #     except json.JSONDecodeError:
+    #         return self._balanced_braces_extract(text)
+
+    #qwersion
     def _robust_json_extract(self, text: str) -> Optional[Dict[str, Any]]:
         if not isinstance(text, str):
             return None
-        # Fenced code block first.
-        pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            json_str = match.group(1)
+
+        # Primary method: Find the outermost braces. This handles nested JSON perfectly.
+        start = text.find("{")
+        end = text.rfind("}")
+
+        if start != -1 and end != -1 and end > start:
+            json_str = text[start:end + 1]
         else:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                json_str = text[start:end + 1]
+            # Fallback: Try to strip markdown fences if no braces found (shouldn't happen)
+            pattern = r"```(?:json)?\s*(\{.*\})\s*```" # Note: greedy .* instead of .*?
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                json_str = match.group(1)
             else:
-                json_str = text.strip()
+                return None
 
         try:
             parsed = json.loads(json_str)
             if isinstance(parsed, dict):
                 return parsed
             return None
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON Decode failed on extracted string: {e}\nString snippet: {json_str[:200]}")
             return self._balanced_braces_extract(text)
 
     def _balanced_braces_extract(self, text: str) -> Optional[Dict[str, Any]]:
@@ -1633,6 +1715,7 @@ class LLMRepl:
 
     async def _background_ui_pump(self) -> None:
         while not self._shutdown_done:
+            self._check_profile_worker_health()
             self._poll_background_tasks()
             await asyncio.sleep(0.05)
 
@@ -1723,31 +1806,42 @@ class LLMRepl:
             with patch_stdout(True):
                 while True:
                     # live update model
-                    # Write a statusbar
-                    if cb == None or self.agent_active or result != "":
+                    if  self.agent_active or result != "":
                         self._write_statusbar()
                     try:
+                        # Get User Input
                         user_input = ""
-                        while not user_input or user_input == "":
-                            if not self.loop_task:
-                                user_input = await self.get_user_prompt(prompt_session)
-                                # logger.warning(user_input)
-                                if user_input in self.user_messages:
-                                    self.user_messages.pop(self.user_messages.index(user_input))
-                                for msg in self.user_messages:
-                                    if isinstance(msg, str):
-                                        user_input += msg
-                            elif isinstance(self.loop_task, SimpleLoopTask):
-                                if self.agent_active:
-                                    time.sleep(1)
-                                    continue
-
+                        if user_input==False or user_input == "":
+                            if isinstance(self.loop_task, SimpleLoopTask):
+                                print("angrish")
                                 user_input = self.loop_task.get_next_input() or ""
                                 if not user_input:
                                     self.loop_task = ""
-                                    continue
-
+                                    break
                                 console.print(f"User(loop) > {user_input}\n")
+
+                                 # Fire it and wait for completion
+                                self._start_background_send(user_input)
+
+                                while self.agent_active:
+                                    time.sleep(1)
+                                continue
+
+                        if not user_input or user_input == "":
+                            user_input = await self.get_user_prompt(prompt_session)
+                                # logger.warning(user_input)
+                            if user_input in self.user_messages:
+                                self.user_messages.pop(self.user_messages.index(user_input))
+                            for msg in self.user_messages:
+                                if isinstance(msg, str):
+                                    user_input += msg
+                                    self.user_messages = []
+
+                            if not user_input:
+                                # Existing agent sessions are still active
+                                continue
+
+                        # Got userinput, parse
 
                         if user_input.startswith("/"):
                             command, args, params, errors = parse_command(user_input) # type: ignore
@@ -1767,18 +1861,13 @@ class LLMRepl:
                             continue
 
                         # Let's mark that the message was sent
-                        if not self.agent_active or (result != "" or user_input==""):
+                        if not self.loop_task or not self.agent_active or (result != "" or user_input==""):
                             loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
                                             if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
                             console.rule(f"{loop_remains}")
 
-                        # async def wrapper(repl, user_input):
-                        #     return repl.send_message(user_input)
-                        # Add message to what agent reads
-                        # with self._state_lock:
-                        #     self.messages.append(
-                        #         {"role": "user", "content": user_input}
-                        #     )
+                        # Pass to LLM
+
                         if not self.agent_active:
                             self._start_background_send(user_input)
                         else:
