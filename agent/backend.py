@@ -55,6 +55,19 @@ class LLMBackend:
         self.model = model or self.model
         return self.model
 
+    def find_model(self, model: str):
+        for m in self.available_models:
+            logger.debug(f"Comparing {model} to {m}")
+            model = model.lower()
+            _m = m.lower()
+            if str(model) == str(_m):
+                return m
+            if str(_m).startswith(model):
+                return m
+            if model in str(_m):
+                return m
+        return None
+
     @property
     def available_models(self) -> list[str]:
         try:

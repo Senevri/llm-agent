@@ -150,7 +150,7 @@ def install_deb_package(package: str, with_deps: bool = True) -> str:
 
     lines = [f"package: {pkg}"]
     lines.append(f"targets: {', '.join(targets)}")
-    lines.append(f"extracted: {len(extracted)} .deb file(s)")
+    lines.append(f"extracted: {len(bins)} .deb file(s)")
     if new_bins:
         lines.append("binaries on PATH:")
         for b, owner in new_bins:

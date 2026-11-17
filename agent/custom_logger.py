@@ -120,4 +120,11 @@ if __name__ == "__main__":
     log.warning("test")
     log.error("test")
     log.critical("test")
+    log.set_console_level("DEBUG")
+    log.debug("test")
+    log.info("test")
+    log.warning("test")
+    log.error("test")
+    log.critical("test")
+
     # Test: do messages go to files?

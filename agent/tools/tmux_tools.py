@@ -23,15 +23,22 @@ src_dir = os.path.dirname(__file__)
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
+class ToolError(Exception):
+    pass
+
 def _tmux(*args, timeout=10):
     """Run a tmux command on the agent socket. Argv only, never shell=True."""
+    cmd = [TMUX_BIN, "-L", TMUX_SOCKET, *args]
+    print (f"Running tmux command: {cmd}")
     return subprocess.run(
-        [TMUX_BIN, "-L", TMUX_SOCKET, *args],
+        cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
     )
 
+def has_tmux():
+    return subprocess.getoutput(f"{TMUX_BIN} --version").index("tmux") > -1
 
 def _validate_name(name):
     if platform.system()=="Windows":
@@ -86,13 +93,23 @@ def tmux_create_session(name, command=None, cwd=None):
         name = _validate_name(name)
         if cwd is not None and not os.path.isdir(cwd):
             return f"Error: cwd does not exist: {cwd}"
+        out = _tmux_create_actual_session(name, command, cwd)
+    except ToolError as e:
+        return str(e)
+    except Exception as e:
+        logger.error(f"tmux create_session error: {e}")
+        raise ToolError (f"Error creating session {name}: {e}")
+
+
+def _tmux_create_actual_session(name, command=None, cwd=None):
+        """ No trash human readable strings """
         args = ["new-session", "-d", "-s", name]
         if cwd is not None:
             args += ["-c", cwd]
         res = _tmux(*args)
         if res.returncode != 0:
             msg = (res.stderr or res.stdout or "").strip()
-            return f"Error creating session {name}: {msg or 'unknown error'}"
+            raise ToolError(f"Error creating session {name}: {msg or 'unknown error'}")
         if command is not None:
             # Small settle delay; harmless if unnecessary.
             time.sleep(0.05)
@@ -101,14 +118,12 @@ def tmux_create_session(name, command=None, cwd=None):
                 time.sleep(0.1)
             if r2.returncode != 0:
                 msg = (r2.stderr or r2.stdout or "").strip()
-                return (
+                raise ToolError (
                     f"Created session {name}, but failed to send initial command: "
                     f"{msg or 'unknown error'}"
                 )
-        return f"Created tmux session: {name}"
-    except Exception as e:
-        logger.error(f"tmux create_session error: {e}")
-        return f"Error creating session {name}: {e}"
+        #return f"Created tmux session: {name}"
+        return name
 
 
 def tmux_send(session, input, literal=False, wait=0.5):
@@ -167,6 +182,7 @@ def tmux_capture(session, lines=100):
     Args:
         session: Agent-owned session name.
         lines: Number of trailing lines to capture (default 100).
+
 
     Returns:
         Pane output (capped at AGENT_TMUX_MAX_CAPTURE chars).
@@ -376,12 +392,13 @@ def main():
         sys.path.append(str(project_root_dir))
 
     #mux_session = tmux_create_session("test")
-    tmux_session = tmux_create_session("agent-test-124", "timeout 30 & ", str(project_root_dir))
+    tmux_session = _tmux_create_actual_session("agent-test-124", "timeout 30 & ", str(project_root_dir))
     print(tmux_session)
     for t in [
         tmux_send(tmux_session, "ls"),
         tmux_send(tmux_session, "ls", wait=1),
         tmux_send(tmux_session, "pwd", wait=1),
+        tmux_capture(tmux_session),
         tmux_kill(tmux_session)
         ]:
         print(t); sleep(1)

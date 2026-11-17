@@ -90,7 +90,7 @@ def list_llamacpp_models():
     try:
         response = get_llamacpp_models(url)
         data = response
-        return [{m['id']: m} for m in data.get('data', [])]
+        return {m['id']: m for m in data.get('data', [])}
     except Exception as e:
         return [f"Error: {e}"]
 
@@ -149,7 +149,7 @@ def main():
             print(f"\n--- {backend.upper()} ---")
             if models:
                 for m in models:
-                    print(f"- {m}")
+                    print(f"- {m if isinstance(m, str) else m.keys()[0]}")
             else:
                 print("No models found.")
         else:
@@ -162,7 +162,7 @@ def main():
         print(f"\n--- {backend.upper()} ---")
         if models:
             for m in models:
-                print(f"- {m}")
+                print(f"- {m if isinstance(m, str) else [k for k in m.keys()]}")
         else:
             print("No models found.")
 

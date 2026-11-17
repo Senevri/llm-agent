@@ -7,6 +7,14 @@ import subprocess
 from typing import List, Union
 import json
 from pathlib import Path
+import logging
+
+try:
+    from custom_logger import setup_logging
+    logger = setup_logging("AgentTools")
+except ImportError:
+    logger = logging.getLogger(__name__)
+
 
 try:
     import tools
@@ -16,9 +24,17 @@ except ImportError:
     if Path(__file__).parent.parent not in sys.path:
         sys.path.append(str(Path(__file__).parent.parent))
 from tools import AGENT_DIR, TOOLS_DIR, WORKSPACE_DIR
-from tools.internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
+try:
+    from tools.internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
+except ImportError as e:
+    errormsg = "Failed to import internet tools. Missing packages? Error:{e}"
+    logger.warning(errormsg)
+    INTERNET_TOOL_MAP = {}
+    INTERNET_TOOL_DEFINITION_MAP = {}
+
 from tools.agent_deb_tools import install_deb_package
 from tools.bash_tools import run_bash
+
 from tools.cloud_image_gen import CLOUD_IMAGE_GEN_TOOL_DEFINITION, generate_cloud_image
 
 try:
@@ -44,11 +60,6 @@ TOOL_TIMEOUT = int(os.getenv("AGENT_TOOL_TIMEOUT", "60"))
 MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
 
 BG_TIMEOUT = TOOL_TIMEOUT
-
-from custom_logger import setup_logging
-
-
-logger = setup_logging("AgentTools")
 
 def _is_memory_file(path: str) -> bool:
     """Check if the given path is the protected memory file."""

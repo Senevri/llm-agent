@@ -141,7 +141,7 @@ def _trim_messages(messages:list, limit: int) -> dict:
 
     sections = [format_for_compression(c) for c in trimmed_msgs]
 
-    logger.info(f"Messages:\m\n{trimmed_msgs}")
+    logger.info(f"Messages:\n\n{trimmed_msgs}")
 
     return {
         "messages": new_message_list,

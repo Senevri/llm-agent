@@ -62,10 +62,17 @@ class OpenAIEndpoint(APIEndpoint):
         self.api_key = "00000000"
         self.ctx_size = 32768  # Sensible default fallback;
         self.model = model
+        if not base_url:
+            host_ip = get_gateway_ip()
+            base_url = f"http://{host_ip}:{port}"
         self.set_base_url(base_url.rstrip("/"), port)
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
-        self.available_models = MODEL_CATALOGS["openai"]()
+        self.available_model_data = MODEL_CATALOGS["openai"]()
+        if isinstance(self.available_model_data, dict):
+            self.available_models = list(self.available_model_data.keys())
+        else:
+            self.available_models = self.available_model_data
         self.try_get_model()
 
     def get_client(self) -> tuple[OpenAI, str]:
@@ -87,6 +94,8 @@ class OpenAIEndpoint(APIEndpoint):
                 return self.model
         except Exception as e:
             logger.error(f"Failed to retrieve models from {self.base_url}: {e}")
+            if "No connection could be made" in str(e):
+                raise Exception(f"Failed to connect to {self.base_url}")
         try:
             url = self.base_url.removesuffix("/v1")  + "/api/v1/model"
             current_model = httpx2.get(url)
@@ -159,29 +168,40 @@ class LlamaApiEndpoint(APIEndpoint):
         GET /lora-adapters / POST /lora-adapters	List and set LoRA adapter scales at runtime
     """
     def __init__(self, model: str = "", base_url: str = "", port="9931"):
-        super().__init__(model, base_url)
-        self.port = os.getenv("LLAMA_PORT", port)
         if not base_url:
             host_ip = get_gateway_ip()
-            self.base_url = os.getenv(
-                "LLAMA_BASE_URL",
-                f"http://{host_ip}:{self.port}/v1"
-        ).rstrip("/")
+            base_url = os.getenv("LLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
+        super().__init__(model, base_url)
+        self.port = os.getenv("LLAMA_PORT", port)
+        self.set_base_url(base_url.rstrip("/"), port)
+        if not self.base_url.endswith("/v1"):
+            self.base_url += "/v1"
+        # if not base_url:
+        #     host_ip = get_gateway_ip()
+        #     self.base_url = os.getenv(
+        #         "LLAMA_BASE_URL",
+        #         f"http://{host_ip}:{self.port}/v1"
+        # ).rstrip("/")
         if os.getenv("DEBUG", "false").lower() == "true":
             logger.info(self.base_url)
         self.api_key = "llama"
         # Can be overwritten by args
-        self.ctx_size = 32768
         # Futureproofs
         self.available_model_data = MODEL_CATALOGS["llamacpp"]()
         if isinstance(self.available_model_data, dict):
-            self.available_models = self.available_model_data.keys()
+            self.available_models = list(self.available_model_data.keys())
         else:
             self.available_models = self.available_model_data
+        # logger.info(f"Available models: {self.available_models}")
         # Empty means resolve the model from the server.
         self.model = model
         if not self.model:
             self.set_default_model()
+        try:
+            self.ctx_size = self.get_context_size()
+        except Exception as e:
+            logger.warning(f"Failed to get context size: {e}")
+
 
 
     def get_context_size(self) -> int:

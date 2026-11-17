@@ -14,6 +14,7 @@ import signal
 import threading
 from pathlib import Path
 from enum import StrEnum
+import platform
 
 from typing import Any, Dict, Optional, Tuple, Literal
 
@@ -36,17 +37,23 @@ if not Path(AGENT_DIR).exists():
 if AGENT_DIR not in sys.path:
     sys.path.insert(0, AGENT_DIR)
 
-import tools.tmux_tools as tmux_tools
+try:
+    import tools.tmux_tools as tmux_tools
+except ImportError:
 
-def _tmux(*args: str) -> subprocess.CompletedProcess:
-    try:
-        return subprocess.run(["tmux", *args], capture_output=True,
-                              text=True, timeout=15)
-    except subprocess.TimeoutExpired as e:
-        return subprocess.CompletedProcess(["tmux", *args], -1, "",
-                                           f"tmux timed out: {e}")
+    def _tmux(*args: str) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(["tmux", *args], capture_output=True,
+                                text=True, timeout=15)
+        except subprocess.TimeoutExpired as e:
+            return subprocess.CompletedProcess(["tmux", *args], -1, "",
+                                            f"tmux timed out: {e}")
 def _get_timestamp() -> str:
     return date.fromtimestamp(time.time()).isoformat()
+
+def test_tmux():
+    tmux_tools.has_tmux()
+    subprocess.getoutput(f"{AGENT_DIR}/tools/tmux_tools.py --version")
 
 
 class Status(StrEnum):
@@ -61,8 +68,114 @@ class Status(StrEnum):
     def __str__(self):
         return self.value
 
-
 class AgentDispatcher:
+    def __init__(self, agent_dir: Optional[str] = None, prompt_gen=None, ):
+        self.agent_dir = Path(agent_dir or os.environ.get("AGENT_DIR", "/agent"))
+        if not self.agent_dir.exists():
+            self.agent_dir=Path(__file__).resolve().parent
+        self.prompt_gen = prompt_gen
+        self.backend=None
+        self.active_jobs: Dict[str, Dict[str, Any]] = {}
+        self.model: Optional[str] = None
+        self.port = None
+
+    def stop_job(self, job_id, grace_seconds=5.0):
+        raise NotImplementedError
+
+    def get_job_output(self, session: str) -> str:
+        raise NotImplementedError
+
+
+
+
+class TinyAgentDispatcher(AgentDispatcher):
+    def __init__(self, agent_dir: Optional[str] = None, prompt_gen=None, ):
+        super().__init__(agent_dir, prompt_gen)
+        self.backend = os.getenv("AGENT_BACKEND", "mistral")
+        self._tmux = _tmux
+        self.session = None
+
+    def stop_job(self, session: str, grace_seconds=5.0):
+        tmux_tools.tmux_send(session, "C-c")
+
+
+    def dispatch_agent_job(
+            self,
+            task: str,
+            profile: str = "software-dev",
+            max_turns: int = 40,
+            timeout: int = 1800,
+            session_name: Optional[str] = None,
+            backend: Optional[str] = None,
+            model: Optional[str] = None,
+            port: Optional[int] = None,
+        ) -> Tuple[str, Dict[str, Any]]:
+        if self.prompt_gen is None:
+            raise RuntimeError("prompt_gen is required")
+
+        workspace = Path(tempfile.mkdtemp(prefix=f"agent_run_{profile}_"))
+        system_prompt_path = workspace / "system_prompt.md"
+        task_path = workspace / "user_prompt.md"
+        system_prompt_path.write_text(self.prompt_gen.generate_prompt(profile), encoding="utf-8")
+        task_path.write_text(task, encoding="utf-8")
+
+
+
+        cmd = [
+            sys.executable, str(self.agent_dir / "run_agent.py"),
+            "--system-prompt", str(system_prompt_path),
+            "--user-prompt", str(task_path),
+            "--max-turns", str(max_turns),
+        ]
+
+        optional_args = {
+            "backend": backend,
+            "model": model,
+            "port": port,
+        }
+
+        for arg in optional_args:
+            if getattr(self, arg) is not None:
+                cmd += [f"--{arg}", str(getattr(self, str(arg)))]
+        logger.info("Running command: %s", " ".join(cmd))
+
+        session = tmux_tools._tmux_create_actual_session(
+            name=session_name,
+            command=" ".join(cmd),
+            cwd=str(workspace),
+        )
+        self.active_jobs[session] = {
+            "workspace": str(workspace),
+            "session": session,
+        }
+        return (
+            session,
+            {
+                "workspace": str(workspace),
+                "session": session,
+            },
+
+        )
+
+    def get_job_output(self, session: str) -> str:
+        return self.poll_session(session)
+
+    def poll_session(self, session: str) -> Status:
+        return tmux_tools.tmux_capture(session)
+
+    def shutdown(self, stop_owned_jobs: bool = False) -> None:
+        for session in list(self.active_jobs.keys()):
+            tmux_tools.tmux_kill(session)
+            del self.active_jobs[session]
+
+
+
+
+
+
+
+
+class OldAgentDispatcher:
     def __init__(self, agent_dir: Optional[str] = None, prompt_gen=None, ):
         self.agent_dir = Path(agent_dir or os.environ.get("AGENT_DIR", "/agent"))
         if not self.agent_dir.exists():
@@ -77,14 +190,18 @@ class AgentDispatcher:
 
     @staticmethod
     def _pgid_is_ours(pgid: int, workspace: Path) -> bool:
+
+
         if pgid <= 1:
-            return False                # killpg(1) == kill(-1) == "everyone"
-        if pgid == os.getpgrp():
-            return False                # never signal ourselves
-        try:
-            cmdline = Path(f"/proc/{pgid}/cmdline").read_bytes()
-        except OSError:
-            return False
+            return False                    # killpg(1) == kill(-1) == "everyone"
+        if platform.system() == "Windows":
+            if pgid == os.getpid():
+                return True
+        elif pgid == os.getpgrp():
+            try:
+                cmdline = Path(f"/proc/{pgid}/cmdline").read_bytes()
+            except OSError:
+                return False
         return str(workspace).encode() in cmdline
 
     @staticmethod
@@ -171,7 +288,10 @@ class AgentDispatcher:
         logger.info("Running command: %s", " ".join(cmd))
 
         session_name = session_name or f"agent-{uuid.uuid4().hex[:8]}"
-        wrapper = self._write_wrapper(workspace, cmd, timeout)
+        if platform.system() == "Windows":
+            print ("nope this whole module is overcomplicated.")
+        else:
+            wrapper = self._write_wrapper(workspace, cmd, timeout)
         self._start_session(session_name, workspace, wrapper)
 
         job_id = f"job_{uuid.uuid4().hex[:8]}"

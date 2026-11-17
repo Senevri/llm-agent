@@ -16,6 +16,11 @@ logger = setup_logging("UserProfileManager")
 logger.setLevel(logging.WARNING)
 
 
+class ProfileError(Exception):
+    """Errors related to user profile management."""
+    pass
+
+
 # --- Helper classes ---------------------------------------------------------------
 @dataclass
 class ContextSnapshot:
@@ -124,7 +129,7 @@ class UserProfileManager:
             json_str = self._load_json(self.profile_path)
         except Exception as e:
             logging.error(f"Failed to load profile: {e}")
-            return {}
+            return json_str
         if json_str:
             return json_str
         else:
@@ -133,7 +138,7 @@ class UserProfileManager:
 
     def save_gist(self) -> None:
         # backs up gist changes, too.
-        logger.info("Saving gist", self.get_gist_json_string())
+        logger.info(f"Saving gist {self.get_gist_json_string()}")
         with self._lock:
             try:
                 self.gist_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,7 +149,7 @@ class UserProfileManager:
 
     def save_profile(self) -> None:
         # backs up profile changes, too.
-        logger.info("Saving profile", self.get_profile_json_string())
+        logger.info(f"Saving profile {self.get_profile_json_string()}")
         with self._lock:
             try:
                 self.profile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,6 +159,7 @@ class UserProfileManager:
                     json.dump(self._profile_data, f, indent=2)
             except Exception as e:
                 logging.error(f"Error saving profile: {e}")
+
 
 
     def _get_json_string(self, data: Dict[str, Any]) -> str:
@@ -224,3 +230,5 @@ if __name__ == "__main__":
     print(manager.get_profile_string())
     print(len(str(manager.profile_data)))
     print(manager.needs_consolidation())
+    print(manager.load_profile())
+    print(manager.save_profile())
