@@ -149,7 +149,7 @@ def main():
             print(f"\n--- {backend.upper()} ---")
             if models:
                 for m in models:
-                    print(f"- {m if isinstance(m, str) else m.keys()[0]}")
+                    print(f"- {m if isinstance(m, str) else next(iter(m))}")
             else:
                 print("No models found.")
         else:

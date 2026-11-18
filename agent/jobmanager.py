@@ -52,7 +52,7 @@ class JobManager:
     def _kill_job_internal(self, job_id: str) -> None:
         if hasattr(self, 'dispatcher'):
             if isinstance(self.dispatcher, AgentDispatcher):
-            self.dispatcher.stop_job(job_id)
+                self.dispatcher.stop_job(job_id)
 
 
     def _check_job(self, job_id:str) -> str:

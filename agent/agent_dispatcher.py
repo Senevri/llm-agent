@@ -82,7 +82,7 @@ class AgentDispatcher:
     def stop_job(self, job_id, grace_seconds=5.0):
         raise NotImplementedError
 
-    def get_job_output(self, session: str) -> str:
+    def get_job_output(self, session: str, tail_chars: int = 6000) -> str:
         raise NotImplementedError
 
 
@@ -147,17 +147,19 @@ class TinyAgentDispatcher(AgentDispatcher):
         self.active_jobs[session] = {
             "workspace": str(workspace),
             "session": session,
+            "log": None
         }
         return (
             session,
             {
                 "workspace": str(workspace),
                 "session": session,
+                "log": None
             },
 
         )
 
-    def get_job_output(self, session: str) -> str:
+    def get_job_output(self, session: str, tail_chars: int = 6000) -> str:
         return self.poll_session(session)
 
     def poll_session(self, session: str) -> Status:

@@ -1,26 +1,24 @@
 from loop_task import loop
 from pathlib import Path
+import os
 import re
 import sys
 import yaml
-from httpx2 import ConnectError, HTTPError
-
-
-from tools import WORKSPACE_DIR
-
-from llm_repl import LLMRepl
-from llm_utils import _role
-
-from backend import BACKEND_MAP, LLMBackend
 import inspect
 import textwrap
-
 import logging
+
+
+from httpx2 import ConnectError, HTTPError
+
+from tools import WORKSPACE_DIR
+from llm_utils import _role
+from backend import BACKEND_MAP, LLMBackend
 from custom_logger import setup_logging
 
-logger = setup_logging(__name__)
+logger = setup_logging("SlashCommands")
 
-from tools import TOOLS_DIR
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -193,7 +191,7 @@ def alias_command(repl, *args, **kwargs):
             with repl._state_lock:
                 if args[2] in ["python", "bash"]:
                     repl.aliases[args[1]] = Script(repl, args[2], " ".join(args[3:]).strip())
-                if args[2] == "alias":
+                elif args[2] == "alias":
                     return "cannot alias alias"
                 else:
                     repl.aliases[args[1]] = f"{' '.join(args[2:])}".strip()
@@ -634,9 +632,10 @@ def load_command(repl, *args, **kwargs):
 
 
     # Fire it to the background queue instead of blocking
-    repl.pending_user_inputs.put(message)
     if not repl.agent_active:
         repl._start_background_send(message)
+    else:
+        repl.pending_user_inputs.put(message)
     return (message)
 def read_command(repl, *args, **kwargs):
     console = repl.console
