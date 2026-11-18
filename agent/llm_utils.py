@@ -1,8 +1,11 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, Field
+import time
 import re
 import os
 import httpx2
-from typing import Optional, Iterable, Dict, Any
+from typing import Optional, Iterable, Dict, Any, Deque
+import sys
+from collections import deque
 
 import logging
 from pathlib import Path
@@ -48,32 +51,55 @@ def discover_candidate_dir(start: Path, test: Path):
         candidate_dir = candidate_dir.parent
     return candidate_dir
 
-
 @dataclass
 class UsageTracker:
+    _window: deque = field(default_factory=deque, repr=False, init=False, compare=False)
     prompt_tokens: int = 0
     prompt_estimated: bool = False
     completion_tokens: int = 0
     calls: int = 0
     last_prompt_tokens: int = 0
-    context_limit: int = 4096          # the *served* window, not the model max
+    context_limit: int = 4096
     per_turn: list = field(default_factory=list)
+    last_call_timestamp: float = 0
+
+    tokens_per_minute: Optional[int] = None
+    requests_per_second: Optional[float] = None
+
+    # rolling-window bookkeeping: (timestamp, prompt, completion)
+    WINDOW_SECONDS: float = 60.0
+    max_history: int = 1000
+
+
+    def set_usage_limits(self, tokens_per_minute=None, requests_per_second=None):
+        self.tokens_per_minute = tokens_per_minute
+        self.requests_per_second = requests_per_second
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.WINDOW_SECONDS
+        while self._window and self._window[0][0] < cutoff:
+            self._window.popleft()
 
     def record(self, usage, turn: int | None = None) -> None:
         if usage is None:
             return
         p = getattr(usage, "prompt_tokens", 0) or 0
         c = getattr(usage, "completion_tokens", 0) or 0
-        # Ollama cache-hit quirk: p == 0 means "cached", not "empty".
         if p == 0 and self.last_prompt_tokens:
             p = self.last_prompt_tokens
             self.prompt_estimated = True
+
+        now = time.time()
         self.prompt_tokens += p
         self.completion_tokens += c
         self.calls += 1
         self.last_prompt_tokens = p
-        self.per_turn.append({"turn": turn, "prompt": p, "completion": c})
+        self.last_call_timestamp = now
+        self.per_turn.append({"turn": turn, "prompt": p, "completion": c, "ts": now})
+        self._window.append((now, p, c))
+        self._prune(now)
 
+    # ---- context window (unchanged semantics) ----
     @property
     def context_pct(self) -> float:
         if not self.context_limit:
@@ -81,9 +107,73 @@ class UsageTracker:
         return 100.0 * self.last_prompt_tokens / self.context_limit
 
     @property
-    def remaining_tokens(self) -> int:
+    def remaining_context_tokens(self) -> int:
         return self.context_limit - self.last_prompt_tokens
 
+    # ---- rate limits over the rolling window ----
+    @property
+    def tokens_used_in_window(self) -> int:
+        self._prune(time.time())
+        return sum(p + c for _, p, c in self._window)
+
+    @property
+    def requests_used_in_window(self) -> int:
+        self._prune(time.time())
+        return len(self._window)
+
+    @property
+    def limits_enabled(self) -> bool:
+        return bool(self.tokens_per_minute or self.requests_per_second)
+
+    @property
+    def remaining_tpm(self) -> int:
+        """Remaining tokens in the window; returns a large sentinel when unlimited."""
+        if not self.tokens_per_minute:
+            return sys.maxsize          # or float("inf") if you prefer
+        return max(0, self.tokens_per_minute - self.tokens_used_in_window)
+
+    @property
+    def remaining_rps(self) -> int:
+        if not self.requests_per_second:
+            return sys.maxsize
+        now = time.time()
+        recent = sum(1 for ts, _, _ in self._window if now - ts < 1.0)
+        allowance = max(1, int(self.requests_per_second))
+        return max(0, allowance - recent)
+
+    def __repr__(self):
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "calls": self.calls,
+            "last_prompt_tokens": self.last_prompt_tokens,
+            "context_limit": self.context_limit,
+            "context_pct": self.context_pct,
+            "per_turn": self.per_turn,
+            "last_call_timestamp": self.last_call_timestamp,
+            "tokens_per_minute": self.tokens_per_minute,
+            "requests_per_second": self.requests_per_second,
+            "remaining_tpm": self.remaining_tpm,
+            "remaining_rps": self.remaining_rps,
+            "remaining_context_tokens": self.remaining_context_tokens,
+            "prompt_estimated": self.prompt_estimated,
+            "rate_limited": self.rate_limited(),
+            "requests_used_in_window": self.requests_used_in_window,
+            "tokens_used_in_window": self.tokens_used_in_window
+        }
+
+    def rate_limited(self) -> bool:
+        limits_configured = (
+            bool(self.tokens_per_minute)
+            or bool(self.requests_per_second)
+        )
+
+        limit_reached = (
+            self.remaining_tpm == 0
+            or self.remaining_rps == 0
+        )
+
+        return limits_configured and limit_reached
     def summary(self) -> str:
         return (
             f"calls={self.calls} "
@@ -91,6 +181,7 @@ class UsageTracker:
             f'{"[est.] " if self.prompt_estimated else ""}'
             f"ctx={self.last_prompt_tokens}/{self.context_limit} "
             f"({self.context_pct:.0f}%)"
+            f"{'' if not self.limits_enabled else f" tpm={self.remaining_tpm} rps={self.remaining_rps}"}"
 
         )
 
@@ -163,7 +254,7 @@ def size_bytes(value):
     if isinstance(value, str):
         return len(value.encode("utf-8"))
     if isinstance(value, dict):
-        return sum(size_bytes(k) + size_bytes(v) for k, v in value.items())
+        return sum(list(size_bytes(k) + size_bytes(v) for k, v in value.items()))
     if isinstance(value, (list, tuple)):
         return sum(size_bytes(item) for item in value)
     return len(str(value).encode("utf-8"))
@@ -331,3 +422,8 @@ if __name__ == "__main__":
     print("Mistral context window:", discover_context_window("https://api.mistral.ai/v1", "mistral-small-latest", backend="mistral"))
     print("LLaMA context window:", discover_context_window("http://localhost:5001/v1", "llama-2-7b-chat", backend="llamacpp"))
     print("OpenAI Models:", get_openai_models("http://localhost:8080/v1", "00000000"))
+
+    print(UsageTracker.__annotations__.get("_window", "<MISSING>"))
+    print(type(UsageTracker.__dict__.get("_window")))
+    t = UsageTracker()
+    print(type(t._window))

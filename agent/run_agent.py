@@ -8,7 +8,8 @@ import logging
 import argparse
 import platform
 from pathlib import Path
-from collections import Counter
+from collections import Counter, deque
+
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -25,7 +26,7 @@ if Path(__file__).parent not in sys.path:
     sys.path.append(str(Path(__file__).parent))
 
 from openai_error_handling import classify_api_error, Action
-from llm_utils import UsageTracker, estimate_tokens, normalize_messages
+from llm_utils import estimate_tokens, normalize_messages, UsageTracker
 from custom_logger import setup_logging
 from backend import LLMBackend, BACKEND_MAP
 
@@ -44,27 +45,157 @@ from tools.agent_tools import (
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    def _load_dotenv(dotenv_path: Path = SCRIPT_DIR / ".env") -> None:
-        if not os.path.exists(path):
-            return
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                os.environ.setdefault(
-                    key.strip(), value.strip().strip('"').strip("'")
-                )
-    _load_dotenv()
+from dotenv import load_dotenv
 
 load_dotenv(SCRIPT_DIR / ".env")
 
 
-logger = setup_logging("RunAgent", prefix="agent_")
+def main(args):
+
+    # logger.debug("Log Level set to DEBUG")
+    # if args.log_level=="DEBUG":
+    #     assert logger._logger.level == logging.DEBUG
+
+    # logger = setup_logging(args.log_level, log_dir=Path(
+    #     os.getenv("AGENT_LOG_DIR", "./log/")))
+    global logger
+    if args.project:
+        logger.info(f"Project: {args.project}")
+        config = Path.cwd() / "agent_config.yaml"
+        if config.exists():
+            with open(config, "r", encoding="utf-8") as f:
+                config_data = yaml.safe_load(f)
+            # if config_data.get("project") != args.project:
+            #     logger.warning(f"Project mismatch: {config_data.get('project')} vs {args.project}")
+            for key in ["role", "system_prompt", "user_prompt", "backend", "model", "port", "max_turns", "context_limit", "task"]:
+                if key in config_data:
+                    setattr(args, key, config_data[key])
+
+
+    # Initialize Skill System
+    if args.notools:
+        logger.info("Disabling tools")
+    else:
+        register_core_tools()
+    if args.skills:
+        logger.info(f"Loading skills from {args.skills}")
+        SKILLS_ROOT = args.skills
+
+    else:
+        from skill_system.integration import SKILLS_ROOT
+
+    logger.info(f"Registered tools: {tool_registry.list_tools()}")
+
+    skills_summary = ""
+
+    logger.info(SKILLS_ROOT)
+    if SKILLS_ROOT:
+        skills_mgr = SkillsManager(SKILLS_ROOT)
+        skills_mgr.discover_skills()
+        logger.info(f"Discovered skills: {list(skills_mgr.catalog.keys())}")
+        skills_summary = skills_mgr.get_catalog_summary()
+
+    api = LLMBackend(backend=args.backend)
+    if args.model:
+        api.model = args.model
+
+    if args.context_limit:
+        api.context_limit = args.context_limit
+
+    try:
+        if args.port and args.port != -1:
+
+            logger.info(f"Using port override: {args.port}")
+            api.port = int(args.port)
+        client, default_model = api.get_client()
+    except Exception as e:
+        logger.error(f"Client initialization failed: {e}")
+        return
+
+    # Load Prompts
+    try:
+        current_role = args.role or "agent"
+        prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
+        prompt_gen.platform = platform.system().lower()
+        assert prompt_gen
+        if args.system_prompt == "" and prompt_gen:
+            system_prompt = prompt_gen.generate_prompt(current_role)
+            enabled_skills = prompt_gen.enabled_skills
+            if not enabled_skills:
+                SKILLS_ROOT = None
+        elif args.system_prompt: # fallback to hardcoded prompts
+            with open(args.system_prompt, "r", encoding="utf-8") as f:
+                system_prompt = f.read()
+
+        if args.user_prompt and not args.task:
+            with open(args.user_prompt, "r", encoding="utf-8") as f:
+                user_prompt = f.read()
+        elif args.task:
+            logger.info(f"Using task: {args.task}")
+            user_prompt = args.task
+        system_prompt = "\n\n".join([system_prompt, skills_summary]).strip()
+    except FileNotFoundError as e:
+        logger.error(f"Required prompt file missing: {e}")
+        return
+
+    allowed_paths = tool_registry.get_allowed_paths()
+    if allowed_paths:
+        system_prompt += (
+            "### Allowed Paths\n"
+            f"{allowed_paths}"
+        )
+
+    split_idx = system_prompt[:320].rfind("\n") or 320
+    logger.info(f"Using system prompt: \n{system_prompt[:split_idx]}")
+    logger.info(f"current role: {current_role}")
+
+
+
+    # raise Exception("debug")
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+
+    sleep_time = 1 if api.backend == "mistral" else 0
+
+    if api.backend == "mistral":
+        assert api.endpoint
+        #debugging
+        logger.debug("Rate limited: {} endpoint limits: {}".format(
+            api.usage.rate_limited(),
+            api.endpoint.rate_limits
+            ))
+        logger.debug(api.usage.__repr__())
+        assert api.usage.rate_limited()
+
+
+    if args.test:
+        logger.info("Test run mode enabled. Exiting...")
+        exit(0)
+
+    agent = LLMAgent(client, api, max_turns=args.max_turns, logger=logger, sleep_time=sleep_time)
+    logger.info(f"--- Starting Agent Loop via {args.backend} ({api.model}) ---")
+    messages = agent.run_turns(messages, sleep_time=sleep_time)
+    with open("agent_messages.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(messages, f, default_flow_style=False, allow_unicode=True)
+    logger.info("--- Agent Loop Complete ---")
+    path = Path.cwd() / "agent_config.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump({
+            "project": args.project,
+            "role": current_role,
+            "system_prompt": args.system_prompt,
+            "user_prompt": args.user_prompt,
+            "task": args.task,
+            "backend": args.backend,
+            "model": api.model,
+            "port": api.port,
+            "max_turns": args.max_turns,
+            "context_limit": args.context_limit,
+        }, f, default_flow_style=False, allow_unicode=True)
+    logger.info(f"Config saved to {path}")
 
 
 # --- Tool Registration ---
@@ -153,17 +284,20 @@ def _role(m) -> str:
 
 
 
-from collections import deque
+
 MAX_IDENTICAL_CALLS = 3
 MAX_TOOL_CHARS = 12000
 
 class LLMAgent:
-    def __init__(self, client, api, max_turns=DEFAULT_MAX_TURNS, logger=None, sleep_time=0):
+    def __init__(self, client, api: LLMBackend, max_turns=DEFAULT_MAX_TURNS, logger=None, sleep_time=0):
         self.client = client
-        self.api = api
+        self.api: LLMBackend = api
         self.max_turns = max_turns
         self.sleep_time = sleep_time
-        self.logger = setup_logging("LLMAgent")
+        if not logger:
+            self.logger = setup_logging("LLMAgent")
+        else:
+            self.logger = logger
         self.recent_calls = deque(maxlen=6)
 
     def run_turns (self, messages: list, **kwargs):
@@ -202,13 +336,16 @@ class LLMAgent:
         empty_streak = 0
 
         logger = logger or self.logger
+        rate_limit_counter = 0
 
         for turn in range(max_turns):
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
+            assert isinstance(api.usage, UsageTracker)
+
             limit = 75.0
-            if api.usage.context_pct > limit:
+            if (api.usage.context_pct > limit):
                 logger.warning(f"context > {limit}% — trimming to {int(api.context_limit*0.8)} messages")
                 # fixed bug: was args.context_limit.
                 trimmed = _trim_messages(messages, int(api.context_limit*0.8))
@@ -220,12 +357,33 @@ class LLMAgent:
                     message = self.ai_compress(compress_target)
                     messages.insert(2, {"role": "system", "content": message})
 
+            if (api.usage.rate_limited() and api.usage.remaining_tpm < estimate_tokens(messages)):
+                # could use usage.remaining_rps
+                if api.usage.remaining_rps < self.sleep_time:
+                    logger.debug(f"Remaining RPS {api.usage.remaining_rps} < sleep time {self.sleep_time}")
+                logger.warning(f"Rate limited: sleeping for {self.sleep_time} seconds")
+                if rate_limit_counter >= self.sleep_time:
+                    self.sleep_time = min(self.sleep_time + 1, 30)
+                    rate_limit_counter = 0
+                else:
+                    rate_limit_counter += 1
+                time.sleep(self.sleep_time)
+                turn -= 1 # Wild manipulation.
+                continue
+            tools=tool_registry.get_all_schemas()
+            tool_choice="auto"
+            logger.debug("tools(%s) count=%d names=%s",
+                         tool_choice, len(tools), [s["function"]["name"] for s in tools]
+                         )
+
+
             try:
                 response = client.chat.completions.create(
                     model=api.model,
                     messages=messages,
-                    tools=tool_registry.get_all_schemas(),
-                    tool_choice="auto"
+                    tools=tools,
+                    tool_choice=tool_choice
+
                 )
                 api.usage.record(response.usage, turn=len(messages))
                 logger.info(f"usage: {api.usage.summary()}")
@@ -239,6 +397,9 @@ class LLMAgent:
                 if action is Action.ABORT:
                     logger.error(f"Aborting on: {e}")
                     raise SystemExit(1)
+                if action is Action.BACKOFF:
+                    logger.debug(f"remaining_tpm={api.usage.remaining_tpm}; remaining_rps={api.usage.remaining_rps}")
+                    sleep_time += 1 # increment sleep time
                 logger.warning(f"{action.name} in {delay}s: {e}")
                 time.sleep(delay)
                 continue
@@ -305,7 +466,9 @@ class LLMAgent:
             logger.error("Max turns reached. Aborting.")
         return messages
 
-def main():
+
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Unified LLM Agent with Skill System")
     parser.add_argument("--backend", choices=BACKEND_MAP.keys(), required=True, help="LLM backend to use")
     parser.add_argument("--system-prompt", default="", help="Path to system prompt file")
@@ -324,137 +487,8 @@ def main():
 
     args = parser.parse_args()
 
-    # logger = setup_logging(args.log_level, log_dir=Path(
-    #     os.getenv("AGENT_LOG_DIR", "./log/")))
+    logger = setup_logging("RunAgent", prefix="agent_", level=args.log_level, colors=True)
 
-
-    if args.project:
-        logger.info(f"Project: {args.project}")
-        config = Path.cwd() / "agent_config.yaml"
-        if config.exists():
-            with open(config, "r", encoding="utf-8") as f:
-                config_data = yaml.safe_load(f)
-            # if config_data.get("project") != args.project:
-            #     logger.warning(f"Project mismatch: {config_data.get('project')} vs {args.project}")
-            for key in ["role", "system_prompt", "user_prompt", "backend", "model", "port", "max_turns", "context_limit", "task"]:
-                if key in config_data:
-                    setattr(args, key, config_data[key])
-
-
-    # Initialize Skill System
-    if args.notools:
-        logger.info("Disabling tools")
-    else:
-        register_core_tools()
-    if args.skills:
-        logger.info(f"Loading skills from {args.skills}")
-        SKILLS_ROOT = args.skills
-
-    else:
-        from skill_system.integration import SKILLS_ROOT
-
-    logger.info(f"Registered tools: {tool_registry.list_tools()}")
-
-    skills_summary = ""
-
-    logger.info(SKILLS_ROOT)
-    if SKILLS_ROOT:
-        skills_mgr = SkillsManager(SKILLS_ROOT)
-        skills_mgr.discover_skills()
-        logger.info(f"Discovered skills: {list(skills_mgr.catalog.keys())}")
-        skills_summary = skills_mgr.get_catalog_summary()
-
-    api = LLMBackend(backend=args.backend)
-    if args.model:
-        api.model = args.model
-
-    if args.context_limit:
-        api.context_limit = args.context_limit
-
-    try:
-        if args.port and args.port != -1:
-
-            logger.info(f"Using port override: {args.port}")
-            api.port = int(args.port)
-        client, default_model = api.get_client()
-    except Exception as e:
-        logger.error(f"Client initialization failed: {e}")
-        return
-
-    # Load Prompts
-    try:
-        current_role = args.role or "agent"
-        prompt_gen = PromptGenerator(prompts_dir=str(PROMPT_DIR))
-        prompt_gen.platform = platform.system().lower()
-        assert prompt_gen
-        if args.system_prompt == "" and prompt_gen:
-            system_prompt = prompt_gen.generate_prompt(current_role)
-            enabled_skills = prompt_gen.enabled_skills
-            if not enabled_skills:
-                SKILLS_ROOT = None
-        elif args.system_prompt: # fallback to hardcoded prompts
-            with open(args.system_prompt, "r", encoding="utf-8") as f:
-                system_prompt = f.read()
-
-        if args.user_prompt and not args.task:
-            with open(args.user_prompt, "r", encoding="utf-8") as f:
-                user_prompt = f.read()
-        elif args.task:
-            logger.info(f"Using task: {args.task}")
-            user_prompt = args.task
-        system_prompt = "\n\n".join([system_prompt, skills_summary]).strip()
-    except FileNotFoundError as e:
-        logger.error(f"Required prompt file missing: {e}")
-        return
-
-    allowed_paths = tool_registry.get_allowed_paths()
-    if allowed_paths:
-        system_prompt += (
-            "### Allowed Paths\n"
-            f"{allowed_paths}"
-        )
-
-
-    logger.info(f"Using system prompt: \n{system_prompt[:320]}")
-    logger.info(f"current role: {current_role}")
-
-
-
-    # raise Exception("debug")
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
-    ]
-
-    sleep_time = 1 if api.backend == "mistral" else 0
-
-    if args.test:
-        logger.info("Test run mode enabled. Exiting...")
-        exit(0)
-
-    agent = LLMAgent(client, api, max_turns=args.max_turns, logger=logger, sleep_time=sleep_time)
-    logger.info(f"--- Starting Agent Loop via {args.backend} ({api.model}) ---")
-    messages = agent.run_turns(messages)
-    with open("agent_messages.yaml", "w", encoding="utf-8") as f:
-        yaml.dump(messages, f, default_flow_style=False, allow_unicode=True)
-    logger.info("--- Agent Loop Complete ---")
-    path = Path.cwd() / "agent_config.yaml"
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump({
-            "project": args.project,
-            "role": current_role,
-            "system_prompt": args.system_prompt,
-            "user_prompt": args.user_prompt,
-            "task": args.task,
-            "backend": args.backend,
-            "model": api.model,
-            "port": api.port,
-            "max_turns": args.max_turns,
-            "context_limit": args.context_limit,
-        }, f, default_flow_style=False, allow_unicode=True)
-    logger.info(f"Config saved to {path}")
-
-
-if __name__ == "__main__":
-    main()
+    main(args)
+else:
+    logger = setup_logging("RunAgent", prefix="agent_", level=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL))

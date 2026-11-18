@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 from logging import Handler
+import platform
 
 LevelLike = Union[int, str]
 
@@ -26,19 +27,54 @@ def _is_console(h: logging.Handler) -> bool:
     return isinstance(h, logging.StreamHandler) and not _is_file(h)
 
 
+class SimpleColorFormatter(logging.Formatter):
+    format_str = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+    dark_grey = "\x1b[90;20m"
+    grey = "\x1b[38;20m"
+    green = "\x1b[32;20m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+
+    FORMATS = {
+        logging.DEBUG: dark_grey + format + reset,
+        logging.INFO: grey + format + reset,
+        logging.WARNING: yellow + format + reset,
+        logging.ERROR: red + format + reset,
+        logging.CRITICAL: bold_red + format + reset
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno, self.format_str)
+        return logging.Formatter(log_fmt).format(record)
+
+
+if platform.system() == "Windows":
+    import colorama
+    colorama.init()
+    from colorama import just_fix_windows_console
+    #from termcolor import colored
+    just_fix_windows_console()
+
 class LoggerWrap:
     FORMAT = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
 
     def __init__(self, name: str = "UnifiedAgent", level: LevelLike = "INFO",
-                 log_dir: Optional[Path] = None, file_level: LevelLike = "DEBUG"):
+                 log_dir: Optional[Path] = None, file_level: LevelLike = "DEBUG", colors: bool = False):
         self._logger = logging.getLogger(name)
         self._logger.propagate = False
         console_level = _to_level(level)
         file_lvl = _to_level(file_level)
         # Logger passes the union; handlers do the real filtering.
         self._logger.setLevel(min(console_level, file_lvl))
+        default_fmt = logging.Formatter(self.FORMAT)
+        if colors:
+            fmt = SimpleColorFormatter(self.FORMAT)
+        else:
+            fmt = default_fmt
 
-        fmt = logging.Formatter(self.FORMAT)
+
 
         if not any(_is_console(h) for h in self._logger.handlers):
             sh = logging.StreamHandler()
@@ -52,7 +88,7 @@ class LoggerWrap:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             log_path = log_dir / f"{name}_{stamp}.log"
             fh = logging.FileHandler(log_path, encoding="utf-8")
-            fh.setFormatter(fmt)
+            fh.setFormatter(default_fmt)
             fh.setLevel(file_lvl)
             self._logger.addHandler(fh)
             self._logger.info("%s logging initialized at %s", name, log_path)
@@ -103,18 +139,18 @@ class LoggerFactory:
     def __init__ (self):
         pass
 
-    def get_logger(self, name: str = "UnifiedAgent", level: str = "INFO", log_dir: Optional[Path] = None) -> LoggerWrap:
+    def get_logger(self, name: str = "UnifiedAgent", level: str = "INFO", log_dir: Optional[Path] = None, colors: bool = False) -> LoggerWrap:
         if name not in self.loggers:
-            self.loggers[name] = LoggerWrap(name=name, level=level, log_dir=log_dir)
+            self.loggers[name] = LoggerWrap(name=name, level=level, log_dir=log_dir, colors=colors)
         return self.loggers[name]
 
 factory = LoggerFactory()
 
-def setup_logging(name: str = "UnifiedAgent", prefix: str = "", level: str = "INFO", log_dir: Optional[Path] = None) -> LoggerWrap:
-    return factory.get_logger(name=f"{prefix}{name}", level=level, log_dir=log_dir)
+def setup_logging(name: str = "UnifiedAgent", prefix: str = "", level: str = "INFO", log_dir: Optional[Path] = None, colors: bool = False) -> LoggerWrap:
+    return factory.get_logger(name=f"{prefix}{name}", level=level, log_dir=log_dir, colors=colors)
 
 if __name__ == "__main__":
-    log = setup_logging("test", level="WARNING", log_dir=Path.cwd() / "logs")
+    log = setup_logging("test", level="WARNING", log_dir=Path.cwd() / "logs", colors=True)
     log.debug("test")
     log.info("test")
     log.warning("test")

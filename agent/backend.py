@@ -39,8 +39,14 @@ class LLMBackend:
         self.backends = BACKEND_MAP.keys()
         if not defer_init:
             self.endpoint: Optional[APIEndpoint] = BACKEND_MAP[self.backend](model=self.model)
+            assert self.endpoint
             self.port: Optional[int] = self.endpoint.port
             self.context_limit = self.endpoint.ctx_size
+            if self.endpoint.rate_limits:
+                logger.debug(f"setting rate limits: {self.endpoint.rate_limits}")
+                self.usage.set_usage_limits(
+                    **self.endpoint.rate_limits
+                    )
             self.base_url=self.endpoint.base_url
             self.endpoint.api_key = os.getenv(f"{self.backend}_API_KEY", "00000000")
         else:
@@ -100,8 +106,9 @@ class LLMBackend:
         self.endpoint = endpoint_cls(
             model=self.model,
             base_url=self.base_url,
-            port=str(self.port) # Pass as int or str depending on what your subclass expects
+            port=self.port
         )
+        self.usage.set_usage_limits(**self.endpoint.rate_limits)
         return self.endpoint
 
     def update_context_limit(self, context_limit: int):
@@ -164,7 +171,7 @@ if __name__ == "__main__":
     # model="ministral-14b-latest"
 
     llm_backend = LLMBackend(backend=args.backend, defer_init=True)
-    llm_backend.port = args.port
+    llm_backend.port = args.port or llm_backend.port
 
 
     if args.model:
@@ -183,6 +190,9 @@ if __name__ == "__main__":
     print(f"Using model: {resolved_model}")
     print(f"Base URL: {str(llm_backend.endpoint.base_url)}")
     print(f"Context window: {llm_backend.context_limit} tokens")
+    print(
+        f"Usage: Rate limits: TPM: {llm_backend.usage.tokens_per_minute} RPS: {llm_backend.usage.requests_per_second} "
+        f"Used: {llm_backend.usage.prompt_tokens} in window: {llm_backend.usage.tokens_used_in_window} tokens")
     exit(0)
     # msg = "What is Mistral AI?"
     msg = "Tell me about yourself concisely in tweet length."

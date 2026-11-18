@@ -21,12 +21,13 @@ logger = setup_logging(__name__) # Could use unifiedagent
 
 class APIEndpoint:
     """Base class for LLM API endpoints."""
-    def __init__(self, model: str = "", base_url: str = "", port = "443"):
+    def __init__(self, model: str = "", base_url: str = "", port:str = "443"):
         self.model = model
         self.base_url = base_url
         self.port = port
         self.api_key = ""
         self.available_models = []
+        self.rate_limits = {}
         self.ctx_size = 4096  # Sensible default fallback
 
     def get_models(self) -> list[str]:
@@ -35,18 +36,19 @@ class APIEndpoint:
     def get_client(self) -> tuple[OpenAI, str]:
         raise NotImplementedError("Subclasses must implement get_client()")
 
-    def set_base_url(self, base_url, port=None):
+    def set_base_url(self, base_url, port="443"):
         #parsed = urlsplit(base_url)
         #print (f"Setting base URL to {base_url} with port {port}")
-        logger.info(f"Setting base URL to {base_url} with port {port}")
+
+        self.port = port or "443"
+        logger.info(f"Setting base URL to {base_url} with port {port or self.port}")
         parsed = urlparse(base_url)
 
-        if not port:
-            raise ValueError("Port is required")
+
         logger.debug(f"Parsed URL: {parsed}") # print(parsed)
 
         base_url =  parsed.netloc.split(":")[0] or parsed.netloc
-        parsed = parsed._replace(netloc=f"{base_url}:{port}")
+        parsed = parsed._replace(netloc=f"{base_url}:{self.port}")
         # parsed = parsed._replace(port=port)
 
         self.base_url = parsed.geturl().rstrip("/")
@@ -55,17 +57,20 @@ class APIEndpoint:
 
 class OpenAIEndpoint(APIEndpoint):
 
-    def __init__(self, model: str = "", base_url: str = "http://localhost", port: int = 8080):
-
-        super().__init__(model, base_url)
+    def __init__(self, model: str = "", base_url: str = "http://localhost", port: str = "8080"):
+        if port == "None":
+            raise Exception("What the actual fuck?")
+        if port is None:
+            port = "8080"
         self.port = port
+        super().__init__(model, base_url, self.port)
         self.api_key = "00000000"
         self.ctx_size = 32768  # Sensible default fallback;
         self.model = model
         if not base_url:
             host_ip = get_gateway_ip()
-            base_url = f"http://{host_ip}:{port}"
-        self.set_base_url(base_url.rstrip("/"), port)
+            base_url = f"http://{host_ip}:{self.port}"
+        self.set_base_url(base_url.rstrip("/"), self.port)
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
         self.available_model_data = MODEL_CATALOGS["openai"]()
@@ -121,7 +126,7 @@ class OpenAIEndpoint(APIEndpoint):
 class KoboldCppApiendpoint(APIEndpoint):
     def __init__(self, model: str = "", base_url: str = "", port: str = "5001"):
         super().__init__(model, base_url)
-        self.port = os.getenv("KOBOLD_PORT", port)
+        self.port = os.getenv("KOBOLD_PORT", port or "5001")
         if not base_url:
             host_ip = get_gateway_ip()
             self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:{self.port}/")
@@ -172,7 +177,7 @@ class LlamaApiEndpoint(APIEndpoint):
             host_ip = get_gateway_ip()
             base_url = os.getenv("LLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
         super().__init__(model, base_url)
-        self.port = os.getenv("LLAMA_PORT", port)
+        self.port = os.getenv("LLAMA_PORT", port or "9931")
         self.set_base_url(base_url.rstrip("/"), port)
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
@@ -247,7 +252,7 @@ class LlamaApiEndpoint(APIEndpoint):
 class OllamaApiEndpoint(APIEndpoint):
     def __init__(self, model: str = "", base_url: str = "", port="11434"):
         super().__init__(model, base_url)
-        self.port = os.getenv("OLLAMA_PORT", port)
+        self.port = os.getenv("OLLAMA_PORT", port or "11434")
 
         if not base_url:
             host_ip = get_gateway_ip()
@@ -272,14 +277,18 @@ class OllamaApiEndpoint(APIEndpoint):
 
 
 class MistralApiEndpoint(APIEndpoint):
-    def __init__(self, model: str = "", base_url: str = "", port=None):
+    def __init__(self, model: str = "", base_url: str = "", port="443"):
         super().__init__(model, base_url=base_url)
         self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
         self.ctx_size = 32000
         self.available_models = MODEL_CATALOGS["mistral"]()
         self.model = model or self.available_models[0]
-        self.port = None
+        self.port = port
         self.api_key = os.getenv("MISTRAL_API_KEY")
+        self.rate_limits = {
+            "tokens_per_minute": 40000,
+            "requests_per_second": 1
+            }
         if not self.api_key:
             raise RuntimeError("MISTRAL_API_KEY not set.")
 
