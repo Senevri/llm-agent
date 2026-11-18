@@ -53,7 +53,7 @@ class LLMBackend:
         else:
             self.endpoint = None
             self.context_limit = -1
-            self.base_url = "http://localhost/v1"
+            self.base_url = f"http://localhost:{self.port}/v1"
         self.logger = logger
         self.client = None
 
@@ -102,6 +102,7 @@ class LLMBackend:
         if not endpoint_cls:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
+        logger.debug(f"Endpoint class: {endpoint_cls}, backend: {self.backend}, model: {self.model}, base_url: {self.base_url}")
         # The constructor now receives the correct, final values immediately
         self.endpoint = endpoint_cls(
             model=self.model,

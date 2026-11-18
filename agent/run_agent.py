@@ -43,6 +43,8 @@ from tools.agent_tools import (
     TOOL_DEFINITIONS, TOOL_MAP
 )
 
+from compress import Compressor
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 from dotenv import load_dotenv
@@ -247,44 +249,6 @@ except ImportError as e:
     prompt_gen = None
 
 
-def _trim_messages(messages:list, limit: int) -> dict:
-    if len(messages) <= limit + 2:
-        return {"messages": messages}  # no trimming needed, return original messages
-    head = messages[:2]  # system + original task
-    tail = messages[-limit:]
-    tokens_in_msg = estimate_tokens(messages)
-    # more aggressive trimming
-    while (
-        len(tail) > 2
-        and tail and _role(tail[0]) == "tool"
-        or tokens_in_msg > limit
-        ):
-        tail = tail[1:]
-        tokens_in_msg = estimate_tokens(messages)
-    new_message_list = head + tail
-    removed_count = len(messages) - len(new_message_list) + 2
-    trimmed_msgs = messages[2:removed_count+2]
-    logger.info(f"trimmed {removed_count} messages")
-    def format_for_compression(msg: dict) -> str:
-        if msg.get("role") == "tool":
-            return f"[TOOL RESULT: {msg.get('name', 'unknown')} (ID: {msg.get('tool_call_id')})]\n{msg.get('content')}"
-        return f"{msg['role']}: {msg.get('content', '')}"
-
-    sections = [format_for_compression(c) for c in trimmed_msgs]
-
-    logger.info(f"Messages:\n\n{trimmed_msgs}")
-
-    return {
-        "messages": new_message_list,
-        "removed_sections": sections
-        }
-
-def _role(m) -> str:
-    return m["role"] if isinstance(m, dict) else getattr(m, "role", "")
-
-
-
-
 MAX_IDENTICAL_CALLS = 3
 MAX_TOOL_CHARS = 12000
 
@@ -295,6 +259,7 @@ class LLMAgent:
         self.max_turns = max_turns
         self.max_wait_time = 30
         self.sleep_time = sleep_time
+        self.compressor = Compressor(api, 40) # TODO: is that right proxy?
         if not logger:
             self.logger = setup_logging("LLMAgent")
         else:
@@ -304,17 +269,6 @@ class LLMAgent:
     def run_turns (self, messages: list, **kwargs):
         return self._run_turns(self.client, self.api, messages, **kwargs)
 
-    def ai_compress(self, sections, max_tokens=2000):
-        task_message = [
-            {"role": "system",
-             "content": f"You are a helpful assistant. Provide a concise, condensed version of the prompt below. Aim for max {max_tokens} tokens."},
-            {"role": "user", "content": "\n\n".join(sections[:-1])}]
-
-        response =  self.client.chat.completions.create(
-                model=self.api.model,
-                messages=normalize_messages(task_message, self.api.backend)
-            )
-        return response.choices[0].message.content
 
 
 
@@ -345,18 +299,9 @@ class LLMAgent:
 
             assert isinstance(api.usage, UsageTracker)
 
-            limit = 75.0
-            if (api.usage.context_pct > limit):
-                logger.warning(f"context > {limit}% — trimming to {int(api.context_limit*0.8)} messages")
-                # fixed bug: was args.context_limit.
-                trimmed = _trim_messages(messages, int(api.context_limit*0.8))
+            messages, removed = self._trim_context(messages).values()
 
-                messages = trimmed.get("messages", [])
-                # Could compress and insert...
-                compress_target = trimmed.get("removed_sections", None)
-                if compress_target:
-                    message = self.ai_compress(compress_target)
-                    messages.insert(2, {"role": "system", "content": message})
+            logger.info(f"removed messages: {removed}")
 
             if (api.usage.rate_limited() and api.usage.remaining_tpm < estimate_tokens(messages)):
                 # could use usage.remaining_rps
@@ -470,6 +415,41 @@ class LLMAgent:
         else:
             logger.error("Max turns reached. Aborting.")
         return messages
+
+
+    def _trim_context(self, messages, force: bool = False) -> dict[str, Any]:
+        snapshot = list(messages)
+        anchor = len(snapshot)
+
+        compressor = Compressor(self.api, 40)
+        plan = compressor.plan(snapshot, force=force)
+        if plan.reason == "none" or not plan.compress:
+            logger.debug("Trim: no action (%s)", plan.reason)
+            return {"messages": messages, "removed_sections": []}
+
+        summary = compressor.summarize(plan.compress)
+        if not summary:
+            logger.warning("Trim: summarizer returned no usable content; leaving intact")
+            return {"messages": messages, "removed_sections": []}
+
+        summary_msg = {
+            "role": "assistant",
+            "content": f"Historical context summary - not a new response: {summary}",
+        }
+
+        new_tail = messages[anchor:]
+
+        new_messages = [
+            messages[0],
+            summary_msg,
+            *plan.keep,
+            *new_tail
+        ]
+
+        return {
+            "messages": new_messages,
+            "removed_sections": plan.compress
+            }
 
 
 

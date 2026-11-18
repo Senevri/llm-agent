@@ -186,8 +186,9 @@ class LlamaApiEndpoint(APIEndpoint):
         if not base_url:
             host_ip = get_gateway_ip()
             base_url = os.getenv("LLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1")
-        super().__init__(model, base_url)
+        super().__init__(model, base_url, self.port)
 
+        logger.debug(f"Setting base URL to {base_url} port {self.port} vs {port}")
         self.set_base_url(base_url.rstrip("/"), self.port)
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"

@@ -38,10 +38,13 @@ class Compressor:
         if not tail:
             return TrimPlan(keep=list(messages), compress=[], reason="none")
 
-        while tail and _role(tail[0]) == "tool":
-            tail.pop(0)
-
         compress: List[Dict[str, Any]] = []
+
+        while tail and _role(tail[0]) == "tool":
+            compress.append(tail.pop(0))
+
+
+
         overflow_end = len(messages) - len(tail)
         compress.extend(messages[1:overflow_end])
 
