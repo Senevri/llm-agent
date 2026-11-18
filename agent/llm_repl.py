@@ -31,7 +31,7 @@ from command_dispatcher import CommandDispatcher, parse_command
 from log_queue import LogQueueHandler, LogQueueListener
 from loop_task import LoopTask, SimpleLoopTask, loop
 from prompt_generator import PromptGenerator, find_prompt_dir
-from slashcommands import load_commands
+from slashcommands import load_commands, tools_command
 from user_profile_manager import UserProfileManager, ContextSnapshot
 from compress import Compressor
 #from requests.exceptions import HTTPError
@@ -342,7 +342,7 @@ class LLMRepl:
             self.messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
 
         self.profile_queue = queue.Queue()
-        self.worker = ProfileWorker(self, self.profile_queue)
+        self.worker = ProfileWorker(self, self.profile_queue, time_threshold=10)
 
 
         self.worker.start()
@@ -385,7 +385,7 @@ class LLMRepl:
     def _check_profile_worker_health(self):
         if not self.worker.is_alive():
             logger.error("Profile worker thread is DEAD! Restarting...")
-            self.worker = ProfileWorker(self, self.profile_queue)
+            self.worker = ProfileWorker(self, self.profile_queue, time_threshold=10)
             self.worker.start()
 
         queue_size = self.profile_queue.qsize()
@@ -777,6 +777,7 @@ class LLMRepl:
         start_time = time.time()
         warning_sent = False
         SEND_TIMEOUT = 60
+
         with patch_stdout():
             while True:
                 # Let's mark that the message was sent
@@ -890,6 +891,7 @@ class LLMRepl:
 
 
     def _handle_api_error(self, e: Exception) -> bool:
+        assert self.api
         with self._state_lock:
             if self.current_bg_task == None or self.status == "stop":
                 return False
@@ -930,7 +932,7 @@ class LLMRepl:
                     new_limit = int(self.api.context_limit / 1.1)
                     self.api.update_context_limit(int(new_limit))
                 logger.warning(f"Failed to update context limit, reduced context from {old_limit} to {new_limit}.")
-            self._trim_context(int(self.api.context_limit*0.8))
+            self._trim_context(bool(self.api.context_limit*0.8))
             self._consolidate_profile()
 
         with self._state_lock:

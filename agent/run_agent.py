@@ -293,6 +293,7 @@ class LLMAgent:
         self.client = client
         self.api: LLMBackend = api
         self.max_turns = max_turns
+        self.max_wait_time = 30
         self.sleep_time = sleep_time
         if not logger:
             self.logger = setup_logging("LLMAgent")
@@ -359,17 +360,21 @@ class LLMAgent:
 
             if (api.usage.rate_limited() and api.usage.remaining_tpm < estimate_tokens(messages)):
                 # could use usage.remaining_rps
-                if api.usage.remaining_rps < self.sleep_time:
-                    logger.debug(f"Remaining RPS {api.usage.remaining_rps} < sleep time {self.sleep_time}")
-                logger.warning(f"Rate limited: sleeping for {self.sleep_time} seconds")
-                if rate_limit_counter >= self.sleep_time:
-                    self.sleep_time = min(self.sleep_time + 1, 30)
-                    rate_limit_counter = 0
-                else:
-                    rate_limit_counter += 1
-                time.sleep(self.sleep_time)
-                turn -= 1 # Wild manipulation.
-                continue
+                start_time = time.time()
+                while api.usage.remaining_tpm < estimate_tokens(messages):
+                    if api.usage.remaining_rps < self.sleep_time:
+                        logger.debug(f"Remaining RPS {api.usage.remaining_rps} < sleep time {self.sleep_time}")
+                    logger.warning(f"Rate limited: sleeping for {self.sleep_time} seconds")
+                    if rate_limit_counter >= self.sleep_time:
+                        self.sleep_time = min(self.sleep_time + 1, self.max_wait_time)
+                        rate_limit_counter = 0
+                    else:
+                        rate_limit_counter += 1
+                    time.sleep(self.sleep_time)
+                    if time.time() - start_time > self.max_wait_time:
+                        continue
+
+
             tools=tool_registry.get_all_schemas()
             tool_choice="auto"
             logger.debug("tools(%s) count=%d names=%s",

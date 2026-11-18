@@ -51,7 +51,6 @@ class ProfileWorker(threading.Thread):
             except queue.Empty:
                 if self.batch and (time.time() - self.batch[-1].timestamp >= self.time_threshold):
                     self._process_batch()
-                    time.sleep(60) # arbitrary sleep
             except Exception as e:
                 logger.exception(f"ProfileWorker error: {e}")
         logger.info("ProfileWorker thread shutting down.")

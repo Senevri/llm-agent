@@ -142,7 +142,7 @@ class UsageTracker:
         return max(0, allowance - recent)
 
     def __repr__(self):
-        return {
+        return "<UsageTracker " + json.dumps({
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "calls": self.calls,
@@ -160,7 +160,7 @@ class UsageTracker:
             "rate_limited": self.rate_limited(),
             "requests_used_in_window": self.requests_used_in_window,
             "tokens_used_in_window": self.tokens_used_in_window
-        }
+        })
 
     def rate_limited(self) -> bool:
         limits_configured = (
@@ -254,7 +254,7 @@ def size_bytes(value):
     if isinstance(value, str):
         return len(value.encode("utf-8"))
     if isinstance(value, dict):
-        return sum(list(size_bytes(k) + size_bytes(v) for k, v in value.items()))
+        return sum(size_bytes(k) + size_bytes(v) for k, v in value.items())
     if isinstance(value, (list, tuple)):
         return sum(size_bytes(item) for item in value)
     return len(str(value).encode("utf-8"))
