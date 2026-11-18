@@ -79,3 +79,6 @@ roles:
   profile_consolidation:
     snippets:
       - profile_consolidation
+  message_compression:
+    snippets:
+      - message_compression
