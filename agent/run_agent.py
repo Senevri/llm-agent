@@ -492,8 +492,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    logger = setup_logging("RunAgent", prefix="agent_", level=args.log_level, colors=True)
+    logger = setup_logging("RunAgent", prefix="", level=args.log_level, colors=True)
 
     main(args)
 else:
-    logger = setup_logging("RunAgent", prefix="agent_", level=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL))
+    logger = setup_logging("RunAgent", prefix="", level=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL))

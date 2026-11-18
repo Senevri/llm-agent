@@ -89,20 +89,27 @@ _load_dotenv()
 from custom_logger import setup_logging
 
 # 1. Initialize the robust wrapped logger (handles file + basic stream)
-logger = setup_logging("LLMReplV3", level="DEBUG" if os.getenv("DEBUG") else "WARNING", log_dir=Path.cwd() / "logs")
+logger = setup_logging(
+    "LLMReplV3", level="DEBUG" if os.getenv("DEBUG") else "WARNING",
+    log_dir=Path.cwd() / "logs",
+    colors=True
+    )
 
 # 2. OPTIONAL BUT RECOMMENDED: Remove the standard StreamHandler to prevent
 # duplicate console prints, since the Queue Listener will handle console output safely.
 for h in list(logger.handlers):
     if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+        _log_fmt = h.formatter
         logger.removeHandler(h)
     elif isinstance(h, LogQueueHandler):
         logger.removeHandler(h)
 
+if not _log_fmt:
+    format_str = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+    _log_fmt = logging.Formatter(format_str)
 # 3. Add the thread-safe queue handler for console output (prevents prompt_toolkit garbling)
 _log_queue = queue.Queue()
 _log_handler = LogQueueHandler(_log_queue)
-_log_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 _log_handler.setFormatter(_log_fmt)
 logger.addHandler(_log_handler)  # __getattr__ cleanly delegates this to the underlying logger
 

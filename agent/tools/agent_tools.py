@@ -183,10 +183,14 @@ def read_file(
     except Exception as e:
         return f"Error reading {path}: {e}"
 
-def to_relative(path: Union[str, Path]) -> str:
-    root = Path.cwd()
-    return str(Path(path).relative_to(root))
+def to_relative(path):
+    path = Path(path).resolve()
+    root = Path.cwd().resolve()
 
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def replace_lines_in_file(path: Union[str, Path], lines: List[str], start_line: int, orig_lines: List[str]) -> str:
@@ -569,7 +573,8 @@ TOOL_DEFINITIONS = tools
 
 tools_ok = all(tool["function"]["name"] in TOOL_MAP for tool in TOOL_DEFINITIONS)
 if not tools_ok:
-    raise Exception("Not all tools have implementations.")
+    missing_tools = [tool["function"]["name"] for tool in TOOL_DEFINITIONS if tool["function"]["name"] not in TOOL_MAP]
+    raise Exception(f"Missing Tool implementations: {', '.join(missing_tools)}")
 
 if __name__=="__main__":
     print(list_files("."))
