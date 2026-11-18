@@ -30,17 +30,18 @@ logger = setup_logging("Backend", level="INFO", log_dir=Path(LOG_DIR))
 
 
 class LLMBackend:
-    def __init__(self, backend: str = "mistral", config_file: str = "endpoints.yaml", defer_init=False):
+    def __init__(self, backend: str = "mistral", config_file: str = "endpoints.yaml", model = "", defer_init=False, port=None):
         self.backend = backend
         self.endpoints = self.load_endpoints(config_file)
         self.usage = UsageTracker()
-        self.model = os.getenv("AGENT_MODEL", "")
+        self.port = port
+        self.model = os.getenv("AGENT_MODEL", model)
         logger.info(f"Backend: {backend}, Model: {self.model or '(default)'}")
         self.backends = BACKEND_MAP.keys()
         if not defer_init:
             self.endpoint: Optional[APIEndpoint] = BACKEND_MAP[self.backend](model=self.model)
             assert self.endpoint
-            self.port: Optional[int] = self.endpoint.port
+            self.port: Optional[int] = self.port or self.endpoint.port
             self.context_limit = self.endpoint.ctx_size
             if self.endpoint.rate_limits:
                 logger.debug(f"setting rate limits: {self.endpoint.rate_limits}")
@@ -51,9 +52,8 @@ class LLMBackend:
             self.endpoint.api_key = os.getenv(f"{self.backend}_API_KEY", "00000000")
         else:
             self.endpoint = None
-            self.port = None
             self.context_limit = -1
-            self.base_url = "http://localhost:8080"
+            self.base_url = "http://localhost/v1"
         self.logger = logger
         self.client = None
 
@@ -170,7 +170,7 @@ if __name__ == "__main__":
     # backend="mistral"
     # model="ministral-14b-latest"
 
-    llm_backend = LLMBackend(backend=args.backend, defer_init=True)
+    llm_backend = LLMBackend(backend=args.backend, defer_init=True, port=args.port)
     llm_backend.port = args.port or llm_backend.port
 
 

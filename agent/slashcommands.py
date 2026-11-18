@@ -242,6 +242,10 @@ def repl_command(repl, *args, **kwargs):
             attr = getattr(repl, class_chain[0])
             for c in class_chain[1:]:
                 attr = getattr(attr, c)
+        # if "[" in attr:
+        #     dict_chain = attr.split("[").rstrip("]")
+        #     attr = getattr(repl, dict_chain[0])
+
         else:
             attr = getattr(repl, attr)
         return attr
@@ -252,6 +256,10 @@ def repl_command(repl, *args, **kwargs):
                 if attr:
                     msg = f"Setting {k} to {v}"
                     v = v =="True" if v in ["True", "False"] else v
+                    try:
+                        v = eval(v)
+                    except:
+                        pass
                     if v.isnumeric():
                         v = int(v)
                     if isinstance(attr, dict):
@@ -260,6 +268,7 @@ def repl_command(repl, *args, **kwargs):
                         attr = v
                     else:
                         setattr(attr, k, v=="True" if v in ["True", "False"] else v)
+
                     logger.info(msg)
                     console.print(f"[yellow]{msg}[/yellow]")
         return
@@ -346,11 +355,15 @@ def backend_command(repl, *args, **kwargs):
             return
         repl.backend = args[0]
         try:
-            api = LLMBackend(backend=repl.backend, defer_init=True)
-            api.port = kwargs.get("port", api.port)
+            port =  kwargs.get("port")
+            api = LLMBackend(backend=repl.backend, defer_init=True, port=port)
+            api.port = port or api.port
             api.model = kwargs.get("model", api.model)
             api.base_url = kwargs.get("base_url", api.base_url)
             api._get_endpoint()
+            api.model = api.endpoint.model
+            api.base_url = api.endpoint.base_url.rstrip("/")
+            api.port = api.endpoint.port
             repl.client, repl.model = api.get_client()
             repl.api = api
         except (ConnectError, HTTPError) as e:
@@ -542,8 +555,9 @@ def load_config(repl, *args, **kwargs):
             repl.tool_registry.enable_tool(tool)
 
     try:
-        repl.api = LLMBackend(backend=conf.get("backend", repl.backend), defer_init=True)
-        repl.api.port = conf.get("port", repl.api.port)
+        port = conf.get("port", repl.port)
+        repl.api = LLMBackend(backend=conf.get("backend", repl.backend), defer_init=True, port=port)
+        repl.api.port = port
         repl.api.model = conf.get("model", repl.api.model)
         repl.api.base_url = conf.get("base_url", repl.api.base_url)
         repl.api._get_endpoint()

@@ -57,6 +57,12 @@ class APIEndpoint:
         logger.info (f"Set base url to {self.base_url}")
         # raise Exception("debugging")
 
+class OllamaCloudEndpoint(APIEndpoint):
+    # curl https://ollama.com/api/chat \
+    # -H "Authorization: Bearer $OLLAMA_API_KEY" \
+    # -d '{"model": "glm-5.3-flash", "messages": [{"role": "user", "content": "Why is the sky blue?"}], "stream": false}'
+    pass
+
 class OpenAIEndpoint(APIEndpoint):
 
     def __init__(self, model: str = "", base_url: str = "http://localhost", port: str = "8080"):
@@ -104,6 +110,7 @@ class OpenAIEndpoint(APIEndpoint):
             if "No connection could be made" in str(e):
                 raise Exception(f"Failed to connect to {self.base_url}")
         try:
+            self.base_url = self.base_url.rstrip("/v1")
             url = self.base_url.removesuffix("/v1")  + "/api/v1/model"
             current_model = httpx2.get(url)
             if current_model:
@@ -254,16 +261,20 @@ class LlamaApiEndpoint(APIEndpoint):
 
 class OllamaApiEndpoint(APIEndpoint):
     def __init__(self, model: str = "", base_url: str = "", port="11434"):
-        super().__init__(model, base_url)
         self.port = os.getenv("OLLAMA_PORT", port or "11434")
-
         if not base_url:
             host_ip = get_gateway_ip()
-            self.base_url = os.getenv("OLLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1")
+            base_url = os.getenv(
+                "OLLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1"
+            )
+        super().__init__(model, base_url, self.port)
+        self.set_base_url(base_url.rstrip("/"), self.port)
+        if not self.base_url.endswith("/v1"):
+            self.base_url += "/v1"
         self.api_key = "ollama"
-        self.ctx_size = 8192  # Ollama default, but will be overwritten by discovery
+        self.ctx_size = 8192
         self.available_models = MODEL_CATALOGS["ollama"]()
-        self.model = self.model or self.available_models[0]
+        self.model = model or self.get_model() or self.available_models[0]
 
     def get_client(self) -> tuple[OpenAI, str]:
         # Resolve default model at the last possible moment
@@ -274,9 +285,11 @@ class OllamaApiEndpoint(APIEndpoint):
 
     def get_ollama_model(self):
         # /apimodel
-        current_model = httpx2.get(self.base_url + "/api/v1/model")
-        # format: {"result": "<model_name>"}
-        return current_model.json()["result"]
+        # current_model = httpx2.get(self.base_url + "/api/v1/model")
+        for model in self.available_models:
+            if self.model in model:
+                return model
+        return self.available_models[0]
 
 
 class MistralApiEndpoint(APIEndpoint):

@@ -110,6 +110,11 @@ class UsageTracker:
     def remaining_context_tokens(self) -> int:
         return self.context_limit - self.last_prompt_tokens
 
+    @property
+    def remaining_tokens(self) -> int:
+        return self.context_limit - self.last_prompt_tokens
+
+
     # ---- rate limits over the rolling window ----
     @property
     def tokens_used_in_window(self) -> int:

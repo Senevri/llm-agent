@@ -31,7 +31,7 @@ from command_dispatcher import CommandDispatcher, parse_command
 from log_queue import LogQueueHandler, LogQueueListener
 from loop_task import LoopTask, SimpleLoopTask, loop
 from prompt_generator import PromptGenerator, find_prompt_dir
-from slashcommands import load_commands, tools_command
+from slashcommands import load_commands, tools_command, load_config
 from user_profile_manager import UserProfileManager, ContextSnapshot
 from compress import Compressor
 #from requests.exceptions import HTTPError
@@ -69,6 +69,7 @@ def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
     """Load simple KEY=VALUE env files without overriding existing vars."""
     try:
         if not path.exists():
+            logger.info(f"Env file not found: {path}")
             return
         with open(path, "r", encoding="utf-8") as f:
             for raw in f:
@@ -796,13 +797,18 @@ class LLMRepl:
                 self.no_reply = False
                 if self.api.usage.context_pct >= 80.0 and not warning_sent:
                     # warn llm.
-                    warning = self.prompt_gen.generate_prompt(
-                        "warning", {
-                            "snippets": ["context_size_warning"]
-                        },
-                        context_pct=self.api.usage.context_pct,
-                        remaining_tokens=self.api.usage.remaining_tokens
-                        )
+                    try:
+                        warning = self.prompt_gen.generate_prompt(
+                            "warning", {
+                                "snippets": ["context_size_warning"]
+                            },
+                            context_pct=self.api.usage.context_pct,
+                            remaining_tokens=self.api.usage.remaining_tokens
+                            )
+                    except Exception as e:
+                        logger.error(f"Error generating prompt: {e}")
+                        raise e
+
                     console.rule(f"[dim]warning - {self.api.usage.summary()}[dim]")
                     current_messages.append({"role": "system", "content": warning})
                     warning_sent = True
