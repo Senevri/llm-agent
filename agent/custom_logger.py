@@ -38,11 +38,11 @@ class SimpleColorFormatter(logging.Formatter):
     reset = "\x1b[0m"
 
     FORMATS = {
-        logging.DEBUG: dark_grey + format + reset,
-        logging.INFO: grey + format + reset,
-        logging.WARNING: yellow + format + reset,
-        logging.ERROR: red + format + reset,
-        logging.CRITICAL: bold_red + format + reset
+        logging.DEBUG: dark_grey + format_str + reset,
+        logging.INFO: grey + format_str + reset,
+        logging.WARNING: yellow + format_str + reset,
+        logging.ERROR: red + format_str + reset,
+        logging.CRITICAL: bold_red + format_str + reset
     }
 
     def format(self, record):

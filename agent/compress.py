@@ -79,7 +79,7 @@ class Compressor:
         task_message = [
             {"role": "system",
              "content": content},
-            {"role": "user", "content": "\n\n".join(sections[:-1])}]
+            {"role": "user", "content": "\n\n".join(sections)}]
 
         response =  self.api.client.chat.completions.create(
                 model=self.api.model,

@@ -27,7 +27,7 @@ from tools import AGENT_DIR, TOOLS_DIR, WORKSPACE_DIR
 try:
     from tools.internet_tools import INTERNET_TOOL_MAP, INTERNET_TOOL_DEFINITION_MAP
 except ImportError as e:
-    errormsg = "Failed to import internet tools. Missing packages? Error:{e}"
+    errormsg = f"Failed to import internet tools. Missing packages? Error:{e}"
     logger.warning(errormsg)
     INTERNET_TOOL_MAP = {}
     INTERNET_TOOL_DEFINITION_MAP = {}
@@ -162,11 +162,10 @@ def read_file(
 
         actual_end = start_idx + len(selected)
 
+        # Convert to relative path for printing
+        path = to_relative(path)
         header = (
-            f"File: {path}\n"
-            f"Total lines: {total_lines}\n"
-            f"Showing lines {start_line} - {actual_end}; "
-            f"returned {len(selected)} line(s).\n"
+            f"{path} [{start_line} - {actual_end}/{total_lines} line(s)]\n"
         )
 
         if next_line is not None:
@@ -183,6 +182,12 @@ def read_file(
 
     except Exception as e:
         return f"Error reading {path}: {e}"
+
+def to_relative(path: Union[str, Path]) -> str:
+    root = Path.cwd()
+    return str(Path(path).relative_to(root))
+
+
 
 def replace_lines_in_file(path: Union[str, Path], lines: List[str], start_line: int, orig_lines: List[str]) -> str:
     path = _relative_paths_helper(str(path))
@@ -213,7 +218,7 @@ def replace_lines_in_file(path: Union[str, Path], lines: List[str], start_line: 
 
 def read_file_lines(path: str, start_line: int = 1, end_line: int = None) -> str:
     """Read specific lines of a file (1-indexed)."""
-    logger.info(f"Reading lines {start_line} to {end_line} of file: {path}")
+    logger.info(f"Reading lines {start_line} to {end_line} of file: {to_relative(path)}")
     path = _relative_paths_helper(path)
     try:
         lines_read = []
@@ -231,7 +236,7 @@ def read_file_lines(path: str, start_line: int = 1, end_line: int = None) -> str
 def search_file(path: str, query: str) -> str:
     """Search for a string within a file and return matching lines with line numbers."""
     path = _relative_paths_helper(path)
-    logger.info(f"Searching for '{query}' in file: {path}")
+    logger.info(f"Searching for '{query}' in file: {to_relative(path)}")
     def _search_file(path: str, query: str) -> list[str]:
         matches = []
         with open(path, 'r', encoding='utf-8') as f:
@@ -286,9 +291,9 @@ def list_files(path: str = ".", filterstr: str = "*", recurse: bool = False) -> 
     ]
 
     path = _relative_paths_helper(path)
-    logger.info(f"Listing files in: {path}")
+    logger.info(f"Listing files in: {to_relative(path)}")
     try:
-        files = [f for f in _glob_files(path, filterstr, recurse) if Path(f).name not in ignorelist]
+        files = [to_relative(f) for f in _glob_files(path, filterstr, recurse) if Path(f).name not in ignorelist]
         return "\n".join(files) if files else "Directory is empty."
     except Exception as e:
         return f"Error listing files: {str(e)}"
@@ -304,22 +309,22 @@ def write_file(path: str, content: str) -> str:
     if path in files.open_files:
         del files.open_files[path]
 
-    logger.info("Writing file: %s", path)
+    logger.info("Writing file: %s", to_relative(path))
     return write_or_append_file(
-        path, content, mode="w", message=f"Successfully wrote {len(content)} chars to {path}")
+        path, content, mode="w", message=f"Successfully wrote {len(content)} chars to {to_relative(path)}")
 
 def append_file(path: str, content: str) -> str:
     """Append content to a file."""
     logger.info("Appending to file: %s", path)
     return write_or_append_file(
-        path, content, mode="a", message=f"Successfully appended {len(content)} chars to {path}")
+        path, content, mode="a", message=f"Successfully appended {len(content)} chars to {to_relative(path)}")
 
 def write_or_append_file(path: str, content: str, mode: str = "a", message: str = None) -> str:
     path = _relative_paths_helper(path)
     try:
         with open(path, mode, encoding="utf-8") as f:
             f.write(content)
-        return message or f"Successfully wrote {len(content)} chars to {path}"
+        return message or f"Successfully wrote {len(content)} chars to {to_relative(path)}"
     except Exception as e:
         return f"Error appending to file: {e}"
 
@@ -562,6 +567,10 @@ tools.append(CLOUD_IMAGE_GEN_TOOL_DEFINITION)
 
 TOOL_DEFINITIONS = tools
 
+tools_ok = all(tool["function"]["name"] in TOOL_MAP for tool in TOOL_DEFINITIONS)
+if not tools_ok:
+    raise Exception("Not all tools have implementations.")
+
 if __name__=="__main__":
-    pass
+    print(list_files("."))
 # Moved test to tests; have not tested since.

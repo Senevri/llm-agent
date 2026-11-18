@@ -129,7 +129,7 @@ class UserProfileManager:
             json_str = self._load_json(self.profile_path)
         except Exception as e:
             logging.error(f"Failed to load profile: {e}")
-            return json_str
+            return {}
         if json_str:
             return json_str
         else:

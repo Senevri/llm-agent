@@ -1,3 +1,4 @@
+#!/usr/local/bin/python
 import asyncio
 import atexit
 import json
@@ -34,10 +35,6 @@ from slashcommands import load_commands
 from user_profile_manager import UserProfileManager, ContextSnapshot
 from compress import Compressor
 #from requests.exceptions import HTTPError
-#!/usr/local/bin/python
-
-
-
 
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -148,6 +145,35 @@ def get_gateway_ip() -> str:
 candidate_dir = discover_candidate_dir(Path(__file__).parent.parent, Path("tools"))
 sys.path.insert(0, str(candidate_dir))
 
+# --- Error hierarchy ---------------------------------------------------------------
+class REPLError(Exception):
+    """Base exception for LLMRepl V2."""
+    pass
+
+
+class APIError(REPLError):
+    """Errors related to the LLM API."""
+    pass
+
+
+class ProfileError(REPLError):
+    """Errors related to user profile management."""
+    pass
+
+
+class JobError(REPLError):
+    """Errors related to background agent jobs."""
+    pass
+
+
+class StartupError(REPLError):
+    """Errors occurring during REPL initialization."""
+    pass
+
+
+
+
+
 try:
     from tools.internet_tools import (
         INTERNET_TOOL_DEFINITION_MAP, INTERNET_TOOL_MAP)
@@ -168,6 +194,7 @@ except Exception:
     logger.error("Failed to import agent tools")
     BASE_TOOL_MAP = {}
     BASE_TOOL_SCHEMAS = []
+    raise StartupError("Failed to import agent tools")
     exit(1)
 
 from skill_system.tool_registry import ToolRegistry, ToolCallResult
@@ -223,32 +250,6 @@ try:
 except ImportError:
     from contextlib import nullcontext as patch_stdout
 
-
-
-# --- Error hierarchy ---------------------------------------------------------------
-class REPLError(Exception):
-    """Base exception for LLMRepl V2."""
-    pass
-
-
-class APIError(REPLError):
-    """Errors related to the LLM API."""
-    pass
-
-
-class ProfileError(REPLError):
-    """Errors related to user profile management."""
-    pass
-
-
-class JobError(REPLError):
-    """Errors related to background agent jobs."""
-    pass
-
-
-class StartupError(REPLError):
-    """Errors occurring during REPL initialization."""
-    pass
 
 
 
@@ -539,14 +540,14 @@ class LLMRepl:
         }
 
         with self._state_lock:
-            if len(self.messages) == anchor:
-                # No interleaving: adopt plan.keep, but keep the live system prompt.
-                self.messages = [self.messages[0], summary_msg, *plan.keep]
-            else:
-                # New messages landed during summarization. Keep them verbatim,
-                # keep the summary, and drop the old tail (it's already summarized).
-                new_tail = self.messages[anchor:]
-                self.messages = [self.messages[0], summary_msg, *new_tail]
+            new_tail = self.messages[anchor:]
+
+            self.messages = [
+                self.messages[0],
+                summary_msg,
+                *plan.keep,
+                *new_tail
+            ]
 
             try:
                 self.save_conversation_history()
@@ -883,6 +884,7 @@ class LLMRepl:
                         self.agent_active = False
                         raise APIError(f"Response timed out after {elapsed:.2f}s")
                     if not self._handle_api_error(e):
+                        self.agent_active = False
                         return f"API Error: {e}"
 
 
@@ -1426,12 +1428,19 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
     except Exception as e:
         logger.error(f"Failed to create jobmanager: {e}")
 
+    def stop_loop():
+        if not repl.loop_task:
+            return "No loop task running."
+
+        repl.loop_task.stop()
+        return "Loop task stopped."
+
     # Bind REPL-specific functions to this instance.
     repl_functions = {
         "dispatch_agent": lambda **kwargs: jobmanager._dispatch_agent_job(**kwargs),
         "check_job": lambda job_id, **kwargs: jobmanager._check_job(job_id),
         "list_jobs": lambda **kwargs: jobmanager._list_jobs(),
-        "stop_loop": lambda **kwargs: ("loop task stopped!" if repl.loop_task and repl.loop_task.stop() else "No loop task running."),
+        "stop_loop": stop_loop
     }
 
     definitions.extend(REPL_TOOL_DEFINITIONS)

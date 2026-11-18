@@ -36,19 +36,21 @@ class APIEndpoint:
     def get_client(self) -> tuple[OpenAI, str]:
         raise NotImplementedError("Subclasses must implement get_client()")
 
-    def set_base_url(self, base_url, port="443"):
+    def set_base_url(self, base_url, port=None):
         #parsed = urlsplit(base_url)
         #print (f"Setting base URL to {base_url} with port {port}")
-
-        self.port = port or "443"
-        logger.info(f"Setting base URL to {base_url} with port {port or self.port}")
+        msg_str = f"Setting base URL to {base_url}"
+        if port:
+            msg_str += f" with port {port}"
+        logger.info(msg_str)
         parsed = urlparse(base_url)
 
 
         logger.debug(f"Parsed URL: {parsed}") # print(parsed)
 
         base_url =  parsed.netloc.split(":")[0] or parsed.netloc
-        parsed = parsed._replace(netloc=f"{base_url}:{self.port}")
+        if port:
+            parsed = parsed._replace(netloc=f"{base_url}:{self.port}")
         # parsed = parsed._replace(port=port)
 
         self.base_url = parsed.geturl().rstrip("/")
@@ -173,12 +175,13 @@ class LlamaApiEndpoint(APIEndpoint):
         GET /lora-adapters / POST /lora-adapters	List and set LoRA adapter scales at runtime
     """
     def __init__(self, model: str = "", base_url: str = "", port="9931"):
+        self.port = os.getenv("LLAMA_PORT", port or "9931")
         if not base_url:
             host_ip = get_gateway_ip()
-            base_url = os.getenv("LLAMA_BASE_URL", f"http://{host_ip}:{port}/v1")
+            base_url = os.getenv("LLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1")
         super().__init__(model, base_url)
-        self.port = os.getenv("LLAMA_PORT", port or "9931")
-        self.set_base_url(base_url.rstrip("/"), port)
+
+        self.set_base_url(base_url.rstrip("/"), self.port)
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
         # if not base_url:
