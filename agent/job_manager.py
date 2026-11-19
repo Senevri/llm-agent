@@ -9,7 +9,7 @@ from custom_logger import setup_logging
 
 logger = setup_logging(__name__)
 
-from llm_repl import LLMRepl
+#from llm_repl import LLMRepl
 from agent.agent_dispatcher import OldAgentDispatcher, AgentDispatcher, TinyAgentDispatcher
 from prompt_generator import PromptGenerator
 
@@ -18,7 +18,7 @@ AGENT_DIR = Path(__file__).parent
 
 # Job manager facade retaining a simple API without changing LLMRepl internals.
 class JobManager:
-    def __init__(self, repl: LLMRepl):
+    def __init__(self, repl):
         self.repl = repl
         if hasattr(self.repl, "_job_manager") and self.repl._job_manager and isinstance(self.repl._job_manager, JobManager):
             self.dispatcher = self.repl._job_manager.dispatcher

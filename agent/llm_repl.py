@@ -31,9 +31,10 @@ from command_dispatcher import CommandDispatcher, parse_command
 from log_queue import LogQueueHandler, LogQueueListener
 from loop_task import LoopTask, SimpleLoopTask, loop
 from prompt_generator import PromptGenerator, find_prompt_dir
-from slashcommands import load_commands, tools_command, load_config
+from slashcommands import load_commands, tools_command, load_config, save_config, Script
 from user_profile_manager import UserProfileManager, ContextSnapshot
 from compress import Compressor
+from job_manager import JobManager
 #from requests.exceptions import HTTPError
 
 
@@ -229,6 +230,19 @@ try:
         force_terminal=True,
         color_system="auto",
     )
+
+    from urllib.parse import urlparse
+    from prompt_toolkit.styles import Style
+
+    TOOLBAR_STYLE = Style.from_dict({
+        "bottom-toolbar":      "noreverse bg:default #5f8787",
+        "bottom-toolbar.meta": "noreverse #585858",
+        "bottom-toolbar.sep":  "noreverse #3a3a3a",
+        "bottom-toolbar.loop": "noreverse #5fafaf",
+        "bottom-toolbar.warn": "noreverse #d78700",
+    })
+
+
 except Exception:
     logger.error("Failed to import rich")
     exit(1)
@@ -385,6 +399,37 @@ class LLMRepl:
         prompt_bytes = len(self.system_prompt.encode("utf-8"))
         total_bytes = messages_bytes + profile_bytes + prompt_bytes
         return total_bytes
+
+    def _loop_remaining_safe(self):
+        lt = getattr(self, "loop_task", None)
+        if lt is None:
+            return None
+        try:
+            if lt.ends_at is None or not lt.is_running():
+                return None
+            return str(lt.ends_at - datetime.now()).split(".")[0]
+        except Exception:
+            return None
+
+    def _toolbar_fragments(self):
+        try:
+            f = self._status_fields()
+            sep = ("class:bottom-toolbar.sep", " · ")
+            out = [("class:bottom-toolbar", f["model"])]
+            host = urlparse(f["base_url"]).netloc      # "(unset)" -> "" -> skipped
+            if host:
+                out += [sep, ("class:bottom-toolbar.meta", host)]
+            cls = "class:bottom-toolbar.warn" if f["pct"] >= 80 else "class:bottom-toolbar"
+            out += [sep, (cls, f"{f['pct']:.0f}%")]
+            if self.agent_active:
+                out.append(("class:bottom-toolbar.meta", "  👣"))
+            remaining = self._loop_remaining_safe()
+            if remaining:
+                out.append(("class:bottom-toolbar.loop", f"  🔁 {remaining}"))
+            return out
+        except Exception:
+            logger.debug("toolbar render failed", exc_info=True)
+            return [("class:bottom-toolbar", "…")]
 
     def show(self):
         console.print(self.get_diagnostics())
@@ -676,15 +721,20 @@ class LLMRepl:
         self.current_bg_task = run_in_background(self.send_message)(user_input)
         return True
 #
+    def _loop_status_text(self) -> str:
+        if self.loop_task is None:
+            return "ᓚᘏᗢ"
+        remaining = self.loop_task.get_remaining_time()   # now side-effect free
+        return f"Loop: {remaining}" if remaining else "loop idle"
+
+    def _toolbar_text(self) -> str:
+        return f"{self.model} | {self.api.context_limit} | {self.backend}   {self._loop_status_text()}"
+
     def _draw_end_rule(self, newline=False):
-        # Let's mark that the message was sent
-        loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
-        if self.loop_task else "[dark_cyan]ᓚᘏᗢ[dark_cyan]")
         if newline:
             console.print("\n")
-        console.rule(f"{loop_remains}")
-        self.no_reply = False
-
+        console.rule(self._loop_status_text())
+        self.no_reply = False        # keep this — it's the re-arm
 
 
     def send_message(self, user_input: str) -> str:
@@ -979,6 +1029,19 @@ class LLMRepl:
                 self.loop_task = status
             return status
 
+    def _status_fields(self) -> dict:
+        """Single source of truth for status display. Never raises, never mutates."""
+        api    = getattr(self, "api", None)
+        client = getattr(self, "client", None)
+        usage  = getattr(api, "usage", None)
+        return {
+            "model":    getattr(self, "model", None) or "(unknown)",
+            "base_url": str(getattr(client, "base_url", "") or "(unset)"),
+            "n_ctx":    getattr(api, "context_limit", None) or "(unset)",
+            "backend":  getattr(self, "backend", None) or "(unset)",
+            "pct":      getattr(usage, "context_pct", 0.0) or 0.0,
+        }
+
     def get_input_prompt_prefix(self):
 
         agent = "👣" if self.agent_active else ""
@@ -993,7 +1056,9 @@ class LLMRepl:
             if prompt_session is not None:
                 user_input = await prompt_session.prompt_async(
                     input_prompt,
-                    bottom_toolbar=lambda: f"{self.model} | {self.client.base_url} | {self.api.context_limit} | {self.backend}",
+                    bottom_toolbar=self._toolbar_fragments,
+                    style=TOOLBAR_STYLE,
+                    refresh_interval=1
                 )
             else:
                 user_input = input(input_prompt).strip()
@@ -1007,17 +1072,9 @@ class LLMRepl:
     def _draw_statusbar(self):
         if self.no_reply:
             return
-        try:
-            self.model = self.api.model
-            base_url = self.client.base_url
-            n_ctx = self.api.context_limit
-        except Exception:
-            base_url = "(unset)"
-            n_ctx = "(unset)"
-        rule_str=f"[turquoise4]{self.model}|{base_url}|{n_ctx}|{self.backend}[/turquoise4]"
-        console.rule(rule_str)
-        self.no_reply=True
-
+        f = self._status_fields()
+        console.rule(f"[turquoise4]{f['model']}|{f['base_url']}|{f['n_ctx']}|{f['backend']}[/turquoise4]")
+        self.no_reply = True
 
 
     def run(self) -> None:
@@ -1370,7 +1427,7 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
 
 
 
-    jobmanager = JobManager(repl)
+    _jobmgr = JobManager(repl)
 
     def stop_loop():
         task = repl.loop_task
@@ -1382,9 +1439,9 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
 
     # Bind REPL-specific functions to this instance.
     repl_functions = {
-        "dispatch_agent": jobmanager._dispatch_agent_job,
-        "check_job": jobmanager._check_job,
-        "list_jobs": jobmanager._list_jobs,
+        "dispatch_agent": _jobmgr._dispatch_agent_job,
+        "check_job": _jobmgr._check_job,
+        "list_jobs": _jobmgr._list_jobs,
         "stop_loop": stop_loop,
     }
     definitions.extend(REPL_TOOL_DEFINITIONS)
