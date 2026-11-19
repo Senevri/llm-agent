@@ -490,7 +490,7 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "Path to list, defaults to current directory"},
-                               "filterstr": {"type": "string", "description": "Filter files by name"},
+                               "filterstr": {"type": "string", "default": "*", "description": "Filter files by name, * wildcard"},
                                "recurse": {"type": "boolean", "description": "Recurse into subdirectories"},
                                },
                 "required": []
@@ -575,7 +575,12 @@ tools_ok = all(tool["function"]["name"] in TOOL_MAP for tool in TOOL_DEFINITIONS
 if not tools_ok:
     missing_tools = [tool["function"]["name"] for tool in TOOL_DEFINITIONS if tool["function"]["name"] not in TOOL_MAP]
     raise Exception(f"Missing Tool implementations: {', '.join(missing_tools)}")
-
+else:
+    logger.info("All tools have implementations.")
 if __name__=="__main__":
     print(list_files("."))
+    print(write_file("test.txt", "test"))
+    print(read_file("test.txt"))
+    print(run_bash("rm ./test.txt"))
+    print(json.dumps(TOOL_DEFINITIONS))
 # Moved test to tests; have not tested since.
