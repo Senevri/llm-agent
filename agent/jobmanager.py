@@ -20,7 +20,14 @@ AGENT_DIR = Path(__file__).parent
 class JobManager:
     def __init__(self, repl: LLMRepl):
         self.repl = repl
-        setattr(self.repl, "_job_manager", self)
+        if hasattr(self.repl, "_job_manager") and self.repl._job_manager and isinstance(self.repl._job_manager, JobManager):
+            self.dispatcher = self.repl._job_manager.dispatcher
+            self.prompt_gen = self.repl._job_manager.prompt_gen
+            self._jobs = self.repl._job_manager._jobs
+            self._jobs_lock = self.repl._job_manager._jobs_lock
+            self.repl._job_manager = self
+        else:
+            setattr(self.repl, "_job_manager", self)
         self.dispatcher = AgentDispatcher()
         self.prompt_gen = repl.prompt_gen
 

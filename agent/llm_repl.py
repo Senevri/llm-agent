@@ -512,19 +512,6 @@ class LLMRepl:
         sections.append(f"workspace: {str(WORKSPACE_DIR)}")
         return "\n".join(sections)
 
-    # def ai_compress(self, sections, max_tokens=2000):
-    #     content = self.prompt_gen.generate_prompt("message_compression")
-    #     content = content.replace("{max_tokens}", str(max_tokens))
-    #     task_message = [
-    #         {"role": "system",
-    #          "content": content},
-    #         {"role": "user", "content": "\n\n".join(sections[:-1])}]
-
-    #     response =  self.client.chat.completions.create(
-    #             model=self.model,
-    #             messages=normalize_messages(task_message, self.backend)
-    #         )
-    #     return response.choices[0].message.content
 
     def _trim_context(self, force: bool = False) -> None:
         with self._state_lock:
@@ -544,7 +531,24 @@ class LLMRepl:
 
         summary_msg = {
             "role": "assistant",
-            "content": f"Historical context summary - not a new response: {summary}",
+            "content": f"[History]: {summary}",
+        }
+
+        # Disable unused tools TODO: Figure out better rules for this
+        # + "LLM can ask for a tool" mechanism
+        unused_tools = self.tool_registry.get_tool_call_counts_sorted()
+        for tool_name, count in unused_tools:
+            # math
+            if count == 0:
+                self.tool_registry.disable_tool(tool_name)
+            elif (unused_tools.index((tool_name, count))>len(unused_tools)//2
+                and count < unused_tools[0][1]//10):
+                self.tool_registry.disable_tool(tool_name)
+            # math
+
+        tool_message = {
+            "role": "assistant",
+            "content": f"[Disabled tools]: {", ".join(self.tool_registry._disabled_tools)}",
         }
 
         with self._state_lock:
@@ -553,95 +557,19 @@ class LLMRepl:
             self.messages = [
                 self.messages[0],
                 summary_msg,
+                tool_message,
                 *plan.keep,
                 *new_tail
             ]
 
-            try:
-                self.save_conversation_history()
-            except Exception:
-                logger.exception("Trim: failed to archive conversation history")
 
 
 
+        try:
+            self.save_conversation_history()
+        except Exception:
+            logger.exception("Trim: failed to archive conversation history")
 
-    # def _trim_context(self, n_ctx:int=0) -> None:
-    #     # Safe to call with or without holding _state_lock (RLock).
-    #     with self._state_lock:
-    #         orig_size_tokens = estimate_tokens(self.messages)
-    #         orig_size_bytes = len(str(self.messages).encode("utf-8"))
-
-    #         logger.debug(
-    #                 "Context before trim: messages=%d chars=%d",
-    #                 len(self.messages), orig_size_bytes
-    #             )
-
-    #         over_max_messages = len(self.messages) <= self.max_context_messages
-    #         # if (
-    #         #
-    #         #     and orig_size_tokens <= self.api.context_limit*0.8
-    #         #     and not n_ctx
-    #         #     ):
-    #         #     return
-
-    #         try:
-    #             usage_ratio = self.api.usage.context_pct
-    #             # Let's put a gate on pruning
-    #             if usage_ratio < 0.75 and not over_max_messages:
-    #                 return
-    #         except Exception as e:
-    #             logger.warning(f"Could not get usage ratio: {e}")
-    #             # if (not n_ctx
-    #             # and len(self.messages) < self.max_context_messages
-    #             # and orig_size_tokens < self.api.context_limit*0.8):
-    #             #     return
-
-    #         self.save_conversation_history()
-    #         keep_count = max(self.max_context_messages - 1, 3)
-
-
-    #         tail = self.messages[-keep_count:]
-    #         while tail and _role(tail[0]) == "tool":
-    #             tail = tail[1:]
-    #         sections = []
-
-    #         # Guesstimate tokens; not exact
-    #         if (n_ctx
-    #             or self.api.usage.last_prompt_tokens > self.api.context_limit*0.80):
-    #             # Average token length = 4
-    #             while (estimate_tokens(tail) > self.api.context_limit*2//3 and len(tail) > 1):
-    #                 sections.append(tail[0])
-    #                 tail = tail[1:]
-    #                 if not tail:
-    #                     break
-    #         compress_target = list(sections)
-    #         logger.debug(f"Compress target: {len(compress_target)} messages, characters={len(str(compress_target))}")
-
-    #         def format_for_compression(msg: dict) -> str:
-    #             if msg.get("role") == "tool":
-    #                 return f"[TOOL RESULT: {msg.get('name', 'unknown')} (ID: {msg.get('tool_call_id')})]\n{msg.get('content')}"
-    #             return f"{msg['role']}: {msg.get('content', '')}"
-
-    #         sections = [format_for_compression(c) for c in compress_target]
-    #         content = None
-    #         if sections:
-    #             logger.info(f"Compressing {' '.join(sections)[:120]}[...]")
-    #             content = self.ai_compress(sections, max_tokens=self.api.context_limit*1//3)
-    #             logger.info(f"condensed context to {content}")
-    #         if content:
-    #             with open(Path(WORKSPACE_DIR) / "condensed_context.txt", "a+", encoding="utf-8") as f:
-    #                 isodate = datetime.now().isoformat()
-    #                 f.write("###"+str(isodate) + "\n" + content + "\n\n------\n\n")
-    #             content = f"[HISTORY]: {content}"
-    #             tail = [{"role": "assistant", "content": content}] + tail
-    #         self.messages = [self.messages[0]] + tail
-    #     console.print(f"[dim]Trimmed from {orig_size_bytes} to {len(str(self.messages))}[/dim]")
-    #     console.print(f"[dim]Trimmed: {self.api.usage.summary()}[/dim]")
-    #     token_est = estimate_tokens(self.messages)
-    #     chars = self.check_all_context_use()
-    #     console.print(
-    #         f"[dim]Messages: {len(self.messages)}, characters {chars}, est. tokens: {token_est}[/dim]"
-    #     )
 
     def _request_chat_completion(self, messages: List[Dict[str, Any]], tools=None, tool_choice=None):
         request_start_time = time.time()
@@ -741,12 +669,13 @@ class LLMRepl:
                     tool_results[i] = result
         return tool_results
 
-    def _start_background_send(self, user_input: str) -> None:
+    def _start_background_send(self, user_input: str) -> bool:
         if self.status == "stop":
-            return
+            return False
         self.agent_active = True
         self.current_bg_task = run_in_background(self.send_message)(user_input)
-
+        return True
+#
     def _draw_end_rule(self, newline=False):
         # Let's mark that the message was sent
         loop_remains = (f"Loop: {self.loop_task.get_remaining_time()}"
@@ -1062,7 +991,10 @@ class LLMRepl:
 
             input_prompt = self.get_input_prompt_prefix()
             if prompt_session is not None:
-                user_input = await prompt_session.prompt_async(input_prompt)
+                user_input = await prompt_session.prompt_async(
+                    input_prompt,
+                    bottom_toolbar=lambda: f"{self.model} | {self.client.base_url} | {self.api.context_limit} | {self.backend}",
+                )
             else:
                 user_input = input(input_prompt).strip()
             self.user_messages.append(user_input)
@@ -1162,7 +1094,7 @@ class LLMRepl:
                 while True:
                     try:
                         # live update model
-                        self.no_reply = False
+                        #self.no_reply = False
                         self._draw_statusbar()
 
                         # Get User Input
@@ -1173,16 +1105,16 @@ class LLMRepl:
                                 # LLM is busy. Wait a bit and let the loop iterate.
                                 # DO NOT call get_next_input() here, or we pop content prematurely.
                                 await asyncio.sleep(0.5)
-
                             # Priority 2: Loop task has more inputs
                             if isinstance(self.loop_task, SimpleLoopTask):
                                 next_input = self.loop_task.get_next_input() or ""
+                                # tick
                                 if next_input:
-                                    console.print(f"[dim]Loop task continuing: {next_input[:50]}...[/dim]")
-                                    self._start_background_send(next_input)
-                                else:
-                                    self.loop_task.cleanup()
-                                    console.print("[dim]Loop task completed.[/dim]")
+                                    if not self._start_background_send(next_input):
+                                        self.loop_task.stop()
+                                        self.loop_task.cleanup()
+                                        console.print("[yellow]Loop halted: REPL is in 'stop' state.[/yellow]")
+                                    continue
 
                         if not user_input and not self.agent_active:
                             try:
@@ -1437,27 +1369,24 @@ def create_tool_registry(repl: LLMRepl) -> ToolRegistry:
     logger.debug("Definitions: %s", definitions)
 
 
-    try: # TODO: fixme
-        from jobmanager import JobManager
-        jobmanager = JobManager(repl)
-    except Exception as e:
-        logger.error(f"Failed to create jobmanager: {e}")
+
+    jobmanager = JobManager(repl)
 
     def stop_loop():
-        if not repl.loop_task:
+        task = repl.loop_task
+        if task is None:
             return "No loop task running."
-
-        repl.loop_task.stop()
+        task.stop()
+        repl.loop_task = None
         return "Loop task stopped."
 
     # Bind REPL-specific functions to this instance.
     repl_functions = {
-        "dispatch_agent": lambda **kwargs: jobmanager._dispatch_agent_job(**kwargs),
-        "check_job": lambda job_id, **kwargs: jobmanager._check_job(job_id),
-        "list_jobs": lambda **kwargs: jobmanager._list_jobs(),
-        "stop_loop": stop_loop
+        "dispatch_agent": jobmanager._dispatch_agent_job,
+        "check_job": jobmanager._check_job,
+        "list_jobs": jobmanager._list_jobs,
+        "stop_loop": stop_loop,
     }
-
     definitions.extend(REPL_TOOL_DEFINITIONS)
 
     # if platform.system() == "Windows":

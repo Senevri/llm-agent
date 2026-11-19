@@ -295,26 +295,22 @@ def loop (repl, *args, **kwargs):
 
     elif "simple" in args:
         tasks = []
-        if kwargs.get("note", None):
-            tasks = [kwargs.get("note")]
-        if kwargs.get("todo", None):
-            tasks = tasks or []
-            todo = [
-                t.get("task", None) for t in repl.tasks.values()
-                if t.get("status", None) == "pending"
-            ]
-            tasks.extend(list(t for t in todo if t))
-        tasks.extend([kwargs.get("task", None)])
+        if kwargs.get("note"):
+            tasks.append(kwargs["note"])
+        if kwargs.get("todo"):
+            tasks.extend(t["task"] for t in repl.tasks.values()
+                        if t.get("status") == "pending" and t.get("task"))
+        if kwargs.get("task"):
+            tasks.append(kwargs["task"])
+        if not tasks:
+            console.print("[red]No task provided[/red]")
+            return
 
-        repl.loop_task = SimpleLoopTask(
-            repl,
-            tasks
-        )
-        try:
-            repl.loop_task.ends_at = datetime.now() + _parse_timedelta(kwargs)
-            repl.loop_task.start()
-            console.print(f"[green]Loop task started; active until {str(repl.loop_task.ends_at)}[/green]")
-        except Exception as e:
-            console.print(f"No end time set: {e}", color=True)
+        delta = _parse_timedelta(kwargs) or timedelta(minutes=10)
+        lt = SimpleLoopTask(repl, tasks)
+        lt.ends_at = datetime.now() + delta
+        repl.status = "run"          # starting a loop is an explicit user action
+        lt.start()                   # not inside a swallow-all try
+        console.print(f"[green]Loop active until {lt.ends_at}[/green]")
 
     return None

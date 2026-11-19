@@ -139,6 +139,7 @@ class ToolRegistry:
         self._disabled_tools = set(t for t in os.getenv("DISABLED_TOOLS", "").split(",") if t)
         self._allowed_paths = [Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(",") if p]
         self._allowed_paths.append(Path.cwd())
+        self._tool_call_counts = {}
 
     def get_allowed_paths(self) -> str:
         return "\n".join(str(p) for p in self._allowed_paths)
@@ -152,6 +153,7 @@ class ToolRegistry:
             logger.warning(f"Tool '{name}' is already registered. Overwriting.")
 
         self._tools[name] = Tool(name, description, func, parameters)
+        self._tool_call_counts[name] = 0
         logger.info(f"Tool '{name}' registered successfully.")
 
     def disable_tool(self, name: str):
@@ -189,6 +191,7 @@ class ToolRegistry:
             # validate policy:
             kwargs = self._validate_policy(tool_name, tool, kwargs)
             result = tool.func(**kwargs)
+            self._tool_call_counts[tool_name] += 1
 
             if result is None:
                 logger.error("Tool '%s' returned None", tool_name)
@@ -201,6 +204,9 @@ class ToolRegistry:
         except Exception as e:
             logger.exception(f"Error executing tool '{tool_name}': {e}")
             return f"Error executing tool '{tool_name}': {str(e)}"
+
+    def get_tool_call_counts_sorted(self):
+        return sorted(self._tool_call_counts.items(), key=lambda x: x[1], reverse=True)
 
     def _validate_policy(self, tool_name, tool, kwargs) -> dict:
         if tool_name in self._disabled_tools:

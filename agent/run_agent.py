@@ -9,6 +9,7 @@ import argparse
 import platform
 from pathlib import Path
 from collections import Counter, deque
+from typing import List, Dict, Any
 
 
 from openai import OpenAI
@@ -259,7 +260,6 @@ class LLMAgent:
         self.max_turns = max_turns
         self.max_wait_time = 30
         self.sleep_time = sleep_time
-        self.compressor = Compressor(api, 40) # TODO: is that right proxy?
         if not logger:
             self.logger = setup_logging("LLMAgent")
         else:
@@ -298,10 +298,13 @@ class LLMAgent:
                 time.sleep(sleep_time)
 
             assert isinstance(api.usage, UsageTracker)
-
+            orig_len = len(messages)
             messages, removed = self._trim_context(messages).values()
-
-            logger.info(f"removed messages: {removed}")
+            if len(messages) == orig_len:
+                #Nothing removed
+                pass
+            else:
+                logger.info(f"removed messages: {removed}")
 
             if (api.usage.rate_limited() and api.usage.remaining_tpm < estimate_tokens(messages)):
                 # could use usage.remaining_rps
@@ -418,11 +421,14 @@ class LLMAgent:
 
 
     def _trim_context(self, messages, force: bool = False) -> dict[str, Any]:
-        snapshot = list(messages)
-        anchor = len(snapshot)
+        # First two messages are system and user
+        protected_count = 2
+        snapshot = list(messages[protected_count:])
+        anchor = protected_count + len(snapshot)
 
         compressor = Compressor(self.api, 40)
         plan = compressor.plan(snapshot, force=force)
+        logger.debug("Trim: plan: %s", plan)
         if plan.reason == "none" or not plan.compress:
             logger.debug("Trim: no action (%s)", plan.reason)
             return {"messages": messages, "removed_sections": []}
@@ -441,6 +447,7 @@ class LLMAgent:
 
         new_messages = [
             messages[0],
+            messages[1],
             summary_msg,
             *plan.keep,
             *new_tail
@@ -476,4 +483,4 @@ if __name__ == "__main__":
 
     main(args)
 else:
-    logger = setup_logging("RunAgent", prefix="", level=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL))
+    logger = setup_logging("LLM_Agent", prefix="", level=os.getenv("AGENT_LOG_LEVEL", DEFAULT_LOG_LEVEL))
