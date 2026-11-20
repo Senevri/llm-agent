@@ -306,6 +306,7 @@ def quit_command(repl, *args, **kwargs):
     console = repl.console
     console.print("[yellow]Goodbye![/yellow]")
     repl.shutdown()
+    repl.status="stop"
     return "quit"
 
 def stub(repl, *args, **kwargs):

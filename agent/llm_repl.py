@@ -63,7 +63,8 @@ if AGENT_DIR not in sys.path:
 
 from llm_utils import (
     size_bytes, estimate_tokens, normalize_messages, discover_candidate_dir,
-    robust_json_extract, balanced_braces_extract, _role, Message)
+    robust_json_extract, balanced_braces_extract, _role, Message, _relative_paths_helper
+    )
 from profileworker import ProfileWorker
 
 def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
@@ -198,7 +199,7 @@ except (ImportError, Exception) as e:
 
 try:
     from tools import WORKSPACE_DIR
-    from tools.agent_tools import TOOL_MAP as BASE_TOOL_MAP, tools as BASE_TOOL_SCHEMAS
+    from tools.agent_tools import TOOL_MAP as BASE_TOOL_MAP, TOOL_DEFINITIONS as BASE_TOOL_SCHEMAS
 except Exception:
     logger.error("Failed to import agent tools")
     BASE_TOOL_MAP = {}
@@ -585,7 +586,7 @@ class LLMRepl:
 
         if unused_tools:
             max_count = unused_tools[0][1]
-            threshold = max_count / 10
+            threshold = max_count / 20
 
             for index, (tool_name, count) in enumerate(
                 reversed(unused_tools)
@@ -600,20 +601,20 @@ class LLMRepl:
                     self.tool_registry.disable_tool(tool_name)    # math
 
         tool_message = {
-            "role": "assistant",
+            "role": "system",
             "content": f"[Disabled tools]: {", ".join(self.tool_registry._disabled_tools)}",
         }
 
         with self._state_lock:
             new_tail = self.messages[anchor:]
 
-            self.messages = [
+            self.messages = compressor._combine_contents_by_role([
                 self.messages[0],
                 summary_msg,
                 tool_message,
                 *plan.keep,
                 *new_tail
-            ]
+            ])
 
 
 
@@ -644,7 +645,7 @@ class LLMRepl:
         )
     def _execute_tools(self, tool_calls: List[Any]) -> List[ToolCallResult]:
         results: List[ToolCallResult] = []
-        with patch_stdout():
+        with patch_stdout(True):
             console.print(
                 f"[bold blue][*] Model requested {len(tool_calls)} tool call(s).[/bold blue]")
 
@@ -682,8 +683,8 @@ class LLMRepl:
                     logger.exception("Tool %s failed", name)
                     content = f"Error executing tool {name} with args {args}: {e}"
 
-                # Always return a result, including for malformed arguments and errors.
-                results.append(ToolCallResult(tool_call_id=tc.id, name=name, content=content))
+            # Always return a result, including for malformed arguments and errors.
+            results.append(ToolCallResult(tool_call_id=tc.id, name=name, content=content))
 
         return results
 
@@ -715,7 +716,7 @@ class LLMRepl:
                 for i, result in enumerate(tool_results):
                     result["content"] = (
                         f"Tool output truncated; original: {result_length} chars. "
-                        f"see {tool_logger.log_file} for "
+                        f"see {_relative_paths_helper(tool_logger.log_file)} for " # type: ignore
                         f"full output. tag: {_id}\n"
                         f"{result.to_message(_mtr).get('content')}"
                         )
@@ -731,7 +732,7 @@ class LLMRepl:
 #
     def _loop_status_text(self) -> str:
         if self.loop_task is None:
-            return "ᓚᘏᗢ"
+            return "[turqoise4]ᓚᘏᗢ[[turqoise4]]"
         remaining = self.loop_task.get_remaining_time()   # now side-effect free
         return f"Loop: {remaining}" if remaining else "loop idle"
 
@@ -773,127 +774,63 @@ class LLMRepl:
         warning_sent = False
         SEND_TIMEOUT = 60
 
-        with patch_stdout():
-            while True:
-                # Let's mark that the message was sent
-                # self._draw_end_rule(True)
-                console.print(f"[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
-                if self.status == "stop":
-                    self.current_bg_task.stop()
-                    return "stopped"
-                self.no_reply = False
-                if self.api.usage.context_pct >= 80.0 and not warning_sent:
-                    # warn llm.
-                    try:
-                        warning = self.prompt_gen.generate_prompt(
-                            "warning", {
-                                "snippets": ["context_size_warning"]
-                            },
-                            context_pct=self.api.usage.context_pct,
-                            remaining_tokens=self.api.usage.remaining_tokens
-                            )
-                    except Exception as e:
-                        logger.error(f"Error generating prompt: {e}")
-                        raise e
-
-                    console.rule(f"[dim]warning - {self.api.usage.summary()}[dim]")
-                    current_messages.append({"role": "system", "content": warning})
-                    warning_sent = True
+        while True:
+            # Let's mark that the message was sent
+            # self._draw_end_rule(True)
+            with patch_stdout(True):
+                console.print(f"\n[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
+            if self.status == "stop":
+                self.current_bg_task.stop()
+                return "stopped"
+            self.no_reply = False
+            if self.api.usage.context_pct >= 80.0 and not warning_sent:
+                # warn llm.
                 try:
-                    # json.dumps(self.tool_schemas) # defensive validation
-                    self.agent_active = True
-                    response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
-                    msg = response.choices[0].message
-                    # print((self.api.model, self.api.port, self.api.base_url))
-                    # print("CONTENT:", repr(msg.content))
-                    # print("TOOL CALLS:", msg.tool_calls)
-                    # print("FINISH REASON:", response.choices[0].finish_reason)
-                    assistant_msg = msg.model_dump(exclude_none=True)
-                    # console.print((pformat(str(assistant_msg))))
-                    if msg.tool_calls:
-                        with self._state_lock:
-                            self.messages.append(assistant_msg)
-                        current_messages.append(assistant_msg)
-                        self.api.usage.record(response.usage, turn=len(self.messages))
-                        console.print(f"[dim]{self.api.usage.summary()}[/dim]")
+                    warning = self.prompt_gen.generate_prompt(
+                        "warning", {
+                            "snippets": ["context_size_warning"]
+                        },
+                        context_pct=self.api.usage.context_pct,
+                        remaining_tokens=self.api.usage.remaining_tokens
+                        )
+                except Exception as e:
+                    logger.error(f"Error generating prompt: {e}")
+                    raise e
 
-                        tool_results = self._get_tool_results(msg.tool_calls)
-                        if not tool_results:
-                            continue
+                console.rule(f"[dim]warning - {self.api.usage.summary()}[dim]")
+                current_messages.append({"role": "system", "content": warning})
+                warning_sent = True
+            try:
+                # json.dumps(self.tool_schemas) # defensive validation
+                self.agent_active = True
+                with patch_stdout(True):
+                    for msg in current_messages[-6:]:
+                        console.print(msg["role"], repr(msg.get("content", ""))[:100])
+                response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
+                msg = response.choices[0].message
+                # print((self.api.model, self.api.port, self.api.base_url))
+                # print("CONTENT:", repr(msg.content))
+                # print("TOOL CALLS:", msg.tool_calls)
+                # print("FINISH REASON:", response.choices[0].finish_reason)
+                assistant_msg = msg.model_dump(exclude_none=True)
+                # console.print((pformat(str(assistant_msg))))
+                if msg.tool_calls:
+                    with self._state_lock:
+                        self.messages.append(assistant_msg)
+                    current_messages.append(assistant_msg)
+                    self.api.usage.record(response.usage, turn=len(self.messages))
+                    console.print(f"[dim]{self.api.usage.summary()}[/dim]")
 
-                        with self._state_lock:
-                            self.messages.extend(tool_results)
-                        current_messages.extend(tool_results)
-
-                        if self.api.usage.context_pct >= 90.0:
-                            # Emergency trim
-                            self._trim_context()
-                            console.rule(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]")
-                            current_messages.append({"role": "system", "content": "Emergency trim context."})
-                            with self._state_lock:
-                                current_messages = list(self.messages)
-                                current_messages.append({
-                                    "role": "system",
-                                    "content": "Your conversation history has been compressed. "
-                                            "Continue from the supplied historical summary."
-                                })
-
-                        # DEBUG: line below
-                        #console.print(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
-                        elapsed = time.time() - start_time
+                    tool_results = self._get_tool_results(msg.tool_calls)
+                    if not tool_results:
                         continue
 
-                    content = msg.content or ""
                     with self._state_lock:
-                        self.messages.append({"role": "assistant", "content": content})
+                        self.messages.extend(tool_results)
+                    current_messages.extend(tool_results)
 
-                    # Calculate elapsed time
-                    elapsed = time.time() - start_time
-
-                    # Check for tool re-enable requests in assistant response
-                    # Pattern: /tool enable <tool_name> or /tool request <tool_name>
-                    if "/tool" in content:
-                        import re
-                        # Match /tool enable <name> or /tool request <name>
-                        tool_requests = re.findall(r'/tool\s+(?:enable|request)\s+(\w+)', content)
-                        if tool_requests:
-                            for tool_name in tool_requests:
-                                if self.tool_registry.enable_tool_if_not_banned(tool_name):
-                                    console.print(f"[green]Re-enabled tool on request: {tool_name}[/green]")
-                                else:
-                                    console.print(f"[red]Cannot re-enable '{tool_name}': tool is banned or not found[/red]")
-                        elif "/tool" in content and not tool_requests:
-                            # Legacy: just "/tool" enables all
-                            tools_command(self, "on")
-
-                    if content:
-                        self._draw_end_rule(True)
-                        console.print("\n") # newline, seems hacky
-                        console.print(Panel(Markdown(content), title="Assistant"))
-
-
-                    else:
-                        console.print("[bold red]Assistant: (No response)[/bold red]")
-                    with self._state_lock:
-                        self.no_reply = False
-
-                    # Only print time if it exceeds 5 seconds
-                    if elapsed > 5.0:
-                        console.print(f"[dim]⏱️  Turn completed in {elapsed:.2f}s[/dim]")
-                        # self.redraw_prompt = True
-                        self.no_reply = False
-                        self._draw_statusbar()
-                        # Hack:
-                        prefix = self.get_input_prompt_prefix()
-                        console.print(prefix, end="")
-
-
-                    self._enqueue_profile_snapshot(user_input, content)
-                    self.agent_active = False
-                    return content
-                except Exception as e:
-                    self.no_reply = False
-                    if "request exceeds the context window" in str(e):
+                    if self.api.usage.context_pct >= 90.0:
+                        # Emergency trim
                         self._trim_context()
                         console.rule(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]")
                         current_messages.append({"role": "system", "content": "Emergency trim context."})
@@ -904,17 +841,84 @@ class LLMRepl:
                                 "content": "Your conversation history has been compressed. "
                                         "Continue from the supplied historical summary."
                             })
-                        continue
-                    if isinstance(e, InternalServerError):
-                        return f"API Error: {e}"
-                    elapsed = time.time() - start_time
-                    if elapsed > SEND_TIMEOUT:
-                        self.agent_active = False
-                        raise APIError(f"Response timed out after {elapsed:.2f}s")
-                    if not self._handle_api_error(e):
 
-                        self.agent_active = False
-                        return f"API Error: {e}"
+                    # DEBUG: line below
+                    #console.print(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
+                    elapsed = time.time() - start_time
+                    continue
+
+                content = msg.content or ""
+                with self._state_lock:
+                    self.messages.append({"role": "assistant", "content": content})
+
+                # Calculate elapsed time
+                elapsed = time.time() - start_time
+
+                # Check for tool re-enable requests in assistant response
+                # Pattern: /tool enable <tool_name> or /tool request <tool_name>
+                if "/tool" in content:
+                    import re
+                    # Match /tool enable <name> or /tool request <name>
+                    tool_requests = re.findall(r'/tool\s+(?:enable|request)\s+(\w+)', content)
+                    if tool_requests:
+                        for tool_name in tool_requests:
+                            if self.tool_registry.enable_tool_if_not_banned(tool_name):
+                                console.print(f"[green]Re-enabled tool on request: {tool_name}[/green]")
+                            else:
+                                console.print(f"[red]Cannot re-enable '{tool_name}': tool is banned or not found[/red]")
+                    elif "/tool" in content and not tool_requests:
+                        # Legacy: just "/tool" enables all
+                        tools_command(self, "on")
+
+                if content:
+                    self._draw_end_rule(True)
+                    console.print("\n") # newline, seems hacky
+                    console.print(Panel(Markdown(content), title="Assistant"))
+
+
+                else:
+                    console.print("[bold red]Assistant: (No response)[/bold red]")
+                with self._state_lock:
+                    self.no_reply = False
+
+                # Only print time if it exceeds 5 seconds
+                if elapsed > 5.0:
+                    console.print(f"[dim]⏱️  Turn completed in {elapsed:.2f}s[/dim]")
+                    # self.redraw_prompt = True
+                    self.no_reply = False
+                    self._draw_statusbar()
+                    # Hack:
+                    prefix = self.get_input_prompt_prefix()
+                    console.print(prefix, end="")
+
+
+                self._enqueue_profile_snapshot(user_input, content)
+                self.agent_active = False
+                return content
+            except Exception as e:
+                self.no_reply = False
+                if "request exceeds the context window" in str(e):
+                    self._trim_context()
+                    console.rule(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]")
+                    current_messages.append({"role": "system", "content": "Emergency trim context."})
+                    with self._state_lock:
+                        current_messages = list(self.messages)
+                        current_messages.append({
+                            "role": "system",
+                            "content": "Your conversation history has been compressed. "
+                                    "Continue from the supplied historical summary."
+                        })
+                    continue
+                if isinstance(e, InternalServerError):
+                    return f"API Error: {e}"
+                elapsed = time.time() - start_time
+                if elapsed > SEND_TIMEOUT:
+                    self.agent_active = False
+                    raise APIError(f"Response timed out after {elapsed:.2f}s")
+                if not self._handle_api_error(e):
+
+                    self.agent_active = False
+                    return f"API Error: {e}"
 
 
 
@@ -1056,6 +1060,8 @@ class LLMRepl:
         # If the user typed stuff while the model was busy, start the next turn now.
         try:
             next_input = self._drain_pending_inputs()
+            if next_input is None or next_input == "None" or not next_input.strip():
+                return
             console.print("[dim]Processing queued user input...[/dim]")
             console.print(f'[dim][i]"{next_input}"[/i][/dim]')
 
@@ -1088,8 +1094,7 @@ class LLMRepl:
             if isinstance(status, LoopTask):
                 self.loop_task = status
             if isinstance(status, Message):
-
-            return status
+                return status.to_dict()
 
     def _status_fields(self) -> dict:
         """Single source of truth for status display. Never raises, never mutates."""
@@ -1143,7 +1148,7 @@ class LLMRepl:
         asyncio.run(self._run())
 
 
-    def process_slash_commands(self, user_input) -> (bool, Any):
+    def process_slash_commands(self, user_input) -> Tuple[bool, Any]:
         def _is_command(command):
             return command in self.cmd_dispatcher.commands
 
@@ -1205,10 +1210,11 @@ class LLMRepl:
             result = ""
             self.user_messages=[]
 
-            # UI pump handles async tasks
-            ui_pump = asyncio.create_task(self._background_ui_pump())
+
 
             with patch_stdout(True):
+                # UI pump handles async tasks
+                ui_pump = asyncio.create_task(self._background_ui_pump())
                 self.no_reply=False
                 while True:
                     try:
@@ -1243,11 +1249,11 @@ class LLMRepl:
                             except queue.Empty:
                                 pass
 
-                        if not user_input or user_input == "":
+                        if not user_input or user_input in ("", "None"): # Weird bug
                             if not self.loop_task:
                                 self.status="run"
                                 user_input = await self.get_user_prompt(prompt_session)
-                                    # logger.warning(user_input)
+                                # logger.warning(user_input)
                                 if user_input in ["keyboard_interrupt", "stop", "quit"]:
                                     self._draw_end_rule()
                                     raise KeyboardInterrupt("Interrupted by User")
@@ -1263,7 +1269,7 @@ class LLMRepl:
                                 user_input += msg
 
 
-                        if not user_input:
+                        if not user_input.strip():
                             # Existing agent sessions are still active. Or not. Regardless
                             continue
 
@@ -1271,7 +1277,7 @@ class LLMRepl:
                         status, result = self.process_slash_commands(user_input)
                         if status == True:
                             if result == "quit": # was slashcommand, do not pass go
-                                break
+                                raise KeyboardInterrupt("Quit command received")
                             console.print(result)
                             continue
                             user_input = ""
@@ -1279,11 +1285,18 @@ class LLMRepl:
 
 
                         # Pass to LLM
-                        if not self.agent_active:
+                        #
+
+                        if (self.api
+                            and self.api.endpoint
+                            and self.api.endpoint.is_active == False):
+                                self.agent_active = False
+                        if (not self.agent_active):
                             self._start_background_send(user_input)
                         else:
                             # Getting false positive here
                             self.pending_user_inputs.put(user_input)
+                            user_input = ""
                             console.print("[dim]Queued input; assistant is still processing.[/dim]")
                     except EOFError:
                         console.print("[bold red]Goodbye![/bold red]")
@@ -1326,6 +1339,7 @@ class LLMRepl:
                     pass
 
             self.shutdown()
+            _stop_log_listener()
 
 
     def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:

@@ -29,6 +29,14 @@ def _role(m: Any) -> str:
     return str(getattr(m, "role", ""))
 
 
+def _relative_paths_helper(path: str) -> str:
+    if not ("/" in path or "\\" in path):
+        # if path.startswith(".\\") or path.startswith(r"./"):
+        #     path = path.lstrip("./\\")
+        path = str(Path(path).resolve())
+    return path
+
+
 def normalize_messages( messages, provider):
     normalized = []
 

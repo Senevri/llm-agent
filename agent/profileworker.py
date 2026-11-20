@@ -5,8 +5,9 @@ import json
 from typing import List, Dict
 from user_profile_manager import ContextSnapshot
 import logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+from custom_logger import setup_logging
+logger = setup_logging(__name__, level="WARNING")
+logger.setLevel(logging.WARNING)
 
 #from llm_repl import LLMRepl
 
