@@ -593,7 +593,7 @@ class LLMRepl:
             ):
                 if count == 0:
                     self.tool_registry.disable_tool(tool_name)
-                    continue
+                    break
 
                 original_index = len(unused_tools) - 1 - index
 
@@ -838,7 +838,7 @@ class LLMRepl:
                             current_messages = list(self.messages)
                             current_messages.append({
                                 "role": "system",
-                                "content": "Your conversation history has been compressed. "
+                                "content": "Conversation history compressed. "
                                         "Continue from the supplied historical summary."
                             })
 
