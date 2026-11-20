@@ -51,6 +51,24 @@ def discover_candidate_dir(start: Path, test: Path):
         candidate_dir = candidate_dir.parent
     return candidate_dir
 
+# TODO: Migrate messages from plain dicts to this dataclass
+@dataclass
+class Message:
+    role: str
+    content: str
+    timestamp: float = field(default_factory=time.time)
+    send_time: float | None = None
+    params: dict = field(default_factory=dict)
+
+    def to_dict(self):
+        return {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp,
+            "send_time": self.send_time,
+            "params": self.params,
+        }
+
 @dataclass
 class UsageTracker:
     _window: deque = field(default_factory=deque, repr=False, init=False, compare=False)

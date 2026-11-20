@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import re
 import sys
+import time
 import yaml
 import inspect
 import textwrap
@@ -12,7 +13,7 @@ import logging
 from httpx2 import ConnectError, HTTPError
 
 from tools import WORKSPACE_DIR
-from llm_utils import _role
+from llm_utils import _role, Message
 from backend import BACKEND_MAP, LLMBackend
 from custom_logger import setup_logging
 
@@ -412,8 +413,42 @@ def tools_command(repl, *args, **kwargs):
                 repl.tool_registry.disable_tool(arg)
             return
         elif "enable" == args[0]:
+            # Enable specific tools, respecting ban list
             for arg in args[1:]:
-                repl.tool_registry.enable_tool(arg)
+                if repl.tool_registry.enable_tool_if_not_banned(arg):
+                    console.print(f"[green]Enabled tool: {arg}[/green]")
+                else:
+                    console.print(f"[red]Cannot enable '{arg}': tool is banned or not found[/red]")
+            return
+        elif "enable_all" == args[0]:
+            # Enable all non-banned tools
+            enabled_count = 0
+            for tool_name in repl.tool_registry._tools.keys():
+                if not repl.tool_registry.is_banned(tool_name):
+                    repl.tool_registry.enable_tool(tool_name)
+                    enabled_count += 1
+            console.print(f"[green]Enabled {enabled_count} non-banned tools[/green]")
+            return
+        elif "ban" == args[0]:
+            # Ban tools permanently
+            for arg in args[1:]:
+                repl.tool_registry.ban_tool(arg)
+                console.print(f"[red]Banned tool: {arg}[/red]")
+            return
+        elif "unban" == args[0]:
+            # Unban tools
+            for arg in args[1:]:
+                repl.tool_registry.unban_tool(arg)
+                console.print(f"[green]Unbanned tool: {arg}[/green]")
+            return
+        elif "banned" == args[0]:
+            # List banned tools
+            banned = repl.tool_registry.get_banned_tools()
+            console.print("[red]Banned tools:[/red]")
+            if banned:
+                console.print(f' - {", ".join(banned)}')
+            else:
+                console.print("  (none)")
             return
 
     # console.print("[yellow]Available skills:[/yellow]")
@@ -424,6 +459,12 @@ def tools_command(repl, *args, **kwargs):
     console.print(f' - {", ".join(repl.tool_registry.list_tools())}')
     console.print("[yellow]Disabled tools:[/yellow]")
     console.print(f' - {", ".join(repl.tool_registry._disabled_tools)}')
+    console.print("[yellow]Banned tools:[/yellow]")
+    banned = repl.tool_registry.get_banned_tools()
+    if banned:
+        console.print(f' - {", ".join(banned)}')
+    else:
+        console.print("  (none)")
 
 
 def task_command(repl, *args, **kwargs):
@@ -451,6 +492,16 @@ def task_command(repl, *args, **kwargs):
             }
         )
         console.print(f"[green]Task {task_text[:40]}[...] added.[/green]")
+        if len(kwargs) > 0:
+            if "delay" in kwargs:
+                delay_length = kwargs["delay"]
+                if delay_length.isnumeric():
+                    delay_length = int(delay_length)
+                    #repl.loop_task.set_end(datetime.now() + timedelta(seconds=delay_length))
+                message = Message("user", task_text)
+                message.send_time = time.time() + delay_length
+                message.params["task_id"] = task_id
+                repl.input_queue.put(message)
     else:
         console.print("[yellow]Available tasks:[/yellow]")
         for idx, task in repl.tasks.items():

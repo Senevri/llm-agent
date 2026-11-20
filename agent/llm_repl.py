@@ -63,7 +63,7 @@ if AGENT_DIR not in sys.path:
 
 from llm_utils import (
     size_bytes, estimate_tokens, normalize_messages, discover_candidate_dir,
-    robust_json_extract, balanced_braces_extract, _role)
+    robust_json_extract, balanced_braces_extract, _role, Message)
 from profileworker import ProfileWorker
 
 def _load_dotenv(path: Path = AGENT_DIR / ".env") -> None:
@@ -582,14 +582,22 @@ class LLMRepl:
         # Disable unused tools TODO: Figure out better rules for this
         # + "LLM can ask for a tool" mechanism
         unused_tools = self.tool_registry.get_tool_call_counts_sorted()
-        for tool_name, count in unused_tools:
-            # math
-            if count == 0:
-                self.tool_registry.disable_tool(tool_name)
-            elif (unused_tools.index((tool_name, count))>len(unused_tools)//2
-                and count < unused_tools[0][1]//10):
-                self.tool_registry.disable_tool(tool_name)
-            # math
+
+        if unused_tools:
+            max_count = unused_tools[0][1]
+            threshold = max_count / 10
+
+            for index, (tool_name, count) in enumerate(
+                reversed(unused_tools)
+            ):
+                if count == 0:
+                    self.tool_registry.disable_tool(tool_name)
+                    continue
+
+                original_index = len(unused_tools) - 1 - index
+
+                if original_index < len(unused_tools) // 2 and count < threshold:
+                    self.tool_registry.disable_tool(tool_name)    # math
 
         tool_message = {
             "role": "assistant",
@@ -841,8 +849,23 @@ class LLMRepl:
 
                     # Calculate elapsed time
                     elapsed = time.time() - start_time
-                    if ("/tool" in content):
-                        tools_command(self, "on")
+
+                    # Check for tool re-enable requests in assistant response
+                    # Pattern: /tool enable <tool_name> or /tool request <tool_name>
+                    if "/tool" in content:
+                        import re
+                        # Match /tool enable <name> or /tool request <name>
+                        tool_requests = re.findall(r'/tool\s+(?:enable|request)\s+(\w+)', content)
+                        if tool_requests:
+                            for tool_name in tool_requests:
+                                if self.tool_registry.enable_tool_if_not_banned(tool_name):
+                                    console.print(f"[green]Re-enabled tool on request: {tool_name}[/green]")
+                                else:
+                                    console.print(f"[red]Cannot re-enable '{tool_name}': tool is banned or not found[/red]")
+                        elif "/tool" in content and not tool_requests:
+                            # Legacy: just "/tool" enables all
+                            tools_command(self, "on")
+
                     if content:
                         self._draw_end_rule(True)
                         console.print("\n") # newline, seems hacky
@@ -870,6 +893,18 @@ class LLMRepl:
                     return content
                 except Exception as e:
                     self.no_reply = False
+                    if "request exceeds the context window" in str(e):
+                        self._trim_context()
+                        console.rule(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]")
+                        current_messages.append({"role": "system", "content": "Emergency trim context."})
+                        with self._state_lock:
+                            current_messages = list(self.messages)
+                            current_messages.append({
+                                "role": "system",
+                                "content": "Your conversation history has been compressed. "
+                                        "Continue from the supplied historical summary."
+                            })
+                        continue
                     if isinstance(e, InternalServerError):
                         return f"API Error: {e}"
                     elapsed = time.time() - start_time
@@ -877,6 +912,7 @@ class LLMRepl:
                         self.agent_active = False
                         raise APIError(f"Response timed out after {elapsed:.2f}s")
                     if not self._handle_api_error(e):
+
                         self.agent_active = False
                         return f"API Error: {e}"
 
@@ -972,6 +1008,30 @@ class LLMRepl:
 
          return commands, command_definitions
 
+    def _drain_pending_inputs(self) -> str | None:
+        """Pop everything queued so far and join into one input."""
+        parts: list[str] = []
+        while True:
+            try:
+                parts.append(self.pending_user_inputs.get_nowait())
+            except queue.Empty:
+                break
+        # Also pull any due Message objects from input_queue
+        now = time.time()
+        deferred = []
+        while True:
+            try:
+                item = self.input_queue.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(item, Message) and item.send_time and item.send_time <= now:
+                parts.append(item.content)
+            else:
+                deferred.append(item)
+        for item in deferred:
+            self.input_queue.put(item)
+        return "\n".join(p for p in parts if p) or None
+
     def _poll_background_tasks(self) -> None:
         """Non-blocking check for background send completion/output."""
         proc = self.current_bg_task
@@ -995,7 +1055,7 @@ class LLMRepl:
 
         # If the user typed stuff while the model was busy, start the next turn now.
         try:
-            next_input = self.pending_user_inputs.get_nowait()
+            next_input = self._drain_pending_inputs()
             console.print("[dim]Processing queued user input...[/dim]")
             console.print(f'[dim][i]"{next_input}"[/i][/dim]')
 
@@ -1027,6 +1087,8 @@ class LLMRepl:
             # logger.info(f"Command status: {status}")
             if isinstance(status, LoopTask):
                 self.loop_task = status
+            if isinstance(status, Message):
+
             return status
 
     def _status_fields(self) -> dict:
@@ -1152,7 +1214,8 @@ class LLMRepl:
                     try:
                         # live update model
                         #self.no_reply = False
-                        self._draw_statusbar()
+                        if not (self.loop_task and self.agent_active):
+                            self._draw_statusbar()
 
                         # Get User Input
                         user_input = ""
@@ -1163,7 +1226,7 @@ class LLMRepl:
                                 # DO NOT call get_next_input() here, or we pop content prematurely.
                                 await asyncio.sleep(0.5)
                             # Priority 2: Loop task has more inputs
-                            if isinstance(self.loop_task, SimpleLoopTask):
+                            if isinstance(self.loop_task, SimpleLoopTask) and not self.agent_active:
                                 next_input = self.loop_task.get_next_input() or ""
                                 # tick
                                 if next_input:
@@ -1181,12 +1244,13 @@ class LLMRepl:
                                 pass
 
                         if not user_input or user_input == "":
-                            self.status="run"
-                            user_input = await self.get_user_prompt(prompt_session)
-                                # logger.warning(user_input)
-                            if user_input in ["keyboard_interrupt", "stop", "quit"]:
-                                self._draw_end_rule()
-                                raise KeyboardInterrupt("Interrupted by User")
+                            if not self.loop_task:
+                                self.status="run"
+                                user_input = await self.get_user_prompt(prompt_session)
+                                    # logger.warning(user_input)
+                                if user_input in ["keyboard_interrupt", "stop", "quit"]:
+                                    self._draw_end_rule()
+                                    raise KeyboardInterrupt("Interrupted by User")
 
 
                         messages = self.user_messages
