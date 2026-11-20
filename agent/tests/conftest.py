@@ -4,7 +4,7 @@ import pytest, yaml
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
 
-def load_messages(name="conio2hack.yaml"):
+def load_messages(name="test_messages.yaml"):
     return yaml.safe_load((FIXTURES / name).read_text())
 
 

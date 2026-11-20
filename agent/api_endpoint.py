@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Dict, Type
+from typing import Dict, Type, Optional, List
 
 import httpx2
 from openai import OpenAI
@@ -18,6 +18,9 @@ from model_catalog import MODEL_CATALOGS
 from get_ip import get_gateway_ip
 
 logger = setup_logging(__name__) # Could use unifiedagent
+
+class APIError(Exception):
+    pass
 
 class APIEndpoint:
     """Base class for LLM API endpoints."""
@@ -316,6 +319,155 @@ class MistralApiEndpoint(APIEndpoint):
         logger.info(f"Mistral model resolved to: {self.model}")
         return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
 
+# --- AI HORDE ---
+# from llm_utils import Message
+
+# class AiHordeClientChat:
+
+#     def __init__(self, base_url, api_key):
+#         self.base_url = base_url
+#         self.api_key = api_key
+#         self._client = None
+
+#     @property
+#     def completions(self):
+#         # TODO: There is an asyncclient but the endpoint is naturally async...
+#         self._client = self._client or httpx2.Client(base_url=self.base_url)
+#         return self
+
+#     def get_message(self, messages):
+#         message_template = {
+#             "role": "user",
+#             "content": {},
+#             "name": "string",
+#             "tool_calls": [
+#                 {
+#                 "id": "string",
+#                 "type": "function",
+#                 "function": {
+#                     "name": "string",
+#                     "arguments": "string"
+#                 }
+#                 }
+#             ],
+#             "tool_call_id":
+#         }
+#         return [message_template.copy().update(
+#             {"role": m["role"],
+#              "content": m["content"],
+#              "tool_calls": m.get("tool_calls",[])}) for m in messages]
+
+
+#     # Synchronous wrapper
+#     def create(self, model, messages, tools=None, tool_choice=None):
+#         self.messages=messages
+#         self.tools=tools
+#         self.tool_choice = tool_choice
+#         if not self._client or not isinstance(self._client, httpx2.Client):
+#             raise APIError("No client set in ApiHorde")
+
+#         request = self._client.post(
+#             f"{self.base_url}/generate/chat/async",
+#             content="",
+#             data={
+
+#                 "model": model,
+#                 "messages": messages,
+#             },
+#             headers={
+#                 "apikey": self.api_key
+
+#             }
+#         )
+
+
+
+# TODO: Should we inherit OpenAI?
+
+class AiHordeClient:
+    # Implements openai-like interface, for now.
+    def __init__(self, base_url, api_key):
+        self.chat = AiHordeClientChat(base_url, api_key)
+
+
+class AIHordeEndpoint(APIEndpoint):
+    """AI Horde through its OpenAI-compatible chat front."""
+    def __init__(self, model: str = "", base_url: str = "", port="443"):
+        super().__init__(model, base_url=base_url)
+
+        self.base_url = os.getenv(
+            "AIHORDE_BASE_URL",
+            "https://oai.aihorde.net/v1"
+        )
+        self.port = port
+        self.api_key = os.getenv("AIHORDE_API_KEY", "")
+
+        if not self.api_key:
+            raise RuntimeError("AIHORDE_API_KEY not set.")
+
+        self.ctx_size = 8192
+
+        self.available_models = self.get_models()
+
+        if model:
+            self.model = model
+        elif self.available_models:
+            self.model = self.available_models[0]
+        else:
+            self.model = ""
+
+    def get_models(self) -> list[str]:
+        try:
+            response = httpx2.get(
+                f"{self.base_url}/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=10,
+            )
+            response.raise_for_status()
+
+            data = response.json().get("data", [])
+            return [m["id"] for m in data if "id" in m]
+
+        except Exception as e:
+            logger.error(f"Failed to retrieve AI Horde models: {e}")
+            return []
+
+    def get_client(self) -> tuple[OpenAI, str]:
+        logger.info(f"AI Horde model resolved to: {self.model}")
+
+        return (
+            OpenAI(
+                base_url=self.base_url,
+                api_key=self.api_key,
+            ),
+            self.model,
+        )
+
+
+class OpenRouterEndpoint(APIEndpoint):
+    """OpenRouter endpoint for accessing multiple LLM providers."""
+    def __init__(self, model: str = "", base_url: str = "", port="443"):
+        super().__init__(model, base_url=base_url)
+        self.base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        self.ctx_size = 128000  # OpenRouter supports large context models
+        self.available_models = MODEL_CATALOGS["openrouter"]()
+        self.model = model or (self.available_models[0] if self.available_models else "")
+        self.port = port
+        self.api_key = os.getenv("OPENROUTER_API_KEY")
+        self.rate_limits = {
+            "tokens_per_minute": 100000,
+            "requests_per_second": 10
+        }
+        if not self.api_key:
+            raise RuntimeError("OPENROUTER_API_KEY not set.")
+
+    def get_models(self) -> list[str]:
+        return self.available_models
+
+    def get_client(self) -> tuple[OpenAI, str]:
+        logger.info(f"OpenRouter model resolved to: {self.model}")
+        return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
+
 
 BACKEND_MAP: Dict[str, Type[APIEndpoint]] = {
             "ollama": OllamaApiEndpoint,
@@ -323,5 +475,7 @@ BACKEND_MAP: Dict[str, Type[APIEndpoint]] = {
             "koboldcpp": KoboldCppApiendpoint,
             "llamacpp": LlamaApiEndpoint,
             "openai": OpenAIEndpoint,
-            "groq": OpenAIEndpoint
+            "groq": OpenAIEndpoint,
+            "aihorde": AIHordeEndpoint,
+            "openrouter": OpenRouterEndpoint
         }

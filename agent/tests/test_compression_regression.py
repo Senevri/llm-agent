@@ -2,8 +2,15 @@
 import copy
 import pytest
 
-from compressor import Compressor, TrimPlan
+import sys
+import pathlib
+
+SOURCE_DIR = pathlib.Path(__file__).parent.parent
+sys.path.append(str(SOURCE_DIR))
+
+from compress import Compressor, TrimPlan
 from conftest import FakeAPI, load_messages, repeat_turns, tag, uids
+
 
 
 class Repl:
