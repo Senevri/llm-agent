@@ -52,6 +52,14 @@ except ImportError:
     CONTEXT_TOOL_MAP = {}
     CONTEXT_TOOL_DEFINITION_MAP = {}
 
+
+try:
+    from tools.edit_tools import EDIT_TOOL_DEFINITIONS, EDIT_TOOL_MAP
+except ImportError:
+    EDIT_TOOL_DEFINITIONS = {}
+    EDIT_TOOL_MAP = {}
+
+
 from datetime import datetime, timezone
 
 # --- Configuration ---
@@ -381,7 +389,8 @@ TOOL_MAP = {
     **TMUX_TOOL_MAP,
     **CONTEXT_TOOL_MAP,
     "generate_cloud_image": generate_cloud_image,
-    "python_repl": python_repl
+    "python_repl": python_repl,
+    **EDIT_TOOL_MAP
 }
 
 bash_description = "Execute a bash command. Use /tmp or /workspace for writes."
@@ -563,13 +572,33 @@ tools = [
     }
 ]
 
+def add_tool_definitions(tool_def, tools):
+    if not isinstance(tool_def, dict) and not isinstance(tool_def, list):
+        tool_def = list(tool_def)
+    tool_names = [t.get("function", {}).get("name") for t in tools]
+    if isinstance(tool_def, list):
+        for td in tool_def:
+            name = td.get("function", {}).get("name")
+            if name in tool_names:
+                raise Exception(f"{name} already in tool definitions!")
+        tools.extend(tool_def)
+    else:
+        name = tool_def.get("function", {}).get("name")
+        if name in tool_names:
+                raise Exception(f"{name} already in tool definitions!")
+        tools.append(tool_def)
+    return tools
+
 # Add other tool definitions
-tools.extend(INTERNET_TOOL_DEFINITION_MAP.values())
-tools.extend(TMUX_TOOL_DEFINITION_MAP.values())
-tools.extend(CONTEXT_TOOL_DEFINITION_MAP.values())
-tools.append(CLOUD_IMAGE_GEN_TOOL_DEFINITION)
+tools = add_tool_definitions(INTERNET_TOOL_DEFINITION_MAP.values(), tools)
+tools = add_tool_definitions(TMUX_TOOL_DEFINITION_MAP.values(), tools)
+tools = add_tool_definitions(CONTEXT_TOOL_DEFINITION_MAP.values(), tools)
+tools = add_tool_definitions(CLOUD_IMAGE_GEN_TOOL_DEFINITION, tools)
+tools = add_tool_definitions(EDIT_TOOL_DEFINITIONS, tools)
 
 TOOL_DEFINITIONS = tools
+
+#print(tools)
 
 tools_ok = all(tool["function"]["name"] in TOOL_MAP for tool in TOOL_DEFINITIONS)
 if not tools_ok:

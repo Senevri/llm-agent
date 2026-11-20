@@ -17,7 +17,7 @@ except ImportError:
     from bash_tools import run_bash
     from web_search import create_web_search_tool, search_internet_sync
 from mediawikiapi import MediaWikiAPI, WikipediaPage
-mediawikiapi = MediaWikiAPI()
+
 
 logger = logging.getLogger("InternetTools")
 
@@ -140,6 +140,7 @@ def read_web_page(url: str) -> str:
 
 def wikipedia_lookup(topic: str, mode="summary") -> str:
     """Read a Wikipedia summary and return its content as plain text using w3m."""
+    mediawikiapi = MediaWikiAPI()
     modes = {
         "summary": mediawikiapi.summary,
         "page": mediawikiapi.page,
