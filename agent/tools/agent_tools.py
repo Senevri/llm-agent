@@ -32,6 +32,7 @@ except ImportError as e:
     INTERNET_TOOL_MAP = {}
     INTERNET_TOOL_DEFINITION_MAP = {}
 
+
 from tools.agent_deb_tools import install_deb_package
 from tools.bash_tools import run_bash
 
@@ -39,14 +40,16 @@ from tools.cloud_image_gen import CLOUD_IMAGE_GEN_TOOL_DEFINITION, generate_clou
 
 try:
     from tools.tmux_tools import TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
-except Exception:
+except ImportError as e:
+    logger.warning("Failed to import tmux_tools. Error:(e)")
     TMUX_TOOL_MAP = {}
     TMUX_TOOL_DEFINITION_MAP = {}
 
 # Import the new context tools
 try:
     from tools.context_tools import CONTEXT_TOOL_MAP, CONTEXT_TOOL_DEFINITION_MAP
-except ImportError:
+except ImportError as e:
+    logger.warning("Failed to import context_tools. Error:(e)")
     # Fallback if context_tools is not in the python path
     # In a real deployment, we'd ensure it's in the same directory or package
     CONTEXT_TOOL_MAP = {}
@@ -55,7 +58,8 @@ except ImportError:
 
 try:
     from tools.edit_tools import EDIT_TOOL_DEFINITIONS, EDIT_TOOL_MAP
-except ImportError:
+except ImportError as e:
+    logger.warning("Failed to import edit_tools. Error:(e)")
     EDIT_TOOL_DEFINITIONS = {}
     EDIT_TOOL_MAP = {}
 
@@ -397,180 +401,163 @@ bash_description = "Execute a bash command. Use /tmp or /workspace for writes."
 if platform.system() == "Windows":
     bash_description = "Execute a shell command. Use allowed directiories for writes."
 
+def _schema_boilerplate(schema):
+    return {
+        "type": "function",
+        "function": schema
+    }
+
 # Tool definitions for the LLM
 tools = [
     {
-        "type": "function",
-        "function": {
-            "name": "replace_lines",
-            "description": "Replace lines in a file. Safe for large files.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "lines": {"type": "array", "items": {"type": "string"}},
-                    "start_line": {"type": "integer"},
-                    "orig_lines": {"type": "array", "items": {"type": "string"}},
+        "name": "replace_lines",
+        "description": "Replace lines in a file. Safe for large files.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "lines": {"type": "array", "items": {"type": "string"}},
+                "start_line": {"type": "integer"},
+                "orig_lines": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["path", "lines", "start_line", "orig_lines"]
+        }
+    },
+    {
+
+        "name": "python_repl",
+        "description": "execute python code in a persistent REPL session",
+        "parameters": {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"]
+        }
+
+    },
+    {
+        "name": "run_bash",
+        "description": bash_description,
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"},
+                            "executable": {"type": "string", "description": "default: bash"},
+                            "cwd": {"type": "string", "description": f"default: {WORKSPACE_DIR}"},},
+            "required": ["command"]
+        }
+    },
+    {
+
+        "name": "read_file",
+        "description": "Read contents of a file by path. Fails if file is too large.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "start_line": {"type": "integer", "description": "Start line (inclusive), default 1"},
+                "max_lines": {"type": "integer", "description": "Maximum number of lines to read, default 0 (unlimited)"},
+                "max_chars": {"type": "integer", "description": "Maximum number of characters to read"}
                 },
-                "required": ["path", "lines", "start_line", "orig_lines"]
-            }
+            "required": ["path"]
         }
     },
     {
-        "type": "function",
-        "function": {
-            "name": "python_repl",
-            "description": "execute python code in a persistent REPL session",
-            "parameters": {
-                "type": "object",
-                "properties": {"code": {"type": "string"}},
-                "required": ["code"]
-            }
+        "name": "read_file_lines",
+        "description": "Read specific lines of a file (1-indexed), with added line numbers. Useful for large files"
+            " or to figure out what lines to replace when editing code. ",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "start_line": {"type": "integer", "description": "Start line (inclusive), default 1"},
+                "end_line": {"type": "integer", "description": "End line (inclusive)"}
+            },
+            "required": ["path"]
+        }
+
+    },
+    {
+        "name": "search_file",
+        "description": "Search for a LITERAL substring (case-sensitive). No regex, no boolean operators, no 'OR'. For pattern/boolean search, use run_bash with rg (ripgrep).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "query": {"type": "string"}
+            },
+            "required": ["path", "query"]
         }
     },
     {
-        "type": "function",
-        "function": {
-            "name": "run_bash",
-            "description": bash_description,
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"},
-                               "executable": {"type": "string", "description": "default: bash"},
-                               "cwd": {"type": "string", "description": f"default: {WORKSPACE_DIR}"},},
-                "required": ["command"]
-            }
+        "name": "list_files",
+        "description": "List files and directories in a given path.",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Path to list, defaults to current directory"},
+                            "filterstr": {"type": "string", "default": "*", "description": "Filter files by name, * wildcard"},
+                            "recurse": {"type": "boolean", "description": "Recurse into subdirectories"},
+                            },
+            "required": []
+        }
+
+    },
+    {
+        "name": "write_file",
+        "description": "Write content to a file by path.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"}
+            },
+            "required": ["path", "content"]
         }
     },
     {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read contents of a file by path. Fails if file is too large.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "start_line": {"type": "integer", "description": "Start line (inclusive), default 1"},
-                    "max_lines": {"type": "integer", "description": "Maximum number of lines to read, default 0 (unlimited)"},
-                    "max_chars": {"type": "integer", "description": "Maximum number of characters to read"}
-                    },
-                "required": ["path"]
-            }
+        "name": "append_file",
+        "description": "Append content to a file by path.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"}
+            },
+            "required": ["path", "content"]
         }
+
     },
     {
-        "type": "function",
-        "function": {
-            "name": "read_file_lines",
-            "description": "Read specific lines of a file (1-indexed), with added line numbers. Useful for large files"
-                " or to figure out what lines to replace when editing code. ",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "start_line": {"type": "integer", "description": "Start line (inclusive), default 1"},
-                    "end_line": {"type": "integer", "description": "End line (inclusive)"}
-                },
-                "required": ["path"]
-            }
+        "name": "now",
+        "description": "Get the current date and time in ISO 8601 format.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
+
     },
     {
-        "type": "function",
-        "function": {
-            "name": "search_file",
-            "description": "Search for a LITERAL substring (case-sensitive). No regex, no boolean operators, no 'OR'. For pattern/boolean search, use run_bash with rg (ripgrep).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "query": {"type": "string"}
-                },
-                "required": ["path", "query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List files and directories in a given path.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Path to list, defaults to current directory"},
-                               "filterstr": {"type": "string", "default": "*", "description": "Filter files by name, * wildcard"},
-                               "recurse": {"type": "boolean", "description": "Recurse into subdirectories"},
-                               },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write content to a file by path.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
-                },
-                "required": ["path", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "append_file",
-            "description": "Append content to a file by path.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
-                },
-                "required": ["path", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "now",
-            "description": "Get the current date and time in ISO 8601 format.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "install_deb_package",
-            "description": (
+        "name": "install_deb_package",
+        "description": (
             "Install a Debian/Ubuntu package into ~/.local WITHOUT root, by downloading the "
             ".deb and extracting it (dpkg -x). Binaries go to ~/.local/bin (on PATH). "
             "Does NOT run maintainer scripts and does NOT put shared libraries on the "
             "linker path. Use this when a package is available in apt sources but the "
             "system apt is locked (non-root, read-only /). For Python packages use "
             "`pip install --user` instead."
-            ),
-            "parameters": {
+        ),
+        "parameters": {
             "type": "object",
             "properties": {
                 "package": {"type": "string", "description": "Debian package name, e.g. 'jq' or 'libimage-exiftool-perl'."},
                 "with_deps": {"type": "boolean", "description": "Also fetch direct runtime dependencies (not already installed). Default true."}
             },
             "required": ["package"]
-            }
         }
+
     }
 ]
+
+tool_schemas = [_schema_boilerplate(schema) for schema in tools]
 
 def add_tool_definitions(tool_defs, tools):
     if isinstance(tool_defs, dict):
@@ -582,6 +569,9 @@ def add_tool_definitions(tool_defs, tools):
             raise ValueError(f"tool definition missing function.name: {td!r}")
         if name in seen:
             raise ValueError(f"{name} already in tool definitions!")
+        parameters = td.get("function", {}).get("parameters")
+        if parameters is None:
+            raise ValueError(f"tool {name} missing parameters!")
         seen.add(name)
         tools.append(td)
     return tools
@@ -593,13 +583,54 @@ def build_tool_definitions(*sources):
     return tools
 
 TOOL_DEFINITIONS = build_tool_definitions(
+    tool_schemas,
     INTERNET_TOOL_DEFINITION_MAP.values(),
     TMUX_TOOL_DEFINITION_MAP.values(),
     CONTEXT_TOOL_DEFINITION_MAP.values(),
     CLOUD_IMAGE_GEN_TOOL_DEFINITION,
-    EDIT_TOOL_DEFINITIONS,
+    EDIT_TOOL_DEFINITIONS
 )
-#print(tools)
+
+
+def normalize_tool_schema(tool):
+    parameters = tool.get("parameters", {})
+
+    # Already a complete JSON Schema?
+    if "type" in parameters and parameters["type"] == "object":
+            return tool
+
+    # Else: parameters are actually properties, most likely
+    required = tool.get("required", [])
+    additionaProperties = tool.get("additionalProperties", False)
+    for k, v in parameters.items():
+        # print(f"{k} - {v}")
+        if isinstance(v, dict):
+            _type = v.get("type")
+        else:
+            continue
+        if  not _type:
+            continue
+
+        if _type.endswith(" | null"):
+            parameters[k]["type"] = _type.split(" | null")[0]
+        else:
+            required.append(k)
+
+    tool = tool.copy()
+    tool["parameters"] = {
+        "type": "object",
+        "properties": parameters,
+        "required": required,
+        "additionalProperties": additionaProperties,
+    }
+
+    return tool
+
+
+for tool in TOOL_DEFINITIONS:
+    tool_fn = tool["function"]
+    tool["function"] = normalize_tool_schema(tool_fn)
+
 
 tools_ok = all(tool["function"]["name"] in TOOL_MAP for tool in TOOL_DEFINITIONS)
 if not tools_ok:
@@ -614,3 +645,24 @@ if __name__=="__main__":
     print(run_bash("rm ./test.txt"))
     print(json.dumps(TOOL_DEFINITIONS))
 # Moved test to tests; have not tested since.
+
+
+
+from jsonschema import Draft202012Validator
+
+
+# schema_json = json.dumps(TOOL_DEFINITIONS)
+# schema = json.loads(schema_json)
+
+# Draft202012Validator.check_schema(schema)
+
+for tool in TOOL_DEFINITIONS:
+    print(tool)
+    schema = tool["function"]["parameters"]
+    schema_json = json.dumps(schema)
+    schema = json.loads(schema_json)
+
+    try:
+        Draft202012Validator.check_schema(schema)
+    except Exception as e:
+        print(f"Invalid schema in {tool["function"]["name"]}: {e}")

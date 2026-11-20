@@ -15,11 +15,22 @@ All changes are tracked.  Nothing touches the filesystem until `save_file` is ca
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+SOURCE_DIR = Path(__file__).resolve().parent.parent.resolve()
+if SOURCE_DIR not in sys.path or Path("/agent") not in sys.path:
+    sys.path.append(str(SOURCE_DIR))
+
+
+from tools import WORKSPACE_DIR
+
+
 import ast
 import textwrap
 import traceback as tb_mod
 from dataclasses import dataclass, field
-from pathlib import Path
+
 from typing import Optional
 
 
@@ -458,7 +469,7 @@ TOOL_SCHEMAS = {
         ),
         "parameters": {
             "start": {"type": "integer", "description": "First line to replace (inclusive)."},
-            "end": {"type": "integer | null", "description": "Last line to replace (inclusive). If omitted, replaces from *start* to end."},
+            "end": {"type": "integer", "description": "Last line to replace (inclusive). If omitted, replaces from *start* to end."},
             "replacement": {"type": "string", "description": "Text to insert in place of the old lines. Use \\n for line breaks."},
         },
     },

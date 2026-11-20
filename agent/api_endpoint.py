@@ -60,6 +60,10 @@ class APIEndpoint:
         logger.info (f"Set base url to {self.base_url}")
         # raise Exception("debugging")
 
+    @property
+    def is_active(self):
+        return "not_implemented"
+
 class OllamaCloudEndpoint(APIEndpoint):
     # curl https://ollama.com/api/chat \
     # -H "Authorization: Bearer $OLLAMA_API_KEY" \
@@ -220,6 +224,20 @@ class LlamaApiEndpoint(APIEndpoint):
             self.ctx_size = self.get_context_size()
         except Exception as e:
             logger.warning(f"Failed to get context size: {e}")
+
+    @property
+    def is_active(self):
+        if not self.base_url:
+            return False
+        url = self.base_url.removesuffix("/v1") + "/slots"
+        response=httpx2.get(url, timeout=10)
+        response.raise_for_status()
+        slots = response.json()
+        for slot in slots:
+            # Assume just one now tho
+            if slot.get("is_processing", False):
+                return True
+        return False
 
 
 

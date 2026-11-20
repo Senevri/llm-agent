@@ -1,5 +1,6 @@
 # context_tools.py
 import os
+import sys
 import logging
 import shutil
 import tempfile
@@ -17,8 +18,13 @@ CONTEXT_FILES = {
 # --- Memory compression ---
 
 from pathlib import Path
+SOURCE_DIR = Path(__file__).resolve().parent.parent.resolve()
+if SOURCE_DIR not in sys.path or Path("/agent") not in sys.path:
+    sys.path.append(str(SOURCE_DIR))
+
 from tools import WORKSPACE_DIR
 
+default_workspace = str(WORKSPACE_DIR)
 
 MEMORY_PATH = WORKSPACE_DIR / "memory.md"
 MEMORY_COMPRESSION_THRESHOLD = int(

@@ -137,6 +137,7 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
         self._disabled_tools = set(t for t in os.getenv("DISABLED_TOOLS", "").split(",") if t)
+        self._banned_tools = set(t for t in os.getenv("BANNED_TOOLS", "").split(",") if t)
         self._allowed_paths = [Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(",") if p]
         self._allowed_paths.append(Path.cwd())
         self._tool_call_counts = {}
@@ -169,6 +170,38 @@ class ToolRegistry:
             self._disabled_tools = set()
             return
         self._disabled_tools.discard(name)
+
+    def enable_tool_if_not_banned(self, name: str) -> bool:
+        """Enable a tool by name only if it's not banned.
+
+        Returns:
+            True if tool was enabled, False if tool is banned or doesn't exist.
+        """
+        if name in self._banned_tools:
+            logger.warning(f"Tool '{name}' is banned and cannot be enabled.")
+            return False
+        if name not in self._tools:
+            logger.warning(f"Tool '{name}' not found in registry.")
+            return False
+        self._disabled_tools.discard(name)
+        return True
+
+    def ban_tool(self, name: str):
+        """Permanently ban a tool from being re-enabled."""
+        self._banned_tools.add(name)
+        self._disabled_tools.add(name)
+
+    def unban_tool(self, name: str):
+        """Remove a tool from the banned list."""
+        self._banned_tools.discard(name)
+
+    def is_banned(self, name: str) -> bool:
+        """Check if a tool is banned."""
+        return name in self._banned_tools
+
+    def get_banned_tools(self) -> List[str]:
+        """Get list of banned tools."""
+        return list(self._banned_tools)
 
 
     def get_tool(self, name: str) -> Optional[Tool]:

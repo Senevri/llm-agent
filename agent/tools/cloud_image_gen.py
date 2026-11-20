@@ -8,14 +8,16 @@ import random
 from pathlib import Path
 from typing import Optional
 
+
+
+SOURCE_DIR = Path(__file__).resolve().parent.parent.resolve()
+if SOURCE_DIR not in sys.path or Path("/agent") not in sys.path:
+    sys.path.append(str(SOURCE_DIR))
+
 from tools import WORKSPACE_DIR
 
 default_workspace = str(WORKSPACE_DIR)
 
-
-
-if Path(__file__).resolve().parent.parent not in sys.path and Path("/agent") not in sys.path:
-    sys.path.append("/agent")
 
 from dotenv import load_dotenv
 load_dotenv()

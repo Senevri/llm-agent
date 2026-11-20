@@ -60,6 +60,44 @@ class Compressor:
         return TrimPlan(keep=keep, compress=compress,
                         reason="forced" if force else "usage")
 
+
+    def _combine_contents_by_role(self, messages) -> List:
+        # Fast path: nothing to combine
+        if not any(
+            _role(a) == _role(b)
+            and _role(a) in ("assistant", "user")
+            and a.get("content")
+            and b.get("content")
+            for a, b in zip(messages, messages[1:])
+        ):
+            return messages
+
+        prev_msg = messages[0].copy()
+        new_msg_queue = []
+        for original_msg in messages[1:]:
+            msg = original_msg.copy()
+            if (
+                _role(msg) in ["assistant", "user"]
+                and prev_msg.get("content")
+                and msg.get("content")
+                and _role(msg) == _role(prev_msg)
+                ):
+                msg["content"] = prev_msg.get("content") + "\n" + msg["content"]
+                if msg.get("tool_calls", []):
+                    # Should never be here
+                    logger.warning(f"--- Merging tool calls! ---\n{msg}")
+                    prev_msg["tool_calls"] = prev_msg.get("tool_calls", []) + msg.get("tool_calls")
+            else:
+                new_msg_queue.append(prev_msg)
+            prev_msg = msg
+        # append final
+        new_msg_queue.append(prev_msg)
+        return new_msg_queue
+
+
+
+
+
     # def _plan(self, messages: List[Dict[str, Any]], force: bool = False) -> TrimPlan:
     #     """Pure: no mutation of the input, no I/O."""
     #     usage_pct = getattr(self.api.usage, "context_pct", 0.0) or 0.0

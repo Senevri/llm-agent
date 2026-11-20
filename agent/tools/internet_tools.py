@@ -7,8 +7,13 @@ from ddgs import DDGS
 from pathlib import Path
 import sys
 import platform
-if Path(__file__).resolve().parent.parent not in sys.path:
-    sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from pathlib import Path
+SOURCE_DIR = Path(__file__).resolve().parent.parent.resolve()
+if SOURCE_DIR not in sys.path or Path("/agent") not in sys.path:
+    sys.path.append(str(SOURCE_DIR))
+
+from tools import WORKSPACE_DIR
 
 try:
     from tools.bash_tools import run_bash
