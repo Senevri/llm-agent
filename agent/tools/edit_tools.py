@@ -400,150 +400,145 @@ def _check_ast(node: ast.AST) -> None:
 
 TOOL_REGISTRY: dict = {}
 
+TOOL_SCHEMAS = {
+    "load_file": {
+        "name": "load_file",
+        "description": (
+            "Load a file from disk into in-memory storage. "
+            "All subsequent edits happen in RAM until `save_file` is called."
+        ),
+        "parameters": {
+            "path": {"type": "string", "description": "Absolute or relative path to the file."},
+        },
+    },
+    "create_file": {
+        "name": "create_file",
+        "description": (
+            "Create a new empty in-memory file at *path*. "
+            "No disk I/O until `save_file` is called."
+        ),
+        "parameters": {
+            "path": {"type": "string", "description": "Path where the new file will be saved."},
+        },
+    },
+    "read_all_lines": {
+        "name": "read_all_lines",
+        "description": (
+            "Return all lines of the currently loaded in-memory file as a single string."
+        ),
+        "parameters": {},
+    },
+    "read_line_range": {
+        "name": "read_line_range",
+        "description": (
+            "Read a specific range of lines (1-indexed, inclusive). "
+            "Useful for examining function bodies, imports, etc."
+        ),
+        "parameters": {
+            "start": {"type": "integer", "description": "Start line (inclusive)."},
+            "end": {"type": "integer", "description": "End line (inclusive). If omitted, reads to end of file."},
+        },
+    },
+    "read_around_pattern": {
+        "name": "read_around_pattern",
+        "description": (
+            "Find the first occurrence of *pattern* (case-insensitive) and return "
+            "context lines around it. Useful for locating specific code sections."
+        ),
+        "parameters": {
+            "pattern": {"type": "string", "description": "Text to search for in any line."},
+            "context_lines": {"type": "integer", "description": "Number of lines before and after the match (default 5)."},
+        },
+    },
+    "replace_lines": {
+        "name": "replace_lines",
+        "description": (
+            "Replace lines *start*–*end* (1-indexed, inclusive) with new text. "
+            "Changes are in-memory only until `save_file`."
+        ),
+        "parameters": {
+            "start": {"type": "integer", "description": "First line to replace (inclusive)."},
+            "end": {"type": "integer | null", "description": "Last line to replace (inclusive). If omitted, replaces from *start* to end."},
+            "replacement": {"type": "string", "description": "Text to insert in place of the old lines. Use \\n for line breaks."},
+        },
+    },
+    "insert_after_line": {
+        "name": "insert_after_line",
+        "description": (
+            "Insert *text* after a given 1-indexed line number. "
+            "Useful for adding new functions or imports."
+        ),
+        "parameters": {
+            "after_line": {"type": "integer", "description": "Line number after which to insert."},
+            "text": {"type": "string", "description": "Text to insert. Use \\n for line breaks."},
+        },
+    },
+    "delete_lines": {
+        "name": "delete_lines",
+        "description": (
+            "Delete lines *start*–*end* (1-indexed, inclusive). "
+            "Changes are in-memory only until `save_file`."
+        ),
+        "parameters": {
+            "start": {"type": "integer", "description": "First line to delete."},
+            "end": {"type": "integer | null", "description": "Last line to delete. If omitted, deletes a single line."},
+        },
+    },
+    "append_text": {
+        "name": "append_text",
+        "description": (
+            "Append *text* to the end of the in-memory file."
+        ),
+        "parameters": {
+            "text": {"type": "string", "description": "Text to append. Use \\n for line breaks."},
+        },
+    },
+    "save_file": {
+        "name": "save_file",
+        "description": (
+            "Write the current in-memory file contents to disk. "
+            "If a *path* is provided, saves to that path; otherwise overwrites the originally loaded file."
+        ),
+        "parameters": {
+            "path": {"type": "string | null", "description": "Optional destination path. If omitted, overwrites the original."},
+        },
+    },
+    "diff_file": {
+        "name": "diff_file",
+        "description": (
+            "Show a diff between the loaded/created state and the current in-memory version."
+        ),
+        "parameters": {},
+    },
+    "discard_edits": {
+        "name": "discard_edits",
+        "description": (
+            "Discard all edits and restore the file to its originally loaded state."
+        ),
+        "parameters": {},
+    },
+    "line_count": {
+        "name": "line_count",
+        "description": "Return the number of lines in the current in-memory file.",
+        "parameters": {},
+    },
+    "evaluate_code": {
+        "name": "evaluate_code",
+        "description": (
+            "Safely evaluate a Python code snippet. "
+            "Returns success status, output/result, and any error message."
+        ),
+        "parameters": {
+            "source": {"type": "string", "description": "Python source code to evaluate."},
+        },
+    },
+}
 
-def register_tools(registry: dict | None = None) -> dict:
-    """
-    Register all edit_tools functions with the given registry.
 
-    Each tool gets a `name`, `description`, and callable `func`.
-    Returns the (possibly modified) registry.
-    """
-    tools = {
-        "load_file": {
-            "name": "load_file",
-            "description": (
-                "Load a file from disk into in-memory storage. "
-                "All subsequent edits happen in RAM until `save_file` is called."
-            ),
-            "parameters": {
-                "path": {"type": "string", "description": "Absolute or relative path to the file."},
-            },
-        },
-        "create_file": {
-            "name": "create_file",
-            "description": (
-                "Create a new empty in-memory file at *path*. "
-                "No disk I/O until `save_file` is called."
-            ),
-            "parameters": {
-                "path": {"type": "string", "description": "Path where the new file will be saved."},
-            },
-        },
-        "read_all_lines": {
-            "name": "read_all_lines",
-            "description": (
-                "Return all lines of the currently loaded in-memory file as a single string."
-            ),
-            "parameters": {},
-        },
-        "read_line_range": {
-            "name": "read_line_range",
-            "description": (
-                "Read a specific range of lines (1-indexed, inclusive). "
-                "Useful for examining function bodies, imports, etc."
-            ),
-            "parameters": {
-                "start": {"type": "integer", "description": "Start line (inclusive)."},
-                "end": {"type": "integer", "description": "End line (inclusive). If omitted, reads to end of file."},
-            },
-        },
-        "read_around_pattern": {
-            "name": "read_around_pattern",
-            "description": (
-                "Find the first occurrence of *pattern* (case-insensitive) and return "
-                "context lines around it. Useful for locating specific code sections."
-            ),
-            "parameters": {
-                "pattern": {"type": "string", "description": "Text to search for in any line."},
-                "context_lines": {"type": "integer", "description": "Number of lines before and after the match (default 5)."},
-            },
-        },
-        "replace_lines": {
-            "name": "replace_lines",
-            "description": (
-                "Replace lines *start*–*end* (1-indexed, inclusive) with new text. "
-                "Changes are in-memory only until `save_file`."
-            ),
-            "parameters": {
-                "start": {"type": "integer", "description": "First line to replace (inclusive)."},
-                "end": {"type": "integer | null", "description": "Last line to replace (inclusive). If omitted, replaces from *start* to end."},
-                "replacement": {"type": "string", "description": "Text to insert in place of the old lines. Use \\n for line breaks."},
-            },
-        },
-        "insert_after_line": {
-            "name": "insert_after_line",
-            "description": (
-                "Insert *text* after a given 1-indexed line number. "
-                "Useful for adding new functions or imports."
-            ),
-            "parameters": {
-                "after_line": {"type": "integer", "description": "Line number after which to insert."},
-                "text": {"type": "string", "description": "Text to insert. Use \\n for line breaks."},
-            },
-        },
-        "delete_lines": {
-            "name": "delete_lines",
-            "description": (
-                "Delete lines *start*–*end* (1-indexed, inclusive). "
-                "Changes are in-memory only until `save_file`."
-            ),
-            "parameters": {
-                "start": {"type": "integer", "description": "First line to delete."},
-                "end": {"type": "integer | null", "description": "Last line to delete. If omitted, deletes a single line."},
-            },
-        },
-        "append_text": {
-            "name": "append_text",
-            "description": (
-                "Append *text* to the end of the in-memory file."
-            ),
-            "parameters": {
-                "text": {"type": "string", "description": "Text to append. Use \\n for line breaks."},
-            },
-        },
-        "save_file": {
-            "name": "save_file",
-            "description": (
-                "Write the current in-memory file contents to disk. "
-                "If a *path* is provided, saves to that path; otherwise overwrites the originally loaded file."
-            ),
-            "parameters": {
-                "path": {"type": "string | null", "description": "Optional destination path. If omitted, overwrites the original."},
-            },
-        },
-        "diff_file": {
-            "name": "diff_file",
-            "description": (
-                "Show a diff between the loaded/created state and the current in-memory version."
-            ),
-            "parameters": {},
-        },
-        "discard_edits": {
-            "name": "discard_edits",
-            "description": (
-                "Discard all edits and restore the file to its originally loaded state."
-            ),
-            "parameters": {},
-        },
-        "line_count": {
-            "name": "line_count",
-            "description": "Return the number of lines in the current in-memory file.",
-            "parameters": {},
-        },
-        "evaluate_code": {
-            "name": "evaluate_code",
-            "description": (
-                "Safely evaluate a Python code snippet. "
-                "Returns success status, output/result, and any error message."
-            ),
-            "parameters": {
-                "source": {"type": "string", "description": "Python source code to evaluate."},
-            },
-        },
-    }
 
-    # Attach implementations
-    import functools
+
+def tool_implementations() -> dict:
+    """ !!!! FFFFFF """
 
     def _load_file(path: str) -> str:
         mem = InMemoryFile.load(path)
@@ -650,36 +645,23 @@ def register_tools(registry: dict | None = None) -> dict:
         "evaluate_code": _evaluate_code,
     }
 
-    registry = registry if registry is not None else TOOL_REGISTRY
-    for name, spec in tools.items():
-        impl = tool_impls.get(name)
-        if impl:
-            spec["func"] = impl
-            registry[name] = spec
-
-    return registry
-
-
-# ---------------------------------------------------------------------------
-# Convenience function (auto-registers on first call)
-# ---------------------------------------------------------------------------
-
-def get_tools() -> dict:
-    """Return a dict of tool_name → tool_spec, registering tools if needed."""
-    if not TOOL_REGISTRY:
-        register_tools(TOOL_REGISTRY)
-    return {name: spec for name, spec in TOOL_REGISTRY.items() if isinstance(spec, dict)}
+    return tool_impls
 
 
 # Compat with existing code
-tool_defs = list(get_tools().values())
-EDIT_TOOL_MAP = {f"edit_{t['name']}": t["func"] for t in tool_defs}
 
-for i, v in enumerate(tool_defs):
-    v.update({"name": f"edit_{v['name']}", "func":None})
-    tool_defs[i] = v # Might be unnecessary if ref.
+tool_defs = {}
+for k, v in TOOL_SCHEMAS.items():
+    v.update({"name": f"edit_{v['name']}"})
+    tool_defs[k] = v # Might be unnecessary if ref.
 
-EDIT_TOOL_DEFINITIONS = [{"type": "function", "function": v} for v in tool_defs]
+EDIT_TOOL_DEFINITIONS = [
+        {"type": "function",
+        "function": {**spec, "name": f"edit_{name}"}}
+    for name, spec in TOOL_SCHEMAS.items()
+]
+
+EDIT_TOOL_MAP = {f"edit_{name}": impl for name, impl in tool_implementations().items()}
 
 
 
@@ -761,12 +743,6 @@ if __name__ == "__main__":
     # Clean up
     Path(test_path).unlink(missing_ok=True)
     print(f"\n[cleanup] Removed {test_path}")
-
-    # Test register_tools
-    reg = {}
-    register_tools(reg)
-    tool_names = [k for k in reg if k != "_current" and isinstance(reg[k], dict)]
-    print(f"\n[tools] Registered {len(tool_names)} tools: {', '.join(sorted(tool_names))}")
 
     print("\n" + "=" * 60)
     print("All self-tests passed ✓")

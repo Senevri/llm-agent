@@ -572,32 +572,33 @@ tools = [
     }
 ]
 
-def add_tool_definitions(tool_def, tools):
-    if not isinstance(tool_def, dict) and not isinstance(tool_def, list):
-        tool_def = list(tool_def)
-    tool_names = [t.get("function", {}).get("name") for t in tools]
-    if isinstance(tool_def, list):
-        for td in tool_def:
-            name = td.get("function", {}).get("name")
-            if name in tool_names:
-                raise Exception(f"{name} already in tool definitions!")
-        tools.extend(tool_def)
-    else:
-        name = tool_def.get("function", {}).get("name")
-        if name in tool_names:
-                raise Exception(f"{name} already in tool definitions!")
-        tools.append(tool_def)
+def add_tool_definitions(tool_defs, tools):
+    if isinstance(tool_defs, dict):
+        tool_defs = [tool_defs]
+    seen = {t.get("function", {}).get("name") for t in tools}
+    for td in tool_defs:
+        name = td.get("function", {}).get("name")
+        if not name:
+            raise ValueError(f"tool definition missing function.name: {td!r}")
+        if name in seen:
+            raise ValueError(f"{name} already in tool definitions!")
+        seen.add(name)
+        tools.append(td)
     return tools
 
-# Add other tool definitions
-tools = add_tool_definitions(INTERNET_TOOL_DEFINITION_MAP.values(), tools)
-tools = add_tool_definitions(TMUX_TOOL_DEFINITION_MAP.values(), tools)
-tools = add_tool_definitions(CONTEXT_TOOL_DEFINITION_MAP.values(), tools)
-tools = add_tool_definitions(CLOUD_IMAGE_GEN_TOOL_DEFINITION, tools)
-tools = add_tool_definitions(EDIT_TOOL_DEFINITIONS, tools)
+def build_tool_definitions(*sources):
+    tools = []
+    for src in sources:
+        add_tool_definitions(src, tools)
+    return tools
 
-TOOL_DEFINITIONS = tools
-
+TOOL_DEFINITIONS = build_tool_definitions(
+    INTERNET_TOOL_DEFINITION_MAP.values(),
+    TMUX_TOOL_DEFINITION_MAP.values(),
+    CONTEXT_TOOL_DEFINITION_MAP.values(),
+    CLOUD_IMAGE_GEN_TOOL_DEFINITION,
+    EDIT_TOOL_DEFINITIONS,
+)
 #print(tools)
 
 tools_ok = all(tool["function"]["name"] in TOOL_MAP for tool in TOOL_DEFINITIONS)
