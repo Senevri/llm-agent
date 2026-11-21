@@ -33,7 +33,8 @@ except ImportError as e:
     INTERNET_TOOL_DEFINITION_MAP = {}
 
 
-from tools.agent_deb_tools import install_deb_package
+if platform.system() != "Windows":
+    from tools.agent_deb_tools import install_deb_package
 from tools.bash_tools import run_bash
 
 from tools.cloud_image_gen import CLOUD_IMAGE_GEN_TOOL_DEFINITION, generate_cloud_image
@@ -63,6 +64,7 @@ except ImportError as e:
     EDIT_TOOL_DEFINITIONS = {}
     EDIT_TOOL_MAP = {}
 
+from llm_utils import _relative_paths_helper
 
 from datetime import datetime, timezone
 
@@ -286,13 +288,6 @@ def search_file(path: str, query: str) -> str:
     except Exception as e:
         return f"Error searching file: {str(e)}"
 
-def _relative_paths_helper(path: str) -> str:
-    if not ("/" in path or "\\" in path):
-        # if path.startswith(".\\") or path.startswith(r"./"):
-        #     path = path.lstrip("./\\")
-        path = str(Path(path).resolve())
-    return path
-
 def _glob_files(path, filterstr="*", recurse=False):
     if recurse:
         files = [str(p) for p in Path(path).rglob(filterstr)]
@@ -387,7 +382,6 @@ TOOL_MAP = {
     "list_files": list_files,
     "write_file": write_file,
     "append_file": append_file,
-    "install_deb_package": install_deb_package,
     "now": tool_now,
     **INTERNET_TOOL_MAP,
     **TMUX_TOOL_MAP,
@@ -400,6 +394,9 @@ TOOL_MAP = {
 bash_description = "Execute a bash command. Use /tmp or /workspace for writes."
 if platform.system() == "Windows":
     bash_description = "Execute a shell command. Use allowed directiories for writes."
+if platform.system() == "Linux":
+    TOOL_MAP.update({"install_deb_package": install_deb_package})
+    # TOOL_MAP.pop("install_deb_package")
 
 def _schema_boilerplate(schema):
     return {
@@ -557,6 +554,12 @@ tools = [
     }
 ]
 
+if platform.system() == "Windows":
+    for i, item in enumerate(tools):
+        if item["name"] == "install_deb_package":
+            tools.pop(i)
+            break
+
 tool_schemas = [_schema_boilerplate(schema) for schema in tools]
 
 def add_tool_definitions(tool_defs, tools):
@@ -643,7 +646,7 @@ if __name__=="__main__":
     print(write_file("test.txt", "test"))
     print(read_file("test.txt"))
     print(run_bash("rm ./test.txt"))
-    print(json.dumps(TOOL_DEFINITIONS))
+    #print(json.dumps(TOOL_DEFINITIONS))
 # Moved test to tests; have not tested since.
 
 
@@ -657,7 +660,7 @@ from jsonschema import Draft202012Validator
 # Draft202012Validator.check_schema(schema)
 
 for tool in TOOL_DEFINITIONS:
-    print(tool)
+    #print(tool)
     schema = tool["function"]["parameters"]
     schema_json = json.dumps(schema)
     schema = json.loads(schema_json)

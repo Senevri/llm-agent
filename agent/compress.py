@@ -63,6 +63,8 @@ class Compressor:
 
     def _combine_contents_by_role(self, messages) -> List:
         # Fast path: nothing to combine
+        if len(messages) < 2:
+            return messages
         if not any(
             _role(a) == _role(b)
             and _role(a) in ("assistant", "user")
@@ -83,10 +85,12 @@ class Compressor:
                 and _role(msg) == _role(prev_msg)
                 ):
                 msg["content"] = prev_msg.get("content") + "\n" + msg["content"]
-                if msg.get("tool_calls", []):
-                    # Should never be here
-                    logger.warning(f"--- Merging tool calls! ---\n{msg}")
-                    prev_msg["tool_calls"] = prev_msg.get("tool_calls", []) + msg.get("tool_calls")
+                mergeables = ["tool_calls", "reasoning_content"]
+                for mrg in mergeables:
+                    if msg.get(mrg, []) or prev_msg.get(mrg):
+                        # Should never be here
+                        logger.warning(f"--- Merging {mrg}! ---\n{msg}")
+                        prev_msg[mrg] = prev_msg.get(mrg, []) + msg.get(mrg)
             else:
                 new_msg_queue.append(prev_msg)
             prev_msg = msg

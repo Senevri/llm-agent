@@ -27,11 +27,7 @@ try:
     from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.table import Table
-    console = Console(
-        file=sys.__stdout__,
-        force_terminal=True,
-        color_system="auto",
-    )
+
 except Exception:
     class Console:  # type: ignore
         def print(self, msg, *args, **kwargs):
@@ -89,6 +85,7 @@ if os.getenv("DEBUG"):
 class SimpleLoopTask:
     def __init__(self, repl, task):
         self.repl = repl
+        self.console = repl.ui_console
         self.task = task
         self.started_at = None
         self.ends_at: datetime = datetime.now() + timedelta(minutes=10)
@@ -183,7 +180,7 @@ class LoopTask(SimpleLoopTask):
                 if dispatcher.get_job_status(jid) in [AgentStatus.COMPLETED, AgentStatus.FAILED]:
                     with self.repl._state_lock:
                         output = dispatcher.get_job_output(jid)
-                        console.print(Markdown(output))
+                        self.repl.ui_messages.post(Markdown(output))
                         #self.repl.messages += [{"role": "assistant", "content": output}]
 
                     if self.check_timeout():
@@ -207,7 +204,7 @@ class LoopTask(SimpleLoopTask):
 
             if self.ends_at and datetime.now() > self.ends_at:
                 output = dispatcher.get_job_output(jid)
-                console.print(output)
+                self.repl.ui_messages.post(output)
                 self.stop()
 
     def run(self, *args, **kwargs):
@@ -263,11 +260,11 @@ def loop (repl, *args, **kwargs):
     if "start" in args:
         task_prompt = kwargs.get("task", None)
         if not task_prompt:
-            console.print("[red]No task prompt provided[/red]")
+            self.repl.ui_messages.post("[red]No task prompt provided[/red]")
             return
 
         if repl.loop_task and repl.loop_task.is_running():
-            console.print("[red]Loop task already running[/red]")
+            self.repl.ui_messages.post("[red]Loop task already running[/red]")
             return
 
         loop_task = LoopTask(repl, task_prompt)
@@ -281,17 +278,17 @@ def loop (repl, *args, **kwargs):
     elif "stop" in args:
         if repl.loop_task:
             # get output from any agents
-            console.print(repl.loop_task.get_output())
+            self.repl.ui_messages.post(repl.loop_task.get_output())
             repl.loop_task.stop()
             repl.loop_task.cleanup()
         else:
-            console.print("[red]No loop task running[/red]")
+            self.repl.ui_messages.post("[red]No loop task running[/red]")
 
     elif "check" in args:
         if repl.loop_task:
-            console.print(repl.loop_task.get_output())
+            self.repl.ui_messages.post(repl.loop_task.get_output())
         else:
-            console.print("[red]No loop task running[/red]")
+            self.repl.ui_messages.post("[red]No loop task running[/red]")
 
     elif "simple" in args:
         tasks = []
@@ -303,7 +300,7 @@ def loop (repl, *args, **kwargs):
         if kwargs.get("task"):
             tasks.append(kwargs["task"])
         if not tasks:
-            console.print("[red]No task provided[/red]")
+            self.repl.ui_messages.post("[red]No task provided[/red]")
             return
 
         delta = _parse_timedelta(kwargs) or timedelta(minutes=10)
@@ -311,6 +308,6 @@ def loop (repl, *args, **kwargs):
         lt.ends_at = datetime.now() + delta
         repl.status = "run"          # starting a loop is an explicit user action
         lt.start()                   # not inside a swallow-all try
-        console.print(f"[green]Loop active until {lt.ends_at}[/green]")
+        self.repl.ui_messages.post(f"[green]Loop active until {lt.ends_at}[/green]")
 
     return None

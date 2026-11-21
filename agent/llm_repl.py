@@ -35,6 +35,8 @@ from slashcommands import load_commands, tools_command, load_config, save_config
 from user_profile_manager import UserProfileManager, ContextSnapshot
 from compress import Compressor
 from job_manager import JobManager
+
+from uimessage import UIMessageQueue
 #from requests.exceptions import HTTPError
 
 
@@ -225,12 +227,8 @@ try:
     from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.table import Table
+    from rich.rule import Rule
     from rich import box
-    console = Console(
-        file=sys.__stdout__,
-        force_terminal=True,
-        color_system="auto",
-    )
 
     from urllib.parse import urlparse
     from prompt_toolkit.styles import Style
@@ -306,6 +304,7 @@ class LLMRepl:
         self.agent_active = False
         self.status = "ok"
         self.logger = logger
+        self.ui_messages = UIMessageQueue()
 
         with _active_repls_lock:
             _active_repls += 1
@@ -319,7 +318,6 @@ class LLMRepl:
 
         self.config["backend"] = os.getenv("LLM_REPL_BACKEND", repl_be)
         self.config["port"] = port
-        self.console = console
 
         try:
             # Note: llm_repl mutates self.api, self.client,
@@ -329,7 +327,6 @@ class LLMRepl:
             self.model = discovered_model
         except Exception as e:
             logger.error(f"Failed to create OpenAI client: {e}")
-            console.print(f"Failed to create OpenAI client: {e}\n")
             self.model = "(unknown)"
 
         try:
@@ -387,6 +384,16 @@ class LLMRepl:
         self.shutdown()
         return False
 
+    async def ui_loop(self):
+        while not self._shutdown_done:
+            for msg in self.ui_messages.drain():
+                if msg.kind == "print":
+                    self.ui_console.print(msg.content, style=msg.style)
+                if msg.kind == "rule":
+                    self.ui_console.rule(msg.content, style=msg.style)
+
+            await asyncio.sleep(0.05)
+
     def check_all_context_use(self):
 
         messages_bytes = sum(
@@ -412,6 +419,7 @@ class LLMRepl:
         except Exception:
             return None
 
+
     def _toolbar_fragments(self):
         try:
             f = self._status_fields()
@@ -433,8 +441,8 @@ class LLMRepl:
             return [("class:bottom-toolbar", "…")]
 
     def show(self):
-        console.print(self.get_diagnostics())
-        console.print(dir(self))
+        self.ui_messages.post(self.get_diagnostics())
+        self.ui_messages.post(dir(self))
 
     def _check_profile_worker_health(self):
         if not self.worker.is_alive():
@@ -646,7 +654,7 @@ class LLMRepl:
     def _execute_tools(self, tool_calls: List[Any]) -> List[ToolCallResult]:
         results: List[ToolCallResult] = []
         with patch_stdout(True):
-            console.print(
+            self.ui_messages.post(
                 f"[bold blue][*] Model requested {len(tool_calls)} tool call(s).[/bold blue]")
 
             for tc in tool_calls:
@@ -665,7 +673,7 @@ class LLMRepl:
                     logger.info("Executing tool %s with %s", name, preview)
                     logger.debug("full args: %s", args)
 
-                    console.print(f"  [blue]tool:[/blue] {name}({preview})")
+                    self.ui_messages.post(f"  [blue]tool:[/blue] {name}({preview})")
 
                     result = self.tool_registry.execute(name, **args)
 
@@ -677,7 +685,7 @@ class LLMRepl:
                     panel = Panel(response_str, box = box.SIMPLE_HEAVY,
                                         border_style="none", padding=(0, 1, 2, 1))
 
-                    console.print(panel)
+                    self.ui_messages.post(panel)
 
                 except Exception as e:
                     logger.exception("Tool %s failed", name)
@@ -741,8 +749,8 @@ class LLMRepl:
 
     def _draw_end_rule(self, newline=False):
         if newline:
-            console.print("\n")
-        console.rule(self._loop_status_text())
+            self.ui_messages.post("\n")
+        self.ui_messages.post(self._loop_status_text(), kind="rule")
         self.no_reply = False        # keep this — it's the re-arm
 
 
@@ -778,7 +786,7 @@ class LLMRepl:
             # Let's mark that the message was sent
             # self._draw_end_rule(True)
             with patch_stdout(True):
-                console.print(f"\n[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
+                self.ui_messages.post(f"\n[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
             if self.status == "stop":
                 self.current_bg_task.stop()
                 return "stopped"
@@ -797,7 +805,7 @@ class LLMRepl:
                     logger.error(f"Error generating prompt: {e}")
                     raise e
 
-                console.rule(f"[dim]warning - {self.api.usage.summary()}[dim]")
+                self.ui_messages.post(f"[dim]warning - {self.api.usage.summary()}[dim]", kind="rule")
                 current_messages.append({"role": "system", "content": warning})
                 warning_sent = True
             try:
@@ -805,7 +813,7 @@ class LLMRepl:
                 self.agent_active = True
                 with patch_stdout(True):
                     for msg in current_messages[-6:]:
-                        console.print(msg["role"], repr(msg.get("content", ""))[:100])
+                        self.ui_messages.post(msg["role"], repr(msg.get("content", ""))[:100])
                 response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
                 msg = response.choices[0].message
                 # print((self.api.model, self.api.port, self.api.base_url))
@@ -813,13 +821,13 @@ class LLMRepl:
                 # print("TOOL CALLS:", msg.tool_calls)
                 # print("FINISH REASON:", response.choices[0].finish_reason)
                 assistant_msg = msg.model_dump(exclude_none=True)
-                # console.print((pformat(str(assistant_msg))))
+                # self.ui_messages.post((pformat(str(assistant_msg))))
                 if msg.tool_calls:
                     with self._state_lock:
                         self.messages.append(assistant_msg)
                     current_messages.append(assistant_msg)
                     self.api.usage.record(response.usage, turn=len(self.messages))
-                    console.print(f"[dim]{self.api.usage.summary()}[/dim]")
+                    self.ui_messages.post(f"[dim]{self.api.usage.summary()}[/dim]")
 
                     tool_results = self._get_tool_results(msg.tool_calls)
                     if not tool_results:
@@ -832,7 +840,7 @@ class LLMRepl:
                     if self.api.usage.context_pct >= 90.0:
                         # Emergency trim
                         self._trim_context()
-                        console.rule(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]")
+                        self.ui_messages.post(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]", kind="rule")
                         current_messages.append({"role": "system", "content": "Emergency trim context."})
                         with self._state_lock:
                             current_messages = list(self.messages)
@@ -843,7 +851,7 @@ class LLMRepl:
                             })
 
                     # DEBUG: line below
-                    #console.print(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
+                    #self.ui_messages.post(f"CURRENT MESSAGES: {pformat(str(current_messages))}")
                     elapsed = time.time() - start_time
                     continue
 
@@ -863,33 +871,33 @@ class LLMRepl:
                     if tool_requests:
                         for tool_name in tool_requests:
                             if self.tool_registry.enable_tool_if_not_banned(tool_name):
-                                console.print(f"[green]Re-enabled tool on request: {tool_name}[/green]")
+                                self.ui_messages.post(f"[green]Re-enabled tool on request: {tool_name}[/green]")
                             else:
-                                console.print(f"[red]Cannot re-enable '{tool_name}': tool is banned or not found[/red]")
+                                self.ui_messages.post(f"[red]Cannot re-enable '{tool_name}': tool is banned or not found[/red]")
                     elif "/tool" in content and not tool_requests:
                         # Legacy: just "/tool" enables all
                         tools_command(self, "on")
 
                 if content:
                     self._draw_end_rule(True)
-                    console.print("\n") # newline, seems hacky
-                    console.print(Panel(Markdown(content), title="Assistant"))
+                    self.ui_messages.post("\n") # newline, seems hacky
+                    self.ui_messages.post(Panel(Markdown(content), title="Assistant"))
 
 
                 else:
-                    console.print("[bold red]Assistant: (No response)[/bold red]")
+                    self.ui_messages.post("[bold red]Assistant: (No response)[/bold red]")
                 with self._state_lock:
                     self.no_reply = False
 
                 # Only print time if it exceeds 5 seconds
                 if elapsed > 5.0:
-                    console.print(f"[dim]⏱️  Turn completed in {elapsed:.2f}s[/dim]")
+                    self.ui_messages.post(f"[dim]⏱️  Turn completed in {elapsed:.2f}s[/dim]")
                     # self.redraw_prompt = True
                     self.no_reply = False
                     self._draw_statusbar()
                     # Hack:
                     prefix = self.get_input_prompt_prefix()
-                    console.print(prefix, end="")
+                    self.ui_messages.post(prefix, end="")
 
 
                 self._enqueue_profile_snapshot(user_input, content)
@@ -899,7 +907,7 @@ class LLMRepl:
                 self.no_reply = False
                 if "request exceeds the context window" in str(e):
                     self._trim_context()
-                    console.rule(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]")
+                    self.ui_messages.post(f"[darkred]Emergency Trim - {self.api.usage.summary()}[darkred]", kind="rule", style="darkred")
                     current_messages.append({"role": "system", "content": "Emergency trim context."})
                     with self._state_lock:
                         current_messages = list(self.messages)
@@ -988,12 +996,12 @@ class LLMRepl:
     def _consolidate_profile(self) -> None:
         # test if consolidation is needed
         if not self.profile_manager.needs_consolidation():
-            console.print("[faded]Profile already consolidated.[/faded]")
+            self.ui_messages.post("[faded]Profile already consolidated.[/faded]")
             return
         self.prompt_gen.reload_profiles()
         consolidation_prompt = self.prompt_gen.generate_prompt("profile_consolidation")
         self._apply_profile_update("", "", prompt = consolidation_prompt)
-        console.print("[faded]Profile consolidated.[/faded]")
+        self.ui_messages.post("[faded]Profile consolidated.[/faded]")
 
 
     # --- Job management -----------------------------------------------------------
@@ -1043,7 +1051,7 @@ class LLMRepl:
             return
 
         for msg in proc.get_pending_output():
-            console.print(f"[dim]⚙️  {msg}[/dim]")
+            self.ui_messages.post(f"[dim]⚙️  {msg}[/dim]")
 
         # IMPORTANT: is_running is a property, not a method.
         if proc.is_running:
@@ -1053,7 +1061,7 @@ class LLMRepl:
         self.agent_active = False
 
         if proc.error:
-            console.print(f"[bold red]Background task failed: {proc.error}[/bold red]")
+            self.ui_messages.post(f"[bold red]Background task failed: {proc.error}[/bold red]")
         else:
             self._on_send_done(proc.result)
 
@@ -1062,8 +1070,8 @@ class LLMRepl:
             next_input = self._drain_pending_inputs()
             if next_input is None or next_input == "None" or not next_input.strip():
                 return
-            console.print("[dim]Processing queued user input...[/dim]")
-            console.print(f'[dim][i]"{next_input}"[/i][/dim]')
+            self.ui_messages.post("[dim]Processing queued user input...[/dim]")
+            self.ui_messages.post(f'[dim][i]"{next_input}"[/i][/dim]')
 
             self._start_background_send(next_input)
             return
@@ -1080,11 +1088,11 @@ class LLMRepl:
         self.agent_active = False
         try:
             content = result
-            # console.print(Panel(Markdown(content), title="Assistant"))
+            # self.ui_messages.post(Panel(Markdown(content), title="Assistant"))
         except Exception as e:
-            console.print(f"[bold red]API Error: {e}[/bold red]")
+            self.ui_messages.post(f"[bold red]API Error: {e}[/bold red]")
             diagnostics = self.get_diagnostics()
-            console.print(Panel(Markdown(str(diagnostics)), title="Diagnostics"))
+            self.ui_messages.post(Panel(Markdown(str(diagnostics)), title="Diagnostics"))
 
     def _process_command(self, command, args, params):
         logger.info(("COMMAND:", command, args, params))
@@ -1095,6 +1103,7 @@ class LLMRepl:
                 self.loop_task = status
             if isinstance(status, Message):
                 return status.to_dict()
+            return status
 
     def _status_fields(self) -> dict:
         """Single source of truth for status display. Never raises, never mutates."""
@@ -1119,6 +1128,11 @@ class LLMRepl:
     async def get_user_prompt(self, prompt_session):
         try:
 
+            if not (self.loop_task and self.agent_active):
+                _sb =  self._draw_statusbar()
+                if _sb:
+                    self.ui_console.print()
+
             input_prompt = self.get_input_prompt_prefix()
             if prompt_session is not None:
                 user_input = await prompt_session.prompt_async(
@@ -1138,10 +1152,11 @@ class LLMRepl:
 
     def _draw_statusbar(self):
         if self.no_reply:
-            return
+            return ""
         f = self._status_fields()
-        console.rule(f"[turquoise4]{f['model']}|{f['base_url']}|{f['n_ctx']}|{f['backend']}[/turquoise4]")
         self.no_reply = True
+        return Rule(f"[turquoise4]{f['model']}|{f['base_url']}|{f['n_ctx']}|{f['backend']}[/turquoise4]")
+
 
 
     def run(self) -> None:
@@ -1156,7 +1171,7 @@ class LLMRepl:
             if isinstance(alias, Script):
                 result = alias(self, args, params)
                 if result:
-                    console.print(result)
+                    self.ui_messages.post(result)
                 return (True, result)
             return (False, None)
 
@@ -1176,9 +1191,9 @@ class LLMRepl:
                 if _is_command(alias_cmd):
                     result = self._process_command(alias_cmd, args, params)
                     return (True, result)
-                console.print(f"Failed to process alias: {alias}")
+                self.ui_messages.post(f"Failed to process alias: {alias}")
             else:
-                console.print(f"[bold red]Unknown command: {user_input}[/bold red]")
+                self.ui_messages.post(f"[bold red]Unknown command: {user_input}[/bold red]")
                 return (True, None)
         return (False, None)
 
@@ -1186,6 +1201,7 @@ class LLMRepl:
     async def _run(self):
         try:
             ui_pump = None
+            message_pump = None
             commands, command_definitions = self._load_commands()
             self.cmd_dispatcher = CommandDispatcher(self)
             self.cmd_dispatcher.load(commands, command_definitions)
@@ -1200,10 +1216,6 @@ class LLMRepl:
             except Exception:
                 base_url = "(unset)"
 
-            console.rule("[bold green]LLM REPL Started (Profiled V2)[/bold green]")
-            console.print(f"Model: [bold]{self.model}[/bold] | Base URL: [bold]{base_url}[/bold]")
-            console.print(f"Commands: {command_help}")
-
             self.loop_task = None
             self.agent_active = False
             prompt_session = PromptSession(history=FileHistory(str(history_path)), refresh_interval=1)
@@ -1214,14 +1226,27 @@ class LLMRepl:
 
             with patch_stdout(True):
                 # UI pump handles async tasks
+                message_pump = asyncio.create_task(self.ui_loop())
                 ui_pump = asyncio.create_task(self._background_ui_pump())
+
+                self.ui_console = Console(
+                    file=sys.stdout,
+                    force_terminal=True,
+                    color_system="auto",
+                )
+                console = self.ui_console
+
+                console.rule("[bold green]LLM REPL Started (Profiled V2)[/bold green]")
+                console.print(f"Model: [bold]{self.model}[/bold] | Base URL: [bold]{base_url}[/bold]")
+                console.print(f"Commands: {command_help}")
+
+
+
                 self.no_reply=False
                 while True:
                     try:
                         # live update model
                         #self.no_reply = False
-                        if not (self.loop_task and self.agent_active):
-                            self._draw_statusbar()
 
                         # Get User Input
                         user_input = ""
@@ -1331,16 +1356,18 @@ class LLMRepl:
                         console.print(f"[bold red]Unexpected error: {e}[/bold red]")
                         self.no_reply = False
         finally:
-            if ui_pump:
-                ui_pump.cancel()
-                try:
-                    await ui_pump
-                except asyncio.CancelledError:
-                    pass
+            for task in (ui_pump, message_pump):
+                if task:
+                    task.cancel()
 
-            self.shutdown()
-            _stop_log_listener()
-
+            for task in (ui_pump, message_pump):
+                if task:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    self.shutdown()
+                    _stop_log_listener()
 
     def _apply_profile_update(self, user_input: str, assistant_response: str="", prompt="") -> None:
         try:
@@ -1591,7 +1618,7 @@ def main() -> int:
     except Exception as e:
         logger.exception("Failed to initialize REPL")
         try:
-            console.print(f"[bold red]Failed to start REPL: {e}[/bold red]")
+            logger.Error(f"Failed to start REPL: {e}")
         except Exception:
             sys.stderr.write(f"Failed to start REPL: {e}\n")
         return 1
@@ -1601,13 +1628,13 @@ def main() -> int:
         with repl:
             repl.run()
     except KeyboardInterrupt:
-        console.print("\n[bold red]Goodbye![/bold red]")
+        repl.ui_messages.post("\n[bold red]Goodbye![/bold red]")
     except EOFError:
-        console.print("[bold red]Goodbye![/bold red]")
+        repl.ui_messages.post("[bold red]Goodbye![/bold red]")
     except Exception as e:
         logger.exception(f"Fatal REPL error: {e}")
         try:
-            console.print(f"[bold red]Fatal REPL error: {e}[/bold red]")
+            repl.ui_messages.post(f"[bold red]Fatal REPL error: {e}[/bold red]")
         except Exception:
             sys.stderr.write(f"Fatal REPL error: {e}\n")
         return 1

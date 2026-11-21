@@ -1,11 +1,13 @@
 from loop_task import loop
 from pathlib import Path
 import os
+import ast
+import inspect
 import re
 import sys
 import time
 import yaml
-import inspect
+
 import textwrap
 import logging
 
@@ -181,11 +183,11 @@ class Script:
         return self.__str__()
 
 def alias_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     if len(args) < 2:
         # note: Print has implicit newlines
-        console.print(f"[blue]Current aliases[/blue]:")
-        [console.print(f'/{k}: {v}') for k, v in repl.aliases.items()]
+        repl.ui_messages.post(f"[blue]Current aliases[/blue]:")
+        [repl.ui_messages.post(f'/{k}: {v}') for k, v in repl.aliases.items()]
         return
     if len(args) > 2:
         if args[0] == "set":
@@ -206,105 +208,189 @@ def alias_command(repl, *args, **kwargs):
         repl.aliases[args[0]] = args[1]
         return f"registered new alias for /{args[0]}: {args[1]}"
 
-    console.print(f"[yellow]Alias {args[1]} set to {args[2]}[/yellow]") # type: ignore
+    repl.ui_messages.post(f"[yellow]Alias {args[1]} set to {args[2]}[/yellow]") # type: ignore
 
 def clear_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     with repl._state_lock:
         repl.messages = [
             {"role": "system", "content": repl.system_prompt}
         ]
-    console.print("[yellow]Conversation history cleared.[/yellow]")
+    repl.ui_messages.post("[yellow]Conversation history cleared.[/yellow]")
 
 def status_command(repl, *args, **kwargs):
     # TODO: other status here?
     repl.no_reply = False
     repl._draw_statusbar()
-    console = repl.console
+    console = repl.ui_console
     if hasattr(repl, 'current_bg_task') and repl.current_bg_task:
         status = "🟢 Running" if repl.current_bg_task.is_running else "🏁 Finished"
-        console.print(f"[bold]Background Task Status:[/bold] {status}")
+        repl.ui_messages.post(f"[bold]Background Task Status:[/bold] {status}")
 
         # Force a drain of the queue to show history
         outputs = repl.current_bg_task.get_pending_output()
         if outputs:
-            console.print("[dim]--- Recent Output ---[/dim]")
+            repl.ui_messages.post("[dim]--- Recent Output ---[/dim]")
             for msg in outputs:
-                console.print(f"[dim]{msg}[/dim]")
+                repl.ui_messages.post(f"[dim]{msg}[/dim]")
     else:
-        console.print("[faded]No background tasks currently running.[/faded]")
-    console.print(f"[faded]{repl.api.usage.summary()}[/faded]")
+        repl.ui_messages.post("[faded]No background tasks currently running.[/faded]")
+    repl.ui_messages.post(f"[faded]{repl.api.usage.summary()}[/faded]")
+
+# --- attribute-path mechanism: pure, stable, unit-testable -------------------
+
+_PATH_TOKEN = re.compile(r"\s*\.?\s*([A-Za-z_]\w*)|\[\s*(.*?)\s*\]")
+LOOKUP_ERRORS = (AttributeError, KeyError, IndexError, TypeError, ValueError)
+
+def _parse_path(path):
+    """'a.b[0]["x"]' -> [('attr','a'), ('attr','b'), ('item',0), ('item','x')]
+    Bare names are attributes; brackets are subscripts."""
+    path = path.strip()
+    steps, pos = [], 0
+    for m in _PATH_TOKEN.finditer(path):
+        if m.start() != pos:
+            raise ValueError(f"can't parse path {path!r}")
+        name, key = m.groups()
+        if name is not None:
+            steps.append(("attr", name))
+        else:
+            try:
+                key = ast.literal_eval(key)
+            except (ValueError, SyntaxError):
+                pass
+            steps.append(("item", key))
+        pos = m.end()
+    if not steps or pos != len(path):
+        raise ValueError(f"can't parse path {path!r}")
+    return steps
+
+def _resolve(root, path):
+    obj = root
+    for kind, key in _parse_path(path):
+        obj = getattr(obj, key) if kind == "attr" else obj[key]
+    return obj
+
+def _set(root, path, value):
+    steps = _parse_path(path)
+    parent = root
+    for kind, key in steps[:-1]:
+        parent = getattr(parent, key) if kind == "attr" else parent[key]
+    kind, key = steps[-1]
+    if kind == "attr":
+        setattr(parent, key, value)
+    else:
+        parent[key] = value
+
+def _coerce(value):
+    if not isinstance(value, str):
+        return value
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return value
+
+def _describe(obj, ui):
+    ui.post(
+        f"[cyan]{type(obj).__module__}.{type(obj).__qualname__}[/cyan]"
+        + (" (callable)" if callable(obj) else "")
+    )
+
+    if inspect.isroutine(obj):
+        try:
+            ui.post(str(inspect.signature(obj)))
+        except (TypeError, ValueError):
+            pass
+
+    state = getattr(obj, "__dict__", None)
+
+    if state:
+        for name, value in state.items():
+            ui.post(f"  {name}: {value!r}")
+    else:
+        names = [n for n in dir(obj) if not n.startswith("_")]
+        ui.post(names)
+
+    return obj
+# --- policy: the command itself, now just dispatch ---------------------------
 
 def repl_command(repl, *args, **kwargs):
-    console = repl.console
-    def _parse_attr(attr):
-        if "." in attr:
-            class_chain = attr.split(".")
-            attr = getattr(repl, class_chain[0])
-            for c in class_chain[1:]:
-                attr = getattr(attr, c)
-        # if "[" in attr:
-        #     dict_chain = attr.split("[").rstrip("]")
-        #     attr = getattr(repl, dict_chain[0])
+    console = repl.ui_console
 
-        else:
-            attr = getattr(repl, attr)
-        return attr
-    if len(args) == 0:
-        if len(kwargs)>0:
-            for k, v in kwargs.items():
-                attr = _parse_attr(k)
-                if attr:
-                    msg = f"Setting {k} to {v}"
-                    v = v =="True" if v in ["True", "False"] else v
-                    try:
-                        v = eval(v)
-                    except:
-                        pass
-                    if v.isnumeric():
-                        v = int(v)
-                    if isinstance(attr, dict):
-                        attr[k] = v
-                    elif not callable(attr):
-                        attr = v
-                    else:
-                        setattr(attr, k, v=="True" if v in ["True", "False"] else v)
+    # /repl  or  /repl show  -> list attributes
+    if (not args and not kwargs) or (len(args) == 1 and args[0] == "show"):
+        names = [n for n in dir(repl) if not n.startswith("_")]
+        repl.ui_messages.post(names)
+        return names
 
-                    logger.info(msg)
-                    console.print(f"[yellow]{msg}[/yellow]")
+    # /repl key=value ... -> set
+    if not args:
+        for k, v in kwargs.items():
+            v = _coerce(v)
+            try:
+                _set(repl, k, v)
+            except LOOKUP_ERRORS as e:
+                repl.ui_messages.post(f"[red]Could not set {k}: {e}[/red]")
+                continue
+            msg = f"Setting {k} to {v!r}"
+            logger.info(msg)
+            repl.ui_messages.post(f"[yellow]{msg}[/yellow]")
         return
+
     if args[0] == "help":
         if len(args) > 1:
-            attr = getattr(repl, args[1])
-            console.print(inspect.signature(attr))
-            console.print(inspect.getdoc(attr))
-        console.print("/repl show displays repl dir\n/repl help <method> displays help for method")
+            try:
+                attr = _resolve(repl, args[1])
+            except LOOKUP_ERRORS:
+                repl.ui_messages.post(f"[red]No such attribute: {args[1]}[/red]")
+                return
+            try:
+                repl.ui_messages.post(str(inspect.signature(attr)))
+            except (TypeError, ValueError):
+                pass
+            doc = inspect.getdoc(attr)
+            if doc:
+                repl.ui_messages.post(doc)
+        repl.ui_messages.post("/repl show [name] inspects | name() calls | name=value sets")
         return
-    attr = _parse_attr(args[0])
 
-    if attr == None:
-        console.print("[red]Command not found.[/red]")
-        return attr
-    if callable(attr):
-        #result = getattr(repl, args[0])(*args[1:], **kwargs)
-        repl_args = list(args[1:])
-        result = attr(*repl_args, **kwargs)
-    else:
-        if hasattr(attr, "__dict__"):
-            attr = vars(attr)
-        result = attr
-    # logger.debug(result)
-    return result
+    # /repl show <path> -> inspect anything, never call
+    inspect_only = args[0] == "show"
+    if inspect_only:
+        args = args[1:]
 
+    # /repl name() -> explicit call
+    target = args[0]
+    force_call = target.endswith("()")
+    if force_call:
+        target = target[:-2]
 
+    try:
+        attr = _resolve(repl, target)
+    except LOOKUP_ERRORS:
+        repl.ui_messages.post("[red]Command not found.[/red]")
+        return None
+
+    if inspect_only:
+        return _describe(attr, repl.ui_messages)
+
+    if force_call or (callable(attr) and (len(args) > 1 or kwargs or inspect.isroutine(attr))):
+        try:
+            return attr(*args[1:], **kwargs)
+        except Exception as e:
+            repl.ui_messages.post(f"[red]{type(e).__name__}: {e}[/red]")
+            return None
+
+    return _describe(attr, repl.ui_messages)
 def profile_command(repl, *args, **kwargs):
-    console = repl.console
-    console.print(Panel(repl.profile_manager.get_profile_string(), title="User Profile"))
-    console.print("[yellow]Profile saved.[/yellow]")
+    console = repl.ui_console
+    repl.ui_messages.post(Panel(repl.profile_manager.get_profile_string(), title="User Profile"))
+    repl.ui_messages.post("[yellow]Profile saved.[/yellow]")
 
 def quit_command(repl, *args, **kwargs):
-    console = repl.console
-    console.print("[yellow]Goodbye![/yellow]")
+    console = repl.ui_console
+    repl.ui_messages.post("[yellow]Goodbye![/yellow]")
     repl.shutdown()
     repl.status="stop"
     return "quit"
@@ -313,7 +399,7 @@ def stub(repl, *args, **kwargs):
             return "stub"
 
 def help(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     _, command_definitions = load_commands()
     def get_aliases(v):
         return  (
@@ -327,18 +413,18 @@ def help(repl, *args, **kwargs):
             /help - show this help
             /backend <backend> port=<port> model=<model> - switch backend
         """)
-    console.print(help_text + cmd_help)
+    repl.ui_messages.post(help_text + cmd_help)
 
 def system_prompt_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     if len(args) < 1:
-        console.print(f"[blue]Current system prompt[/blue]: {repl.system_prompt}")
+        repl.ui_messages.post(f"[blue]Current system prompt[/blue]: {repl.system_prompt}")
         return
     with repl._state_lock:
         repl.base_system_prompt = args[0].strip()
         repl.system_prompt = repl._build_system_prompt()
         repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
-    console.print("[yellow]System prompt updated.[/yellow]")
+    repl.ui_messages.post("[yellow]System prompt updated.[/yellow]")
 
 def backend_command(repl, *args, **kwargs):
     try:
@@ -346,14 +432,14 @@ def backend_command(repl, *args, **kwargs):
     except AttributeError:
         old_backend = [repl.backend, None, None, None]
 
-    console = repl.console
+    console = repl.ui_console
 
     if len(args) < 1:
-        console.print(f"availabe backends: {', '.join(BACKEND_MAP.keys())} (default: {repl.backend})")
+        repl.ui_messages.post(f"availabe backends: {', '.join(BACKEND_MAP.keys())} (default: {repl.backend})")
         return
     with repl._state_lock:
         if args[0] not in BACKEND_MAP.keys():
-            console.print(f"[red]Backend {args} not found in {BACKEND_MAP.keys()}[/red]")
+            repl.ui_messages.post(f"[red]Backend {args} not found in {BACKEND_MAP.keys()}[/red]")
             return
         repl.backend = args[0]
         try:
@@ -370,7 +456,7 @@ def backend_command(repl, *args, **kwargs):
             repl.api = api
         except (ConnectError, HTTPError) as e:
             pd = " ".join(args[1:])
-            console.print(f"[red]Failed to switch backend: {pd}{e}[/red]")
+            repl.ui_messages.post(f"[red]Failed to switch backend: {pd}{e}[/red]")
             repl.backend = old_backend[0]
             repl.api.port, repl.api.model, repl.client = old_backend[1:]
             return
@@ -381,22 +467,22 @@ def backend_command(repl, *args, **kwargs):
         repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
     # save conf
     save_config(repl)
-    console.print(f"[yellow]Backend switched to: {repl.backend}[/yellow]")
+    repl.ui_messages.post(f"[yellow]Backend switched to: {repl.backend}[/yellow]")
 
 def tools_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     if "reload" in args:
         repl.skills_manager.discover_skills()
         repl.tool_registry = repl.create_tool_registry(repl)
-        console.print("[yellow]Tools reloaded.[/yellow]")
+        repl.ui_messages.post("[yellow]Tools reloaded.[/yellow]")
         return
     elif "off" in args:
         repl.notools = True
-        console.print("[yellow]Tools disabled.[/yellow]")
+        repl.ui_messages.post("[yellow]Tools disabled.[/yellow]")
         return
     elif "on" in args:
         repl.notools = False
-        console.print("[yellow]Tools enabled.[/yellow]")
+        repl.ui_messages.post("[yellow]Tools enabled.[/yellow]")
         return
     elif args and len(args) > 1:
         if "allow" == args[0]:
@@ -417,9 +503,9 @@ def tools_command(repl, *args, **kwargs):
             # Enable specific tools, respecting ban list
             for arg in args[1:]:
                 if repl.tool_registry.enable_tool_if_not_banned(arg):
-                    console.print(f"[green]Enabled tool: {arg}[/green]")
+                    repl.ui_messages.post(f"[green]Enabled tool: {arg}[/green]")
                 else:
-                    console.print(f"[red]Cannot enable '{arg}': tool is banned or not found[/red]")
+                    repl.ui_messages.post(f"[red]Cannot enable '{arg}': tool is banned or not found[/red]")
             return
         elif "enable_all" == args[0]:
             # Enable all non-banned tools
@@ -428,59 +514,59 @@ def tools_command(repl, *args, **kwargs):
                 if not repl.tool_registry.is_banned(tool_name):
                     repl.tool_registry.enable_tool(tool_name)
                     enabled_count += 1
-            console.print(f"[green]Enabled {enabled_count} non-banned tools[/green]")
+            repl.ui_messages.post(f"[green]Enabled {enabled_count} non-banned tools[/green]")
             return
         elif "ban" == args[0]:
             # Ban tools permanently
             for arg in args[1:]:
                 repl.tool_registry.ban_tool(arg)
-                console.print(f"[red]Banned tool: {arg}[/red]")
+                repl.ui_messages.post(f"[red]Banned tool: {arg}[/red]")
             return
         elif "unban" == args[0]:
             # Unban tools
             for arg in args[1:]:
                 repl.tool_registry.unban_tool(arg)
-                console.print(f"[green]Unbanned tool: {arg}[/green]")
+                repl.ui_messages.post(f"[green]Unbanned tool: {arg}[/green]")
             return
         elif "banned" == args[0]:
             # List banned tools
             banned = repl.tool_registry.get_banned_tools()
-            console.print("[red]Banned tools:[/red]")
+            repl.ui_messages.post("[red]Banned tools:[/red]")
             if banned:
-                console.print(f' - {", ".join(banned)}')
+                repl.ui_messages.post(f' - {", ".join(banned)}')
             else:
-                console.print("  (none)")
+                repl.ui_messages.post("  (none)")
             return
 
-    # console.print("[yellow]Available skills:[/yellow]")
-    # console.print(repl.skills_manager.get_catalog_summary())
+    # repl.ui_messages.post("[yellow]Available skills:[/yellow]")
+    # repl.ui_messages.post(repl.skills_manager.get_catalog_summary())
     # for skill_id, meta in repl.skills_manager.catalog.items() or {}:
-    #     console.print(f"  - {meta.name}: {meta.description}")
-    console.print("[yellow]Available tools:[/yellow]")
-    console.print(f' - {", ".join(repl.tool_registry.list_tools())}')
-    console.print("[yellow]Disabled tools:[/yellow]")
-    console.print(f' - {", ".join(repl.tool_registry._disabled_tools)}')
-    console.print("[yellow]Banned tools:[/yellow]")
+    #     repl.ui_messages.post(f"  - {meta.name}: {meta.description}")
+    repl.ui_messages.post("[yellow]Available tools:[/yellow]")
+    repl.ui_messages.post(f' - {", ".join(repl.tool_registry.list_tools())}')
+    repl.ui_messages.post("[yellow]Disabled tools:[/yellow]")
+    repl.ui_messages.post(f' - {", ".join(repl.tool_registry._disabled_tools)}')
+    repl.ui_messages.post("[yellow]Banned tools:[/yellow]")
     banned = repl.tool_registry.get_banned_tools()
     if banned:
-        console.print(f' - {", ".join(banned)}')
+        repl.ui_messages.post(f' - {", ".join(banned)}')
     else:
-        console.print("  (none)")
+        repl.ui_messages.post("  (none)")
 
 
 def task_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     tasks: dict = repl.tasks
 
     # Todo: Switch task color by state?
     if "rm" in args and "idx" in kwargs:
         repl.tasks.pop(int(kwargs["idx"]))
-        console.print("[yellow]Task removed.[/yellow]")
+        repl.ui_messages.post("[yellow]Task removed.[/yellow]")
     elif "rm" in args and "all" in args:
         repl.tasks = {}
-        console.print("[yellow]All tasks removed.[/yellow]")
+        repl.ui_messages.post("[yellow]All tasks removed.[/yellow]")
     elif len(args) == 0 and "idx" in kwargs:
-        console.print(f"[green]Task {kwargs['idx']}[/green]: {tasks.get(int(kwargs['idx']))}")
+        repl.ui_messages.post(f"[green]Task {kwargs['idx']}[/green]: {tasks.get(int(kwargs['idx']))}")
     elif len(args) > 1:
         task_text = " ".join(args)
         task_id = max(repl.tasks, default=-1) + 1
@@ -492,7 +578,7 @@ def task_command(repl, *args, **kwargs):
                 "status": kwargs.get("status", "pending"),
             }
         )
-        console.print(f"[green]Task {task_text[:40]}[...] added.[/green]")
+        repl.ui_messages.post(f"[green]Task {task_text[:40]}[...] added.[/green]")
         if len(kwargs) > 0:
             if "delay" in kwargs:
                 delay_length = kwargs["delay"]
@@ -504,21 +590,21 @@ def task_command(repl, *args, **kwargs):
                 message.params["task_id"] = task_id
                 repl.input_queue.put(message)
     else:
-        console.print("[yellow]Available tasks:[/yellow]")
+        repl.ui_messages.post("[yellow]Available tasks:[/yellow]")
         for idx, task in repl.tasks.items():
-            console.print(f"  - {idx}: {task['task'][:60]}")
+            repl.ui_messages.post(f"  - {idx}: {task['task'][:60]}")
 
 
 def config_command(repl, *args, **kwargs):
     get_config_representation(repl)
-    console = repl.console
+    console = repl.ui_console
     if "save" in args:
         save_config(repl)
-        console.print("[yellow]Config saved.[/yellow]")
+        repl.ui_messages.post("[yellow]Config saved.[/yellow]")
         return
     elif "load" in args:
         load_config(repl)
-        console.print("[yellow]Config loaded.[/yellow]")
+        repl.ui_messages.post("[yellow]Config loaded.[/yellow]")
         return
     elif "set" in args:
         for k, v in kwargs.items():
@@ -529,9 +615,9 @@ def config_command(repl, *args, **kwargs):
                 repl._trim_context(int(v))
             repl.tasks = v if k == "todos" else repl.tasks
     else:
-        console.print("[yellow]Config:[/yellow]")
+        repl.ui_messages.post("[yellow]Config:[/yellow]")
         yaml_str = yaml.dump(repl.config).replace("[", r"\[").replace("]", r"\]")
-        console.print(Markdown(f"```yaml\n{yaml_str}\n```"))
+        repl.ui_messages.post(Markdown(f"```yaml\n{yaml_str}\n```"))
 
 def get_config_representation(repl):
     repl_representation = {
@@ -574,7 +660,7 @@ def get_config_representation(repl):
 def save_config(repl, *args, **kwargs):
     repl_representation = get_config_representation(repl)
 
-    # console.print(Markdown(f"```yaml\n{yaml.dump(repl_representation)}\n```"))
+    # repl.ui_messages.post(Markdown(f"```yaml\n{yaml.dump(repl_representation)}\n```"))
     with open(Path.cwd() / "llm_repl.yaml", "w") as f:
         yaml.dump(repl_representation, f)
 
@@ -615,7 +701,7 @@ def load_config(repl, *args, **kwargs):
         repl.api._get_endpoint()
         repl.client, repl.model = repl.api.get_client()
     except Exception as e:
-        repl.console.print(f"[red]Failed to switch backend: {e}[/red]")
+        repl.repl.ui_messages.post(f"[red]Failed to switch backend: {e}[/red]")
         return
     # validate some values
 
@@ -635,7 +721,7 @@ def load_config(repl, *args, **kwargs):
 
 
 def history_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     table = Table(title="Conversation History")
     table.add_column("Role", style="cyan")
     table.add_column("Content", style="white")
@@ -648,30 +734,30 @@ def history_command(repl, *args, **kwargs):
         if len(content) > 100:
             content = content[:100] + "..."
         table.add_row(role, content)
-    console.print(table)
+    repl.ui_messages.post(table)
     if "save" in args:
         repl.save_conversation_history()
 
 def role_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     with repl._state_lock:
         repl.current_role = args[0]
         repl.prompt_gen.reload_profiles()
         repl.base_system_prompt = repl.prompt_gen.generate_prompt(repl.current_role)
         repl.system_prompt = repl._build_system_prompt()
         repl.messages = [{"role": "system", "content": repl.system_prompt}] + repl.messages[1:]
-    console.print(f"[yellow]Role switched to: {repl.current_role}[/yellow]")
+    repl.ui_messages.post(f"[yellow]Role switched to: {repl.current_role}[/yellow]")
 
 def model_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     if len(args) < 1:
         model_str = "\n\t".join(repl.api.available_models)
-        console.print(f'availabe models: \n\t{model_str} (default: {repl.model})')
+        repl.ui_messages.post(f'availabe models: \n\t{model_str} (default: {repl.model})')
         return
     repl.api.model = repl.api.find_model(args[0].strip())
     repl.model = repl.api.model or args[0].strip()
 
-    console.print(f"[yellow]Model switched to: {repl.model}[/yellow]")
+    repl.ui_messages.post(f"[yellow]Model switched to: {repl.model}[/yellow]")
 
 def _make_fence(contents: str) -> str:
     fences = re.findall(r"`+", contents)
@@ -704,26 +790,26 @@ def load_command(repl, *args, **kwargs):
         repl.pending_user_inputs.put(message)
     return (message)
 def read_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     if len(args) < 1:
         cwd = Path.cwd()
-        console.print("current directory: " + str(cwd))
+        repl.ui_messages.post("current directory: " + str(cwd))
         files = '\n\t'.join([str(p) for p in cwd.glob('*')])
-        console.print(f"available files: \n{files}")
+        repl.ui_messages.post(f"available files: \n{files}")
         return
     fname = args[0].strip()
     contents = _read_file(fname)
     if contents:
-        #console.print(f"Contents of {fname}:\n{fence}\n{contents}\n{fence}")
-        console.print(contents) # raw output
+        #repl.ui_messages.post(f"Contents of {fname}:\n{fence}\n{contents}\n{fence}")
+        repl.ui_messages.post(contents) # raw output
 
 def shell_command(repl, *args, **kwargs):
-    console = repl.console
+    console = repl.ui_console
     # Join the args back into a single string so the user can use shell operators
     command_str = " ".join(args)
-    console.print(f"[dim]Executing: {command_str}[/dim]")
+    repl.ui_messages.post(f"[dim]Executing: {command_str}[/dim]")
 
     # Use the robust _run_bash function we refined
     result = run_bash(command_str, cwd=str(WORKSPACE_DIR))
 
-    console.print(result)
+    repl.ui_messages.post(result)
