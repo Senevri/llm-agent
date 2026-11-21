@@ -202,11 +202,11 @@ except (ImportError, Exception) as e:
 try:
     from tools import WORKSPACE_DIR
     from tools.agent_tools import TOOL_MAP as BASE_TOOL_MAP, TOOL_DEFINITIONS as BASE_TOOL_SCHEMAS
-except Exception:
-    logger.error("Failed to import agent tools")
+except ImportError as e:
+    logger.error(f"Failed to import agent tools: {e}")
     BASE_TOOL_MAP = {}
     BASE_TOOL_SCHEMAS = []
-    raise StartupError("Failed to import agent tools")
+    raise StartupError(f"Failed to import agent tools {e}")
     exit(1)
 
 from skill_system.tool_registry import ToolRegistry, ToolCallResult
@@ -265,6 +265,7 @@ try:
 except Exception:
     logger.error("Failed to import prompt_toolkit")
     prompt_session = None
+    exit(1)
 
 try:
     from prompt_toolkit.patch_stdout import patch_stdout
@@ -323,6 +324,9 @@ class LLMRepl:
             # Note: llm_repl mutates self.api, self.client,
             # and self.model based on the loaded config.
             self.api = load_config(self, model=model)
+        except Exception as e:
+            logger.errorf(f"Failed to load config: {e}")
+        try:
             self.client, discovered_model = self.api.get_client() # type: ignore
             self.model = discovered_model
         except Exception as e:
@@ -388,7 +392,7 @@ class LLMRepl:
         while not self._shutdown_done:
             for msg in self.ui_messages.drain():
                 if msg.kind == "print":
-                    self.ui_console.print(msg.content, style=msg.style)
+                    self.ui_console.print(msg.content, style=msg.style, end=msg.end)
                 if msg.kind == "rule":
                     self.ui_console.rule(msg.content, style=msg.style)
 
@@ -400,8 +404,6 @@ class LLMRepl:
             size_bytes(msg)
             for msg in self.messages
         )
-
-
         # profile_bytes = sum(self.profile_manager.get_profile_string().encode("utf-8"))
         profile_bytes = 0 # included in system_prompt
         prompt_bytes = len(self.system_prompt.encode("utf-8"))
@@ -428,6 +430,8 @@ class LLMRepl:
             host = urlparse(f["base_url"]).netloc      # "(unset)" -> "" -> skipped
             if host:
                 out += [sep, ("class:bottom-toolbar.meta", host)]
+            ctx = f["n_ctx"]
+            out += [sep, ("class:bottom-toolbar.meta", str(ctx))]
             cls = "class:bottom-toolbar.warn" if f["pct"] >= 80 else "class:bottom-toolbar"
             out += [sep, (cls, f"{f['pct']:.0f}%")]
             if self.agent_active:
@@ -455,11 +459,15 @@ class LLMRepl:
             logger.warning(f"Profile queue is backing up: {queue_size} items")
 
     def get_diagnostics(self):
+        if self.api:
+            usage = self.api.usage.summary()
+        else:
+            usage = "[red]API not initialized![/red]"
         return {
             "model": self.model,
             "messages": len(self.messages),
             "context_bytes": self.check_all_context_use(),
-            "usage": self.api.usage.summary(),
+            "usage": usage,
         }
 
     def save_conversation_history(self): # save_messages
@@ -525,7 +533,10 @@ class LLMRepl:
 
         logger.info("LLMRepl shutdown complete.")
     def _build_system_prompt(self) -> str:
-        profile_str = self.profile_manager.get_profile_string()
+        profile_str = ""
+        if hasattr(self, "profile_manager"):
+            profile_str = self.profile_manager.get_profile_string()
+
 
         sections = [
             self.base_system_prompt,
@@ -607,10 +618,14 @@ class LLMRepl:
 
                 if original_index < len(unused_tools) // 2 and count < threshold:
                     self.tool_registry.disable_tool(tool_name)    # math
+        t_content = (
+            f"[Disabled tools]: {", ".join(self.tool_registry._disabled_tools)}"
+            "re-enable by putting '/tool <tool_name>:enable ' into your response."
+                     )
 
         tool_message = {
             "role": "system",
-            "content": f"[Disabled tools]: {", ".join(self.tool_registry._disabled_tools)}",
+            "content": t_content,
         }
 
         with self._state_lock:
@@ -624,13 +639,10 @@ class LLMRepl:
                 *new_tail
             ])
 
-
-
-
         try:
             self.save_conversation_history()
-        except Exception:
-            logger.exception("Trim: failed to archive conversation history")
+        except Exception as e:
+            logger.exception(f"Trim: failed to archive conversation history. Error: {e}")
 
 
     def _request_chat_completion(self, messages: List[Dict[str, Any]], tools=None, tool_choice=None):
@@ -645,6 +657,7 @@ class LLMRepl:
                 messages=normalize_messages(messages, self.backend)
             )
         self.last_message_time = time.time()
+        #fails oif no client, ofc.
         return self.client.chat.completions.create(
             model=self.model,
             messages=normalize_messages(messages, self.backend),
@@ -653,52 +666,56 @@ class LLMRepl:
         )
     def _execute_tools(self, tool_calls: List[Any]) -> List[ToolCallResult]:
         results: List[ToolCallResult] = []
-        with patch_stdout(True):
-            self.ui_messages.post(
-                f"[bold blue][*] Model requested {len(tool_calls)} tool call(s).[/bold blue]")
+        self.ui_messages.post(
+            f"[bold blue][*] Model requested {len(tool_calls)} tool call(s).[/bold blue]")
 
-            for tc in tool_calls:
-                name = getattr(tc.function, "name", "")
+        for tc in tool_calls:
+            name = getattr(tc.function, "name", "")
 
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                    if not isinstance(args, dict):
-                        raise ValueError("Tool arguments must be a JSON object.")
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+                if not isinstance(args, dict):
+                    raise ValueError("Tool arguments must be a JSON object.")
 
-                    preview = str(args)
+                preview = str(args)
 
-                    if len(preview) > 200:
-                        preview = preview[:200] + "..."
+                if len(preview) > 200:
+                    preview = preview[:200] + "..."
 
-                    logger.info("Executing tool %s with %s", name, preview)
-                    logger.debug("full args: %s", args)
+                logger.info("Executing tool %s with %s", name, preview)
+                logger.debug("full args: %s", args)
 
-                    self.ui_messages.post(f"  [blue]tool:[/blue] {name}({preview})")
+                self.ui_messages.post(f"  [blue]tool:[/blue] {name}({preview})")
 
-                    result = self.tool_registry.execute(name, **args)
+                result = self.tool_registry.execute(name, **args)
 
-                    if result is None:
-                        result = "Error: tool returned no result (None)."
+                if result is None:
+                    result = "Error: tool returned no result (None)."
 
-                    content = result if isinstance(result, str) else str(result)
-                    response_str = f"  [green]result:[/green] {content}"
-                    panel = Panel(response_str, box = box.SIMPLE_HEAVY,
-                                        border_style="none", padding=(0, 1, 2, 1))
+                content = result if isinstance(result, str) else str(result)
+                if len(content) > 160:
+                    content = "\n" + content
+                response_str = f"  [green]result:[/green] {content}"
+                panel = Panel(response_str, box = box.SIMPLE_HEAVY,
+                                    border_style="none", padding=(0, 1, 2, 1))
 
-                    self.ui_messages.post(panel)
+                self.ui_messages.post(panel)
 
-                except Exception as e:
-                    logger.exception("Tool %s failed", name)
-                    content = f"Error executing tool {name} with args {args}: {e}"
+            except Exception as e:
+                logger.exception("Tool %s failed", name)
+                content = f"Error executing tool {name} with args {args}: {e}"
 
-            # Always return a result, including for malformed arguments and errors.
-            results.append(ToolCallResult(tool_call_id=tc.id, name=name, content=content))
+        # Always return a result, including for malformed arguments and errors.
+        results.append(ToolCallResult(tool_call_id=tc.id, name=name, content=content))
 
         return results
 
     def _get_tool_results(self, tool_calls) -> Optional[List[ToolCallResult]]:
         from pprint import pformat
-        MAX_TOOL_RESULTS_CHARS = 4000
+        if not self.api:
+            logger.error("called _get_tool_results without api!")
+            return []
+        max_tool_result_tokens = int(self.api.usage.remaining_context_tokens * 0.8)
 
         tool_results = self._execute_tools(tool_calls)
         if not tool_results:
@@ -708,27 +725,19 @@ class LLMRepl:
             global tool_logger
             if not tool_logger:
                 tool_logger = setup_logging("ReplToolLogger", level="WARNING")
-            tool_logger.info("Tool results: %s", pformat(str(tool_results)))
-            result_length = len(str(tool_results))
-            if  result_length> MAX_TOOL_RESULTS_CHARS:
-                _mtr = MAX_TOOL_RESULTS_CHARS
-                # generate hash
-                _id =  f"#{secrets.token_hex(8)}"
-                # msg was warning; changed to info since it _currently works_
-                tool_logger.info(
-                    "Tool results too long %s: %s",
+            _id =  f"#{secrets.token_hex(8)}"
+            # We already have the full tool result stored; no need to do it specially in compressor
+            tool_logger.info("Tool results: %s %s", _id, pformat([t for t in tool_results]))
+            result_length = estimate_tokens(tool_results)
+            if  result_length> max_tool_result_tokens:
+                compressor = Compressor(self.api)
+                tool_results = compressor.truncate_tool_results(
                     _id,
-                    pformat([t for t in tool_results])
+                    tool_results,
+                    max_tool_result_tokens,
+                    tool_logger
                     )
-                # truncate tool results
-                for i, result in enumerate(tool_results):
-                    result["content"] = (
-                        f"Tool output truncated; original: {result_length} chars. "
-                        f"see {_relative_paths_helper(tool_logger.log_file)} for " # type: ignore
-                        f"full output. tag: {_id}\n"
-                        f"{result.to_message(_mtr).get('content')}"
-                        )
-                    tool_results[i] = result
+
         return tool_results
 
     def _start_background_send(self, user_input: str) -> bool:
@@ -740,7 +749,7 @@ class LLMRepl:
 #
     def _loop_status_text(self) -> str:
         if self.loop_task is None:
-            return "[turqoise4]ᓚᘏᗢ[[turqoise4]]"
+            return "[turqoise4]ᓚᘏᗢ[/turqoise4]"
         remaining = self.loop_task.get_remaining_time()   # now side-effect free
         return f"Loop: {remaining}" if remaining else "loop idle"
 
@@ -750,7 +759,7 @@ class LLMRepl:
     def _draw_end_rule(self, newline=False):
         if newline:
             self.ui_messages.post("\n")
-        self.ui_messages.post(self._loop_status_text(), kind="rule")
+        self.ui_messages.post(self._loop_status_text(), kind="rule", style="green")
         self.no_reply = False        # keep this — it's the re-arm
 
 
@@ -785,8 +794,7 @@ class LLMRepl:
         while True:
             # Let's mark that the message was sent
             # self._draw_end_rule(True)
-            with patch_stdout(True):
-                self.ui_messages.post(f"\n[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
+            self.ui_messages.post(f"\n[dim]Thinking...   ({self.check_all_context_use()} bytes)[/dim]")
             if self.status == "stop":
                 self.current_bg_task.stop()
                 return "stopped"
@@ -811,9 +819,8 @@ class LLMRepl:
             try:
                 # json.dumps(self.tool_schemas) # defensive validation
                 self.agent_active = True
-                with patch_stdout(True):
-                    for msg in current_messages[-6:]:
-                        self.ui_messages.post(msg["role"], repr(msg.get("content", ""))[:100])
+                for msg in current_messages[-6:]:
+                    self.ui_messages.post(msg["role"], repr(msg.get("content", ""))[:100])
                 response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
                 msg = response.choices[0].message
                 # print((self.api.model, self.api.port, self.api.base_url))
@@ -872,6 +879,8 @@ class LLMRepl:
                         for tool_name in tool_requests:
                             if self.tool_registry.enable_tool_if_not_banned(tool_name):
                                 self.ui_messages.post(f"[green]Re-enabled tool on request: {tool_name}[/green]")
+                                with self._state_lock:
+                                    self.messages.append({"role": "system", "content": f"{tool_name} enabled"})
                             else:
                                 self.ui_messages.post(f"[red]Cannot re-enable '{tool_name}': tool is banned or not found[/red]")
                     elif "/tool" in content and not tool_requests:
@@ -924,7 +933,6 @@ class LLMRepl:
                     self.agent_active = False
                     raise APIError(f"Response timed out after {elapsed:.2f}s")
                 if not self._handle_api_error(e):
-
                     self.agent_active = False
                     return f"API Error: {e}"
 
@@ -972,7 +980,7 @@ class LLMRepl:
                     new_limit = int(self.api.context_limit / 1.1)
                     self.api.update_context_limit(int(new_limit))
                 logger.warning(f"Failed to update context limit, reduced context from {old_limit} to {new_limit}.")
-            self._trim_context(bool(self.api.context_limit*0.8))
+            self._trim_context(True)
             self._consolidate_profile()
 
         with self._state_lock:
@@ -1094,28 +1102,35 @@ class LLMRepl:
             diagnostics = self.get_diagnostics()
             self.ui_messages.post(Panel(Markdown(str(diagnostics)), title="Diagnostics"))
 
-    def _process_command(self, command, args, params):
+    def _process_command(self, command, args, params) -> Tuple[bool, Any]:
         logger.info(("COMMAND:", command, args, params))
-        status = self.cmd_dispatcher.dispatch(command, args, params)
+        try:
+            status = self.cmd_dispatcher.dispatch(command, args, params)
+        except Exception:
+            logger.exception("Failed to process command %s", command)
+            return False, None
         if status:
             # logger.info(f"Command status: {status}")
             if isinstance(status, LoopTask):
                 self.loop_task = status
             if isinstance(status, Message):
-                return status.to_dict()
-            return status
+                return True, status.to_dict()
+            return True, status
+        return False, None
 
     def _status_fields(self) -> dict:
         """Single source of truth for status display. Never raises, never mutates."""
         api    = getattr(self, "api", None)
         client = getattr(self, "client", None)
+        n_ctx = getattr(api, "context_limit", None) or -1
         usage  = getattr(api, "usage", None)
+
         return {
             "model":    getattr(self, "model", None) or "(unknown)",
             "base_url": str(getattr(client, "base_url", "") or "(unset)"),
-            "n_ctx":    getattr(api, "context_limit", None) or "(unset)",
             "backend":  getattr(self, "backend", None) or "(unset)",
-            "pct":      getattr(usage, "context_pct", 0.0) or 0.0,
+            "pct": getattr(usage, "context_pct", 0.0) or 0.0,
+            "n_ctx": n_ctx
         }
 
     def get_input_prompt_prefix(self):
@@ -1127,14 +1142,14 @@ class LLMRepl:
         return f"{prefix}User > "
     async def get_user_prompt(self, prompt_session):
         try:
-
             if not (self.loop_task and self.agent_active):
                 _sb =  self._draw_statusbar()
                 if _sb:
-                    self.ui_console.print()
+                    self.ui_console.print(_sb)
 
             input_prompt = self.get_input_prompt_prefix()
             if prompt_session is not None:
+                # doesn't work
                 user_input = await prompt_session.prompt_async(
                     input_prompt,
                     bottom_toolbar=self._toolbar_fragments,
@@ -1142,6 +1157,7 @@ class LLMRepl:
                     refresh_interval=1
                 )
             else:
+                # works
                 user_input = input(input_prompt).strip()
             self.user_messages.append(user_input)
         except EOFError:
@@ -1150,8 +1166,8 @@ class LLMRepl:
             return "keyboard_interrupt"
         return user_input
 
-    def _draw_statusbar(self):
-        if self.no_reply:
+    def _draw_statusbar(self, force=True):
+        if self.no_reply and not force:
             return ""
         f = self._status_fields()
         self.no_reply = True
@@ -1161,6 +1177,14 @@ class LLMRepl:
 
     def run(self) -> None:
         asyncio.run(self._run())
+    # def run(self) -> None:
+    #     if sys.platform == "win32":
+    #         with asyncio.Runner(
+    #             loop_factory=asyncio.SelectorEventLoop
+    #         ) as runner:
+    #             runner.run(self._run())
+    #     else:
+    #         asyncio.run(self._run())
 
 
     def process_slash_commands(self, user_input) -> Tuple[bool, Any]:
@@ -1178,7 +1202,10 @@ class LLMRepl:
         if user_input.startswith("/"):
             command, args, params, errors = parse_command(user_input) # type: ignore
             if _is_command(command):
-                result = self._process_command(command, args, params)
+                status, result = self._process_command(command, args, params)
+                if not status:
+                    logger.error(result)
+                    result = None
                 return (True, result)
             elif command in self.aliases.keys():
                 alias = self.aliases.get(command,"")
@@ -1189,8 +1216,11 @@ class LLMRepl:
                 alias_cmd, args, params, errors = parse_command(f"/{alias}") # type: ignore
                 logger.info(f"Alias: {command} = {alias_cmd} {args} {params}")
                 if _is_command(alias_cmd):
-                    result = self._process_command(alias_cmd, args, params)
-                    return (True, result)
+                    status, result = self._process_command(alias_cmd, args, params)
+                    if not status:
+                        logger.error(result)
+                        result = None
+                    return (status, result)
                 self.ui_messages.post(f"Failed to process alias: {alias}")
             else:
                 self.ui_messages.post(f"[bold red]Unknown command: {user_input}[/bold red]")
@@ -1214,11 +1244,14 @@ class LLMRepl:
             try:
                 base_url =self.client.base_url
             except Exception:
+                # No client or no base_url in client
                 base_url = "(unset)"
 
             self.loop_task = None
             self.agent_active = False
-            prompt_session = PromptSession(history=FileHistory(str(history_path)), refresh_interval=1)
+            prompt_session = None
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                prompt_session = PromptSession(history=FileHistory(str(history_path)), refresh_interval=1)
             result = ""
             self.user_messages=[]
 
@@ -1231,7 +1264,7 @@ class LLMRepl:
 
                 self.ui_console = Console(
                     file=sys.stdout,
-                    force_terminal=True,
+                    #force_terminal=True,
                     color_system="auto",
                 )
                 console = self.ui_console
@@ -1251,13 +1284,14 @@ class LLMRepl:
                         # Get User Input
                         user_input = ""
 
+
                         if isinstance(self.loop_task, SimpleLoopTask):
                             if self.agent_active:
                                 # LLM is busy. Wait a bit and let the loop iterate.
                                 # DO NOT call get_next_input() here, or we pop content prematurely.
                                 await asyncio.sleep(0.5)
                             # Priority 2: Loop task has more inputs
-                            if isinstance(self.loop_task, SimpleLoopTask) and not self.agent_active:
+                            if (not self.agent_active) and isinstance(self.loop_task, SimpleLoopTask):
                                 next_input = self.loop_task.get_next_input() or ""
                                 # tick
                                 if next_input:
@@ -1273,7 +1307,6 @@ class LLMRepl:
                                 console.print("[dim]Processing queued input...[/dim]")
                             except queue.Empty:
                                 pass
-
                         if not user_input or user_input in ("", "None"): # Weird bug
                             if not self.loop_task:
                                 self.status="run"
@@ -1282,7 +1315,6 @@ class LLMRepl:
                                 if user_input in ["keyboard_interrupt", "stop", "quit"]:
                                     self._draw_end_rule()
                                     raise KeyboardInterrupt("Interrupted by User")
-
 
                         messages = self.user_messages
                         self.user_messages = []
@@ -1303,9 +1335,11 @@ class LLMRepl:
                         if status == True:
                             if result == "quit": # was slashcommand, do not pass go
                                 raise KeyboardInterrupt("Quit command received")
-                            console.print(result)
-                            continue
+                            if result is not None:
+                                console.print(result)
                             user_input = ""
+                            continue
+
 
 
 
@@ -1618,7 +1652,7 @@ def main() -> int:
     except Exception as e:
         logger.exception("Failed to initialize REPL")
         try:
-            logger.Error(f"Failed to start REPL: {e}")
+            logger.error(f"Failed to start REPL: {e}")
         except Exception:
             sys.stderr.write(f"Failed to start REPL: {e}\n")
         return 1
@@ -1628,13 +1662,13 @@ def main() -> int:
         with repl:
             repl.run()
     except KeyboardInterrupt:
-        repl.ui_messages.post("\n[bold red]Goodbye![/bold red]")
+        repl.ui_console.print("\n[bold red]Goodbye![/bold red]")
     except EOFError:
-        repl.ui_messages.post("[bold red]Goodbye![/bold red]")
+        repl.ui_console.print("[bold red]Goodbye![/bold red]")
     except Exception as e:
         logger.exception(f"Fatal REPL error: {e}")
         try:
-            repl.ui_messages.post(f"[bold red]Fatal REPL error: {e}[/bold red]")
+            repl.ui_console.print(f"[bold red]Fatal REPL error: {e}[/bold red]")
         except Exception:
             sys.stderr.write(f"Fatal REPL error: {e}\n")
         return 1
