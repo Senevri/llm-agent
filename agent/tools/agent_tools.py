@@ -302,8 +302,8 @@ def list_files(path: str = ".", filterstr: str = "*", recurse: bool = False) -> 
     ]
 
     path = _relative_paths_helper(path)
-    logger.info(f"Listing files in: {to_relative(path)}")
     try:
+        logger.info(f"Listing files in: {to_relative(path)}")
         files = [to_relative(f) for f in _glob_files(path, filterstr, recurse) if Path(f).name not in ignorelist]
         return "\n".join(files) if files else "Directory is empty."
     except Exception as e:
@@ -667,5 +667,8 @@ for tool in TOOL_DEFINITIONS:
 
     try:
         Draft202012Validator.check_schema(schema)
+
     except Exception as e:
         print(f"Invalid schema in {tool["function"]["name"]}: {e}")
+        exit(1)
+print("Schema OK")

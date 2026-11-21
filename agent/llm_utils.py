@@ -30,6 +30,8 @@ def _role(m: Any) -> str:
 
 
 def _relative_paths_helper(path: str) -> str:
+    if isinstance(path, Path):
+        path=str(path)
     if not ("/" in path or "\\" in path):
         # if path.startswith(".\\") or path.startswith(r"./"):
         #     path = path.lstrip("./\\")

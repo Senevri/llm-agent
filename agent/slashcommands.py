@@ -1,5 +1,6 @@
 from loop_task import loop
 from pathlib import Path
+from typing import Optional
 import os
 import ast
 import inspect
@@ -182,6 +183,41 @@ class Script:
     def __repr__(self):
         return self.__str__()
 
+# --- Command helpers ----------------------------------------------------------
+def _switch_repl_backend(
+    repl,
+    backend=None,
+    *,
+    port=None,
+    model=None,
+    base_url=None,
+) -> LLMBackend:
+    backend = backend or repl.backend
+
+    api = LLMBackend(
+        backend=backend,
+        defer_init=True,
+        port=port,
+    )
+    api.port = port or api.port
+    api.model = model or api.model
+    api.base_url = base_url or api.base_url
+
+    api._get_endpoint()
+    api.model = api.endpoint.model
+    api.base_url = api.endpoint.base_url.rstrip("/")
+    api.port = api.endpoint.port
+
+    client, resolved_model = api.get_client()
+
+    # Commit only after successful initialization.
+    repl.api = api
+    repl.client = client
+    repl.model = resolved_model
+    repl.backend = backend
+
+    return api
+
 def alias_command(repl, *args, **kwargs):
     console = repl.ui_console
     if len(args) < 2:
@@ -221,7 +257,7 @@ def clear_command(repl, *args, **kwargs):
 def status_command(repl, *args, **kwargs):
     # TODO: other status here?
     repl.no_reply = False
-    repl._draw_statusbar()
+    repl._draw_statusbar(force=True)
     console = repl.ui_console
     if hasattr(repl, 'current_bg_task') and repl.current_bg_task:
         status = "🟢 Running" if repl.current_bg_task.is_running else "🏁 Finished"
@@ -444,23 +480,17 @@ def backend_command(repl, *args, **kwargs):
         repl.backend = args[0]
         try:
             port =  kwargs.get("port")
-            api = LLMBackend(backend=repl.backend, defer_init=True, port=port)
-            api.port = port or api.port
-            api.model = kwargs.get("model", api.model)
-            api.base_url = kwargs.get("base_url", api.base_url)
-            api._get_endpoint()
-            api.model = api.endpoint.model
-            api.base_url = api.endpoint.base_url.rstrip("/")
-            api.port = api.endpoint.port
-            repl.client, repl.model = api.get_client()
+            model = kwargs.get("model")
+            base_url = kwargs.get("base_url")
+            api = _switch_repl_backend(repl, repl.backend, port=port, model=model, base_url=base_url)
             repl.api = api
-        except (ConnectError, HTTPError) as e:
+        except (ConnectError, HTTPError, ValueError) as e:
+            logger.exception(e)
             pd = " ".join(args[1:])
             repl.ui_messages.post(f"[red]Failed to switch backend: {pd}{e}[/red]")
             repl.backend = old_backend[0]
-            repl.api.port, repl.api.model, repl.client = old_backend[1:]
             return
-
+        logger.debug("reloading profiles")
         repl.prompt_gen.reload_profiles()
         repl.base_system_prompt = repl.prompt_gen.generate_prompt(repl.current_role)
         repl.system_prompt = repl._build_system_prompt()
@@ -468,6 +498,7 @@ def backend_command(repl, *args, **kwargs):
     # save conf
     save_config(repl)
     repl.ui_messages.post(f"[yellow]Backend switched to: {repl.backend}[/yellow]")
+    repl._draw_statusbar(force=True)
 
 def tools_command(repl, *args, **kwargs):
     console = repl.ui_console
@@ -664,7 +695,7 @@ def save_config(repl, *args, **kwargs):
     with open(Path.cwd() / "llm_repl.yaml", "w") as f:
         yaml.dump(repl_representation, f)
 
-def load_config(repl, *args, **kwargs):
+def load_config(repl, *args, **kwargs) -> Optional[LLMBackend] :
     conf_path = Path(Path.cwd() / "llm_repl.yaml")
     conf = {}
     if conf_path.is_file():
@@ -694,15 +725,14 @@ def load_config(repl, *args, **kwargs):
 
     try:
         port = conf.get("port", repl.port)
-        repl.api = LLMBackend(backend=conf.get("backend", repl.backend), defer_init=True, port=port)
-        repl.api.port = port
-        repl.api.model = conf.get("model", repl.api.model)
-        repl.api.base_url = conf.get("base_url", repl.api.base_url)
-        repl.api._get_endpoint()
-        repl.client, repl.model = repl.api.get_client()
+        backend=conf.get("backend", repl.backend)
+        model = conf.get("model", None)
+        base_url = conf.get("base_url", None)
+        repl.api = _switch_repl_backend(repl, backend=backend, port=port, model=model, base_url=base_url)
+
     except Exception as e:
-        repl.repl.ui_messages.post(f"[red]Failed to switch backend: {e}[/red]")
-        return
+        repl.ui_messages.post(f"[red]Failed to switch backend: {e}[/red]")
+        return repl.api #In whatever state
     # validate some values
 
     repl.aliases = {}

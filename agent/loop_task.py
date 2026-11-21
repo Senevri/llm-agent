@@ -21,47 +21,6 @@ except ImportError:
     from agent_dispatcher import AgentDispatcher, Status as AgentStatus
 
 
-# --- Stubs for rich (mirrors original) ---
-try:
-    from rich.console import Console
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    from rich.table import Table
-
-except Exception:
-    class Console:  # type: ignore
-        def print(self, msg, *args, **kwargs):
-            print(msg)
-        def rule(self, title):
-            print(f"--- {title} ---")
-    class Markdown:  # type: ignore
-        def __init__(self, text):
-            self.text = text
-    class Panel:  # type: ignore
-        def __init__(self, content, title=None):
-            self.content = content
-            self.title = title
-    class Table:  # type: ignore
-        def __init__(self, title=None):
-            self.title = title
-        def add_column(self, *a, **k):
-            pass
-        def add_row(self, *a, **k):
-            pass
-    console = Console()
-
-try:
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.history import FileHistory
-    # Figure out filehistory location
-    # TODO: this should be configurable
-    if Path("/workspace").exists:
-        history_path = "/workspace/"
-    else: history_path=Path.cwd()
-    prompt_session = PromptSession(history=FileHistory(str(history_path)))
-except Exception:
-    prompt_session = None
-
 if os.getenv("DEBUG"):
     # --- Stubs for LLMRepl, AgentDispatcher, AgentStatus ---
     class AgentStatus:  # type: ignore

@@ -40,7 +40,7 @@ class LLMBackend:
         self.backends = BACKEND_MAP.keys()
         if not defer_init:
             self.endpoint: Optional[APIEndpoint] = BACKEND_MAP[self.backend](model=self.model)
-            assert self.endpoint
+            # assert self.endpoint
             self.port: Optional[int] = self.port or self.endpoint.port
             self.context_limit = self.endpoint.ctx_size
             if self.endpoint.rate_limits:

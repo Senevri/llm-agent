@@ -30,7 +30,7 @@ class LogQueueListener(threading.Thread):
     def stop(self):
         self._stop_event.set()
         try:
-            self.log_queue.put(None)
+            self.log_queue.put(None) # There's the none...
         except Exception:
             pass
 

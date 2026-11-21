@@ -5,6 +5,8 @@ from llm_utils import _role, robust_json_extract, normalize_messages
 import logging
 from custom_logger import setup_logging
 from prompt_generator import PromptGenerator, find_prompt_dir
+import secrets
+from pprint import pformat
 
 logger = setup_logging(__name__)
 
@@ -59,6 +61,29 @@ class Compressor:
             return TrimPlan(keep=keep, compress=[], reason="none")
         return TrimPlan(keep=keep, compress=compress,
                         reason="forced" if force else "usage")
+
+    def truncate_tool_results(self, t_id, messages, max_tool_results, tool_logger):
+        # generate hash
+        tool_results = messages.copy()
+        result_length = estimate_tokens(tool_results)
+        _mtr = max_tool_results
+
+        # msg was warning; changed to info since it _currently works_
+        logger.info(
+            "Tool results too long %s",
+            pformat([t for t in tool_results])
+            )
+        max_result_per_msg = _mtr // len(tool_results)
+        # truncate tool results
+        for i, result in enumerate(tool_results):
+            result["content"] = (
+                f"Tool output truncated; original: {result_length} tokens. "
+                f"see {_relative_paths_helper(tool_logger.log_file)} for " # type: ignore
+                f"full output. tag: {t_id}\n"
+                f"{result.to_message(max_result_per_msg).get('content')}"
+                )
+            tool_results[i] = result
+        return tool_results
 
 
     def _combine_contents_by_role(self, messages) -> List:

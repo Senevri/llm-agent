@@ -142,10 +142,15 @@ class OpenAIEndpoint(APIEndpoint):
 class KoboldCppApiendpoint(APIEndpoint):
     def __init__(self, model: str = "", base_url: str = "", port: str = "5001"):
         super().__init__(model, base_url)
-        self.port = os.getenv("KOBOLD_PORT", port or "5001")
+        self.port = os.getenv("KOBOLD_PORT", port) or "5001"
+        logger.warning("kobold: %s", self.port)
+        assert self.port is not None
         if not base_url:
             host_ip = get_gateway_ip()
             self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:{self.port}/")
+        self.set_base_url(base_url.rstrip("/"), self.port)
+        if not self.base_url.endswith("/v1"):
+            self.base_url += "/v1"
         self.ctx_size = 8192
         self.api_key = "kobold"
         try:
