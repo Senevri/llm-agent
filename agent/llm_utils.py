@@ -451,27 +451,26 @@ def discover_mistral_context_window(base_url, model, default=4096):
     # todo: not implemented
     return discover_openai_context_window(base_url, model, default)
 
-# NOTE: NOT USING OPENAI FOR ANYTHING
-# def get_openai_models(base_url, api_key):
-#     root = base_url.rstrip("/")
-#     if not root.endswith("/v1"):
-#         root = f"{root}/v1"
+def get_openai_models(base_url, api_key):
+    root = base_url.rstrip("/")
+    if not root.endswith("/v1"):
+        root = f"{root}/v1"
 
-#     # Resolve API key from arguments or environment
-#     resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
+    # Resolve API key from arguments or environment
+    resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
 
-#     headers = {}
-#     if resolved_api_key:
-#         headers["Authorization"] = f"Bearer {resolved_api_key}"
-#     try:
-#         # Query the standard OpenAI-compatible model list endpoint
-#         r = httpx2.get(f"{root}/models", headers=headers, timeout=5)
-#         r.raise_for_status()
+    headers = {}
+    if resolved_api_key:
+        headers["Authorization"] = f"Bearer {resolved_api_key}"
+    try:
+        # Query the standard OpenAI-compatible model list endpoint
+        r = httpx2.get(f"{root}/models", headers=headers, timeout=5)
+        r.raise_for_status()
 
-#         return r.json().get("data", [])
-#     except Exception:
-#         # Silently fail and fall back to default (network error, bad key, or endpoint doesn't support it)
-#         pass
+        return r.json().get("data", [])
+    except Exception:
+        # Silently fail and fall back to default (network error, bad key, or endpoint doesn't support it)
+        pass
 
 def discover_openai_context_window(
     base_url: str,

@@ -17,6 +17,7 @@ from custom_logger import setup_logging
 from model_catalog import MODEL_CATALOGS
 from get_ip import get_gateway_ip
 from endpoint_config import BackendConfig, ProxyConfig
+from llm_utils import discover_context_window
 
 logger = setup_logging(__name__) # Could use unifiedagent
 
@@ -27,6 +28,7 @@ class APIError(Exception):
 class APIEndpoint:
     DEFAULTS: Dict[str, Any] = {}        # subclasses override
     REQUIRED_ENV: List[str] = []
+    DEFAULT_API_KEY: str = "default"
 
     def __init__(self, model="", base_url="", port="443", **_):
         self.model = model
@@ -41,23 +43,39 @@ class APIEndpoint:
 
     @classmethod
     def from_config(cls, cfg: BackendConfig) -> "APIEndpoint":
-        merged = {**cls.DEFAULTS}
-        for k in ("base_url", "port", "ctx_size"):
-            v = getattr(cfg, k)
-            if v not in ("", None): merged[k] = v
+        #cfg = {k:v for k, v in cfg.items() if v}
+        inst = cls(model=cfg.model or "", base_url=cfg.base_url, port=cfg.port)
 
-        api_key = cfg.api_key or os.getenv(cls.REQUIRED_ENV[0], "") if cls.REQUIRED_ENV else cfg.api_key
-        if cls.REQUIRED_ENV and not api_key:
-            raise RuntimeError(f"{cls.REQUIRED_ENV[0]} not set (backend {cfg.name!r}).")
+        # api_key resolution: YAML > env (if REQUIRED_ENV) > whatever __init__ set
+        inst.api_key = inst._resolve_api_key(cfg)
+        # else: keep __init__'s default (e.g. "ollama", "llama", "00000000")
 
-        inst = cls(model=cfg.model, base_url=merged.get("base_url", ""), port=str(merged.get("port", "")))
-        inst.api_key = api_key
+        if cfg.ctx_size is not None:
+            inst.ctx_size = inst._resolve_ctx(
+                cfg.ctx_size, cls.DEFAULTS.get("ctx_size", 4096))
+
+
+
         inst.timeout = cfg.timeout
-        inst.rate_limits = dict(cfg.rate_limits)
-        inst.ctx_size = inst._resolve_ctx(cfg.ctx_size, merged.get("ctx_size", 4096))
+        if cfg.rate_limits:
+            inst.rate_limits = dict(cfg.rate_limits)
         inst.extra = cfg.extra
         inst._post_config(cfg)
         return inst
+
+    def _resolve_api_key(self, cfg: BackendConfig) -> str:
+        if cfg.api_key:
+            return cfg.api_key
+        if self.REQUIRED_ENV:
+            val = os.getenv(self.REQUIRED_ENV[0], "")
+            if not val:
+                raise RuntimeError(f"{self.REQUIRED_ENV[0]} not set (backend {cfg.name!r}).")
+            return val
+        return self.DEFAULT_API_KEY
+
+
+    def build_endpoint_cli(type_: str, **kwargs) -> APIEndpoint:
+        return DRIVERS[type_].from_config(BackendConfig.from_cli(type_, **kwargs))
 
     def _resolve_ctx(self, cfg_ctx, default) -> int:
         if cfg_ctx == "auto":
@@ -87,8 +105,10 @@ class APIEndpoint:
     def set_base_url(self, base_url, port=None):
         #parsed = urlsplit(base_url)
         #print (f"Setting base URL to {base_url} with port {port}")
+        if port == "None":
+            port = None # Normalize
         msg_str = f"Setting base URL to {base_url}"
-        if port:
+        if port not in (None, ""):
             msg_str += f" with port {port}"
         logger.info(msg_str)
         parsed = urlparse(base_url)
@@ -97,10 +117,11 @@ class APIEndpoint:
         logger.debug(f"Parsed URL: {parsed}") # print(parsed)
 
         base_url =  parsed.netloc.split(":")[0] or parsed.netloc
-        if port:
-            parsed = parsed._replace(netloc=f"{base_url}:{self.port}")
+        print(base_url)
+        if port not in (None, ""):
+            parsed = parsed._replace(netloc=f"{base_url}:{port}")
         # parsed = parsed._replace(port=port)
-
+        assert "None" not in parsed
         self.base_url = parsed.geturl().rstrip("/")
         logger.info (f"Set base url to {self.base_url}")
         # raise Exception("debugging")
@@ -110,7 +131,7 @@ class APIEndpoint:
         return "not_implemented"
 
 class OllamaCloudEndpoint(APIEndpoint):
-    DEFAULTS = {"base_url": "https://ollama.com/api", "port": "443", "ctx_size": 32768}
+    #DEFAULTS = {"base_url": "https://api.ollama.com/v1", "port": "443", "ctx_size": 32768}
     REQUIRED_ENV = ["OLLAMA_API_KEY"]
 
     def __init__(self, model="", base_url="", port="443", **_):
@@ -124,6 +145,7 @@ class OllamaCloudEndpoint(APIEndpoint):
     def get_model(self):
         # risky.
         return self.model or None
+
     def get_models(self) -> list[str]:
         try:
             r = httpx2.get(f"{self.base_url}/models",
@@ -139,14 +161,11 @@ class OllamaCloudEndpoint(APIEndpoint):
         return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
 
 class OpenAIEndpoint(APIEndpoint):
-
     def __init__(self, model: str = "", base_url: str = "http://localhost", port: str = "8080"):
         if port == "None":
             raise Exception("What the actual fuck?")
-        if port is None:
-            port = "8080"
+        super().__init__(model, base_url, port)
         self.port = port
-        super().__init__(model, base_url, self.port)
         self.api_key = "00000000"
         self.ctx_size = 32768  # Sensible default fallback;
         self.model = model
@@ -213,15 +232,18 @@ class OpenAIEndpoint(APIEndpoint):
 
 
 class KoboldCppApiendpoint(APIEndpoint):
+    #DEFAULTS = {"base_url": "", "port": "5001", "ctx_size": 8192, "api_key": "none"}
     def __init__(self, model: str = "", base_url: str = "", port: str = "5001"):
         super().__init__(model, base_url)
-        self.port = os.getenv("KOBOLD_PORT", port) or "5001"
+        self.port = port or self.DEFAULTS.get("port", "")
         logger.warning("kobold: %s", self.port)
         assert self.port is not None
+
         if not base_url:
             host_ip = get_gateway_ip()
-            self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:{self.port}/")
+            base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:{self.port}/")
         self.set_base_url(base_url.rstrip("/"), self.port)
+
         # if not self.base_url.endswith("/v1"):
         #     self.base_url += "/v1"
         self.ctx_size = 8192
@@ -234,10 +256,14 @@ class KoboldCppApiendpoint(APIEndpoint):
             logger.error(f"Failed to get Kobold model: {e}")
             self.model = ""
 
+    def _discover_ctx(self) -> int:
+        r = httpx2.get(self.base_url + "/api/extra/true_max_context_length", timeout=10)
+        r.raise_for_status()
+        return r.json()["value"]
+
     def get_kobold_ctx(self):
         # /api/extra/true_max_context_length
-        current_ctx = httpx2.get(self.base_url + "/api/extra/true_max_context_length")
-        return current_ctx.json()["value"]
+        return self._discover_ctx()
 
     def get_model(self):
         self.get_kobold_model()
@@ -270,7 +296,8 @@ class LlamaApiEndpoint(APIEndpoint):
         GET /lora-adapters / POST /lora-adapters	List and set LoRA adapter scales at runtime
     """
     def __init__(self, model: str = "", base_url: str = "", port="9931"):
-        self.port = os.getenv("LLAMA_PORT", port or "9931")
+        port = port
+        self.port=port
         if not base_url:
             host_ip = get_gateway_ip()
             base_url = os.getenv("LLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1")
@@ -306,6 +333,11 @@ class LlamaApiEndpoint(APIEndpoint):
         except Exception as e:
             logger.warning(f"Failed to get context size: {e}")
 
+    def _discover_ctx(self) -> int:
+        url = self.base_url.removesuffix("/v1") + "/props"
+        r = httpx2.get(url, timeout=10); r.raise_for_status()
+        return r.json()["default_generation_settings"]["n_ctx"]
+
     @property
     def is_active(self):
         if not self.base_url:
@@ -323,12 +355,8 @@ class LlamaApiEndpoint(APIEndpoint):
 
 
     def get_context_size(self) -> int:
-        url = self.base_url.removesuffix("/v1") + "/props"
-        response = httpx2.get(url, timeout=10)
-        response.raise_for_status()
+        return self._discover_ctx()
 
-        props = response.json()
-        return props["default_generation_settings"]["n_ctx"]
 
     def get_client(self) -> tuple[OpenAI, str]:
         self.set_default_model()
@@ -366,28 +394,34 @@ class LlamaApiEndpoint(APIEndpoint):
         return available_models.json().get("models", [])
 
 class OllamaApiEndpoint(APIEndpoint):
-    def __init__(self, model: str = "", base_url: str = "", port="11434"):
-        self.port = os.getenv("OLLAMA_PORT", port or "11434")
+
+    def __init__(self, model="", base_url="", port="11434", api_key="", **_):
+        self.port = port
         if not base_url:
             host_ip = get_gateway_ip()
-            base_url = os.getenv(
-                "OLLAMA_BASE_URL", f"http://{host_ip}:{self.port}/v1"
-            )
+            base_url = os.getenv("OLLAMA_BASE_URL",
+                                 f"http://{host_ip}:{self.port}/v1")
         super().__init__(model, base_url, self.port)
         self.set_base_url(base_url.rstrip("/"), self.port)
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
-        self.api_key = "ollama"
-        self.ctx_size = 8192
+        self.api_key = api_key      # sentinel; from_config may override
+        self.ctx_size = self._discover_ctx()
         self.available_models = MODEL_CATALOGS["ollama"]()
-        self.model = model or self.get_model() or self.available_models[0]
+        self.model = model or self.get_model() or (self.available_models[0]
+                                                   if self.available_models else "")
+
+    def get_model(self):
+        self.model = self.get_ollama_model()
+        return self.model
 
     def get_client(self) -> tuple[OpenAI, str]:
         # Resolve default model at the last possible moment
         return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
 
-    def get_model(self):
-        self.model = self.get_ollama_model()
+    def _discover_ctx(self):
+        return discover_context_window(self.base_url, self.model, backend="ollama")
+
 
     def get_models(self):
         return self.available_models
@@ -395,6 +429,8 @@ class OllamaApiEndpoint(APIEndpoint):
     def get_ollama_model(self):
         # /apimodel
         # current_model = httpx2.get(self.base_url + "/api/v1/model")
+        if not self.available_models:
+            return
         for model in self.available_models:
             if self.model in model:
                 return model
@@ -402,18 +438,19 @@ class OllamaApiEndpoint(APIEndpoint):
 
 
 class MistralApiEndpoint(APIEndpoint):
-    def __init__(self, model: str = "", base_url: str = "", port="443"):
-        super().__init__(model, base_url=base_url)
-        self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
-        self.ctx_size = 32000
+    DEFAULTS = {"base_url": "https://api.mistral.ai/v1", "port": "443", "ctx_size": 32000}
+    REQUIRED_ENV = ["MISTRAL_API_KEY"]
+    #RATE_LIMITS = {"tokens_per_minute": 40000, "requests_per_second": 1}
+
+    def __init__(self, model="", base_url="", port="443", **kwargs):
+        super().__init__(model, base_url, port)
+        self.base_url = base_url or os.getenv("MISTRAL_BASE_URL") or self.DEFAULTS["base_url"]
+        self.port = port or self.DEFAULTS.get("port", "")
+        self.ctx_size = self.DEFAULTS["ctx_size"]
+        self.rate_limits = kwargs.get("rate_limits", {})
         self.available_models = MODEL_CATALOGS["mistral"]()
-        self.model = model or self.available_models[0]
-        self.port = port
+        self.model = model or (self.available_models[0] if self.available_models else "")
         self.api_key = os.getenv("MISTRAL_API_KEY")
-        self.rate_limits = {
-            "tokens_per_minute": 40000,
-            "requests_per_second": 1
-            }
         if not self.api_key:
             raise RuntimeError("MISTRAL_API_KEY not set.")
 
@@ -507,7 +544,7 @@ class AIHordeEndpoint(APIEndpoint):
             "AIHORDE_BASE_URL",
             "https://oai.aihorde.net/v1"
         )
-        self.port = port
+        port = port or self.DEFAULTS.get("port", "")
         self.api_key = os.getenv("AIHORDE_API_KEY", "")
 
         if not self.api_key:
@@ -525,7 +562,7 @@ class AIHordeEndpoint(APIEndpoint):
             self.model = ""
 
     #...should I deprecate this or make it return data from specific model? TODO apichange.
-    def get_model(self, model=None):
+    def get_model(self):
         return self.model
 
     def get_models(self) -> list[str]:
@@ -564,7 +601,7 @@ class OpenRouterEndpoint(APIEndpoint):
         self.ctx_size = 128000  # OpenRouter supports large context models
         self.available_models = MODEL_CATALOGS["openrouter"]()
         self.model = model or (self.available_models[0] if self.available_models else "")
-        self.port = port
+        port = port or self.DEFAULTS.get("port", "")
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         self.rate_limits = {
             "tokens_per_minute": 100000,
@@ -607,10 +644,10 @@ def build_endpoint(cfg: BackendConfig) -> APIEndpoint:
 def build_all(settings: ProxyConfig) -> Dict[str, APIEndpoint]:
     return {b.name: build_endpoint(b) for b in settings.backends}
 
-settings = ProxyConfig.from_file(Path.cwd() / "backend.yaml")
-endpoints = build_all(settings)
-
 if __name__ == "__main__":
+    settings = ProxyConfig.from_file(Path.cwd() / "backend.yaml")
+    endpoints = build_all(settings)
+
     for name, ep in endpoints.items():
         if ep.available_models:
             print("-"*60)
