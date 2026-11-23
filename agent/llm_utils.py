@@ -487,6 +487,7 @@ def discover_openai_context_window(
     :param default: Fallback context window if the API call fails or the field is missing.
     :param api_key: Optional API key. Falls back to MISTRAL_API_KEY or OPENAI_API_KEY env vars.
     """
+    ctx = default
     # Ensure base_url is clean and points to the /v1 endpoint
     models_data = get_openai_models(base_url, api_key)
     if not models_data:
@@ -499,18 +500,22 @@ def discover_openai_context_window(
             if m.get("id") == model:
                 for i in contex_window_keys:
                     if i in m:
-                        return int(m[i])
+                        ctx = int(m[i])
+                        break
 
             elif model in m.get("id", ""):
                 for i in contex_window_keys:
                     if i in m:
-                        return int(m[i])
+                        ctx = int(m[i])
+                        break
 
     except Exception:
         # Silently fail and fall back to default (network error, bad key, or endpoint doesn't support it)
         pass
 
-    return default
+    logger.info(f"OpenAI Context size: {ctx}")
+
+    return ctx
 
 import json
 try:

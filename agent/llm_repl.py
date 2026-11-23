@@ -17,7 +17,7 @@ from datetime import timedelta, datetime
 from functools import partial
 
 from logging.handlers import RotatingFileHandler
-from openai import OpenAI, APIConnectionError, APIError as AE, InternalServerError
+from openai import OpenAI, APIConnectionError, APIError as AE, InternalServerError, BadRequestError
 from openai_error_handling import classify_api_error, Action
 from pathlib import Path
 from pprint import pformat
@@ -561,8 +561,9 @@ class LLMRepl:
                f"{allowed_paths}"
             )
 
-        if self.api and self.client:
+        if self.api and self.client and sections:
             try:
+                logger.debug((self.api.context_limit, len(sections)))
                 if len(str(sections[:-1])) > self.api.context_limit:
                     compressor = Compressor(self.api, self.max_context_messages)
                     content = compressor.ai_compress(sections[1:-1], max_tokens=self.api.context_limit//2)
@@ -670,11 +671,16 @@ class LLMRepl:
             )
         self.last_message_time = time.time()
         #fails oif no client, ofc.
+        logger.debug(f"{len(tools)}, {tool_choice}")
+        #normalized_tool_choice = (tool_choice or "auto") if tools else None
         return self.client.chat.completions.create(
             model=self.model,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens,
             messages=normalize_messages(messages, self.backend),
-            tools=tools or [],
-            tool_choice=tool_choice or "auto",
+            tools=tools,
+            tool_choice=tool_choice
         )
     def _execute_tools(self, tool_calls: List[Any]) -> List[ToolCallResult]:
         results: List[ToolCallResult] = []
@@ -831,10 +837,14 @@ class LLMRepl:
                 warning_sent = True
             try:
                 # json.dumps(self.tool_schemas) # defensive validation
+                assert len(self.tool_schemas) > 0
                 self.agent_active = True
                 for msg in current_messages[-6:]:
                     self.ui_messages.post(msg["role"], repr(msg.get("content", ""))[:100])
-                response = self._request_chat_completion(current_messages, tools=self.tool_schemas, tool_choice="auto")
+                response = self._request_chat_completion(
+                    current_messages,
+                    tools=self.tool_schemas or [],
+                    tool_choice="auto")
                 msg = response.choices[0].message
                 # print((self.api.model, self.api.port, self.api.base_url))
                 # print("CONTENT:", repr(msg.content))
@@ -935,6 +945,17 @@ class LLMRepl:
                                     "Continue from the supplied historical summary."
                         })
                     continue
+                if isinstance(e, APIConnectionError):
+                    # if (e.request.status_code == 400
+                    #     and "Invalid value for 'tool choice'" in str(e)):
+                    #     logger.warning(f"Bad Request: {str(e)}")
+                    raise APIError(e)
+                if isinstance(e, BadRequestError):
+                    # if (e.request.status_code == 400
+                    #     and "Invalid value for 'tool choice'" in str(e)):
+                    #     logger.warning(f"Bad Request: {str(e)}")
+                    raise APIError(e)
+
                 if isinstance(e, InternalServerError):
                     return f"API Error: {e}"
                 elapsed = time.time() - start_time
@@ -952,6 +973,7 @@ class LLMRepl:
         with self._state_lock:
             if self.current_bg_task == None or self.status == "stop":
                 return False
+
         try:
             action, delay = classify_api_error(e)
         except Exception:
@@ -1309,6 +1331,7 @@ class LLMRepl:
                                         self.loop_task.cleanup()
                                         console.print("[yellow]Loop halted: REPL is in 'stop' state.[/yellow]")
                                     continue
+                                    next_input = None
 
                         if not user_input and not self.agent_active:
                             try:
@@ -1361,6 +1384,7 @@ class LLMRepl:
                                 self.agent_active = False
                         if (not self.agent_active):
                             self._start_background_send(user_input)
+                            user_input = ""
                         else:
                             # Getting false positive here
                             self.pending_user_inputs.put(user_input)
@@ -1431,8 +1455,8 @@ class LLMRepl:
                       "You are a helpful assistant that outputs ONLY valid JSON representing the user profile. "
                    )},
                  {"role": "user", "content": prompt}],
-                tools=None,
-                tool_choice=None,
+                tools = [], # No tools
+                tool_choice="auto",
                 temperature=0.1,
                 reasoning_effort="none",
                 max_tokens=2000
@@ -1440,7 +1464,7 @@ class LLMRepl:
             content = response.choices[0].message.content
 
             # DEBUG: See what the LLM actually returned
-            logger.debug(f"LLM raw profile response: {content}...")
+            # logger.debug(f"LLM raw profile response: {content}...")
 
             updated_json = None
             if content:
@@ -1448,8 +1472,9 @@ class LLMRepl:
             else:
                 raise ValueError("No Content")
 
-            if updated_json is None:
-                logger.debug(f"LLM raw profile response: {content}...")
+            if updated_json is None and self.backend != "mistral":
+                # logger.debug(f"LLM raw profile response: {content}...")
+
                 parsed = parse_profile_json_resilient(content, repair_fn=_repair_json_with_llm)
                 if parsed is None:
                     logger.error("Profile worker returned unrecoverable JSON; keeping existing profile.")
@@ -1469,6 +1494,7 @@ class LLMRepl:
             logger.info("✅ User profile updated by worker.")
 
         except Exception as e:
+            logger.exception(e)
             logger.error(f"Profile update failed: {e}")
 
 

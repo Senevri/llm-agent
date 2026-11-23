@@ -6,7 +6,7 @@ from typing import List, Dict
 from user_profile_manager import ContextSnapshot
 import logging
 from custom_logger import setup_logging
-logger = setup_logging(__name__, level="WARNING")
+logger = setup_logging(__name__, level="WARNING", colors=True)
 logger.setLevel(logging.WARNING)
 
 #from llm_repl import LLMRepl
@@ -68,8 +68,10 @@ class ProfileWorker(threading.Thread):
         if not self.batch:
             return
 
-        latest = self.batch[-1]
-        prompt = ""
+#        logger.warning(f"Batch {self.batch}")
+        latest = self.batch.pop()
+        prompt = []
+
 
         # Safely attempt to load the prompt template
         if hasattr(self.repl, 'prompt_gen') and self.repl.prompt_gen:

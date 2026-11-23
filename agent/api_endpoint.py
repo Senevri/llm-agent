@@ -30,14 +30,14 @@ class APIEndpoint:
     REQUIRED_ENV: List[str] = []
     DEFAULT_API_KEY: str = "default"
 
-    def __init__(self, model="", base_url="", port="443", **_):
+    def __init__(self, model="", base_url="", port="443", **args):
         self.model = model
         self.base_url = base_url
         self.port = port
         self.api_key = ""
         self.available_models: list[str] = []
-        self.rate_limits: Dict[str, Any] = {}
-        self.ctx_size: int = 4096
+        self.rate_limits: Dict[str, Any] = args.get("rate_limits", {})
+        self.ctx_size: int = args.get("ctx_size", 4096)
         self.timeout: int = 60
         self.extra = {}
 
@@ -537,18 +537,19 @@ class MistralApiEndpoint(APIEndpoint):
 
 class AIHordeEndpoint(APIEndpoint):
     """AI Horde through its OpenAI-compatible chat front."""
-    def __init__(self, model: str = "", base_url: str = "", port="443"):
+    def __init__(self, model: str = "", base_url: str = "", port="443", **kwargs):
         super().__init__(model, base_url=base_url)
 
-        self.base_url = os.getenv(
-            "AIHORDE_BASE_URL",
-            "https://oai.aihorde.net/v1"
-        )
-        port = port or self.DEFAULTS.get("port", "")
-        self.api_key = os.getenv("AIHORDE_API_KEY", "")
+        # self.base_url = os.getenv(
+        #     "AIHORDE_BASE_URL",
+        #     "https://oai.aihorde.net/v1"
+        # )
+        # port = port or self.DEFAULTS.get("port", "")
+        # self.api_key = os.getenv("AIHORDE_API_KEY", "")
 
-        if not self.api_key:
-            raise RuntimeError("AIHORDE_API_KEY not set.")
+        # if not self.api_key:
+        #     raise RuntimeError("AIHORDE_API_KEY not set.")
+        self.api_key = kwargs.get("api_key")
 
         self.ctx_size = 8192
 
@@ -591,6 +592,11 @@ class AIHordeEndpoint(APIEndpoint):
             ),
             self.model,
         )
+
+    def _discover_ctx(self) -> int:
+        return discover_context_window(self.base_url, self.model, backend="openai")
+
+
 
 
 class OpenRouterEndpoint(APIEndpoint):

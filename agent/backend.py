@@ -194,12 +194,14 @@ class LLMBackend:
         # 2. Discover context window (this updates the usage tracker)
         # Note: Removed `backend=self.backend` kwarg unless your discover_context_window explicitly requires it
         try:
-            self.usage.context_limit = discover_context_window(
-                self.endpoint.base_url,
-                model=self.endpoint.model,
-                default=self.endpoint.ctx_size,
-                backend=self.backend
-            )
+            self.usage.context_limit = self.endpoint._discover_ctx()
+            if not self.usage.context_limit:
+                self.usage.context_limit = discover_context_window(
+                    self.endpoint.base_url,
+                    model=self.endpoint.model,
+                    default=self.endpoint.ctx_size,
+                    backend=self.backend
+                )
             #logger.warn(self.usage.context_limit)
         except Exception as e:
             logger.error(f"Error discovering context window: {e}")

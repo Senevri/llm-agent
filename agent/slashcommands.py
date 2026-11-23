@@ -194,21 +194,21 @@ def _switch_repl_backend(
 ) -> LLMBackend:
     backend = backend or repl.backend
 
-    if repl.api:
-        repl.api.switch(backend, {
-            "port": port,
-            "model": model,
-            "base_url": base_url
-        })
-    else:
-        api = LLMBackend(
-            backend=backend,
-            defer_init=True,
-            port=port,
-        )
-        api.port = port or api.port
-        api.model = model or api.model
-        api.base_url = base_url or api.base_url
+    # if repl.api:
+    #     repl.api.switch(backend, {
+    #         "port": port,
+    #         "model": model,
+    #         "base_url": base_url
+    #     })
+    # else:
+    api = LLMBackend(
+        backend=backend,
+        defer_init=True,
+        port=port,
+    )
+    api.port = port or api.port
+    api.model = model or api.model
+    api.base_url = base_url or api.base_url
 
     api._get_endpoint()
     api.model = api.endpoint.model

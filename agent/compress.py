@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from llm_utils import estimate_tokens
 from typing import List, Dict, Any, Optional
-from llm_utils import _role, robust_json_extract, normalize_messages
+from llm_utils import _role, robust_json_extract, normalize_messages, _relative_paths_helper
 import logging
 from custom_logger import setup_logging
 from prompt_generator import PromptGenerator, find_prompt_dir
