@@ -10,3 +10,15 @@ goals, expertise, constraints, recurring context).
 - KEEP user preferences, recent goals, projects, stated schedule and todos.
 - Profile is for user, not the assistant.
 - Keep the gist of past things.
+
+example schema:
+```json
+{
+  "working_style": [],
+  "preferences": [],
+  "goals": [],
+  "active_projects": [],
+  "constraints": [],
+  "facts": []
+}
+```

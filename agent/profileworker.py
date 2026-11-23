@@ -105,4 +105,3 @@ class ProfileWorker(threading.Thread):
             latest.assistant_response,
             prompt=prompt
         )
-        self.batch = []

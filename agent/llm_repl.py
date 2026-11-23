@@ -65,7 +65,8 @@ if AGENT_DIR not in sys.path:
 
 from llm_utils import (
     size_bytes, estimate_tokens, normalize_messages, discover_candidate_dir,
-    robust_json_extract, balanced_braces_extract, _role, Message, _relative_paths_helper
+    robust_json_extract, balanced_braces_extract, _role, Message, _relative_paths_helper,
+    parse_profile_json_resilient
     )
 from profileworker import ProfileWorker
 
@@ -645,7 +646,15 @@ class LLMRepl:
             logger.exception(f"Trim: failed to archive conversation history. Error: {e}")
 
 
-    def _request_chat_completion(self, messages: List[Dict[str, Any]], tools=None, tool_choice=None):
+    def _request_chat_completion(
+            self,
+            messages: List[Dict[str, Any]],
+            tools=None,
+            tool_choice=None,
+            temperature=None,
+            reasoning_effort=None,
+            max_tokens=None
+            ):
         request_start_time = time.time()
         if self.backend == "mistral":
             if self.last_message_time and time.time() - self.last_message_time < 1:
@@ -654,7 +663,10 @@ class LLMRepl:
         if self.notools or os.getenv("BITNET", "0") == "1":
             return self.client.chat.completions.create(
                 model=self.model,
-                messages=normalize_messages(messages, self.backend)
+                messages=normalize_messages(messages, self.backend),
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                max_tokens=max_tokens
             )
         self.last_message_time = time.time()
         #fails oif no client, ofc.
@@ -774,12 +786,13 @@ class LLMRepl:
         # Release state lock
 
         if needs_trim:
-            self._request_chat_completion(
+            response = self._request_chat_completion(
                 [{"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": ("running low on context, update and compress memories and todos, "
                                                 "create a gist file, emergency trim at 90 percent context usage")}],
                 tools=None, tool_choice=None
                 )
+            self.ui_messages.post(response)
             self._trim_context()
         with self._state_lock:
             if user_input:
@@ -904,10 +917,6 @@ class LLMRepl:
                     # self.redraw_prompt = True
                     self.no_reply = False
                     self._draw_statusbar()
-                    # Hack:
-                    prefix = self.get_input_prompt_prefix()
-                    self.ui_messages.post(prefix, end="")
-
 
                 self._enqueue_profile_snapshot(user_input, content)
                 self.agent_active = False
@@ -1417,23 +1426,40 @@ class LLMRepl:
                 return
 
             response = self._request_chat_completion(
-                [{"role": "system", "content": "You are a helpful assistant that outputs ONLY valid JSON representing the user profile."},
+                [{"role": "system", "content":
+                  (
+                      "You are a helpful assistant that outputs ONLY valid JSON representing the user profile. "
+                   )},
                  {"role": "user", "content": prompt}],
                 tools=None,
                 tool_choice=None,
+                temperature=0.1,
+                reasoning_effort="none",
+                max_tokens=2000
             )
             content = response.choices[0].message.content
 
             # DEBUG: See what the LLM actually returned
-            # logger.debug(f"LLM raw profile response: {content[:100]}...")
+            logger.debug(f"LLM raw profile response: {content}...")
 
             updated_json = None
             if content:
                 updated_json = robust_json_extract(content)
+            else:
+                raise ValueError("No Content")
 
             if updated_json is None:
-                logger.error(f"Profile worker returned invalid JSON. Raw content: {content}")
-                raise ValueError("Profile worker returned invalid JSON.")
+                logger.debug(f"LLM raw profile response: {content}...")
+                parsed = parse_profile_json_resilient(content, repair_fn=_repair_json_with_llm)
+                if parsed is None:
+                    logger.error("Profile worker returned unrecoverable JSON; keeping existing profile.")
+                    logger.debug(f"Malformed profile content: Raw: \n {content}")
+                    raise ValueError("Profile worker returned invalid JSON.")
+
+                # Unwrap {"user_profile": {...}} if the model wrapped it
+                updated_json = parsed["user_profile"] if (
+                    "user_profile" in parsed and isinstance(parsed["user_profile"], dict) and len(parsed) == 1
+                ) else parsed
 
             with self._state_lock:
                 self.profile_manager.set_profile_data(updated_json)
@@ -1444,6 +1470,39 @@ class LLMRepl:
 
         except Exception as e:
             logger.error(f"Profile update failed: {e}")
+
+
+def _repair_json_with_llm(broken_text: str) -> str:
+    # Use a fast model with no reasoning/thinking overhead and explicit JSON-only instruction
+    prompt = (
+        "Fix the following truncated or malformed JSON into a single valid JSON object. "
+        "Output ONLY raw JSON, no markdown fences, no commentary. Do not invent new content, only use provided content.\n\n"
+        f"{broken_text[-6000:]}"  # tail usually shows where truncation/syntax broke
+    )
+    return fast_llm_complete(prompt, temperature=0.1, max_tokens=4096)
+
+def fast_llm_complete(prompt:str, temperature:float, max_tokens:int) -> str:
+    backend = LLMBackend("mistral")
+    client, model = backend.get_client()
+    if not client or not isinstance(client, OpenAI):
+        return ""
+    logger.info(f"Completing with {backend.backend}/{model}")
+    request = [
+        {"role": "system", "content":
+         "You are a helpful assistant that outputs ONLY valid JSON representing the user profile."
+         ' Minimum IF content: Return a {"profile_entry": "<language from content>"}'
+         },
+        {"role": "user", "content": prompt}
+    ]
+    result = client.chat.completions.create(
+        messages=normalize_messages(request, "mistral"),
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens
+        )
+    return result.choices[0].message.content or ""
+
+
 
 
 # --- Module-level tool helpers ----------------------------------------------------

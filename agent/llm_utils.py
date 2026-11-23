@@ -3,7 +3,7 @@ import time
 import re
 import os
 import httpx2
-from typing import Optional, Iterable, Dict, Any, Deque
+from typing import Optional, Iterable, Dict, Any, Deque, Callable
 import sys
 from collections import deque
 
@@ -233,51 +233,144 @@ class UsageTracker:
         }
 
 def robust_json_extract(text: str) -> Optional[Dict[str, Any]]:
-        if not isinstance(text, str):
+    if not isinstance(text, str):
+        return None
+
+    # Primary method: Find the outermost braces. This handles nested JSON perfectly.
+    start = text.find("{")
+    end = text.rfind("}")
+
+    json_str: Optional[str] = None
+    if start != -1 and end != -1 and end > start:
+        json_str = text[start:end + 1]
+    else:
+        logger.debug("stripping markdown fences")
+        # Fallback: Try to strip markdown fences if no braces found (shouldn't happen)
+        pattern = r"```(?:json)?\s*(\{.*\})\s*```" # Note: greedy .* instead of .*?
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            json_str = match.group(1)
+        else:
             return None
 
-        # Primary method: Find the outermost braces. This handles nested JSON perfectly.
-        start = text.find("{")
-        end = text.rfind("}")
-
-        if start != -1 and end != -1 and end > start:
-            json_str = text[start:end + 1]
-        else:
-            # Fallback: Try to strip markdown fences if no braces found (shouldn't happen)
-            pattern = r"```(?:json)?\s*(\{.*\})\s*```" # Note: greedy .* instead of .*?
-            match = re.search(pattern, text, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-            else:
-                return None
-
+    try:
+        parsed = json.loads(json_str)
+        if isinstance(parsed, dict) or isinstance(parsed, list):
+            return parsed
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON Decode failed on extracted string: {e}\nString snippet: {json_str[:200]}")
+    balanced = balanced_braces_extract(text)
+    if isinstance(balanced, dict):
+        return balanced
+    if isinstance(balanced, str):
         try:
-            parsed = json.loads(json_str)
+            parsed = json.loads(balanced)
             if isinstance(parsed, dict):
                 return parsed
-            return None
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON Decode failed on extracted string: {e}\nString snippet: {json_str[:200]}")
-            return balanced_braces_extract(text)
+        except Exception:
+            pass
 
-def balanced_braces_extract(text: str) -> Optional[Dict[str, Any]]:
+    return None
+
+_THINK_ANY_RE = re.compile(r"<think>(.*?)(?:</think>|$)", flags=re.DOTALL | re.IGNORECASE)
+
+def extract_thinking_blocks(text: str) -> list[str]:
+    return [m.group(1).strip() for m in _THINK_ANY_RE.finditer(text) if m.group(1).strip()]
+
+# 2. Caller / worker concern: sanitize LLM reasoning blocks before extracting
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
+_OPEN_THINK_RE = re.compile(r"<think>.*", flags=re.DOTALL | re.IGNORECASE)
+
+
+def strip_thinking(text: str) -> str:
+    """Remove <think> blocks (including unclosed ones from token truncation)."""
+    cleaned = _THINK_BLOCK_RE.sub("", text)
+    cleaned = _OPEN_THINK_RE.sub("", cleaned)
+    return cleaned.strip()
+
+def balanced_braces_extract(text: str) -> Optional[str]:
     start = text.find("{")
     if start == -1:
         return None
+
     count = 0
+    in_string = False
+    escaped = False
+
     for i in range(start, len(text)):
-        if text[i] == "{":
+        char = text[i]
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
             count += 1
-        elif text[i] == "}":
+        elif char == "}":
             count -= 1
-        if count == 0:
-            try:
-                parsed = json.loads(text[start:i + 1])
-                if isinstance(parsed, dict):
-                    return parsed
-                return None
-            except json.JSONDecodeError:
-                return None
+
+            if count == 0:
+                return text[start:i + 1]
+
+    return None
+
+
+def parse_profile_json_resilient(
+    raw_content: str,
+    *,
+    repair_fn: Optional[Callable] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Extract a dict from flaky LLM output.
+    `repair_fn(broken_text: str) -> str` is an optional fallback LLM/heuristic call.
+    """
+    if not raw_content or not raw_content.strip():
+        return None
+
+    candidates = [
+        raw_content,
+        strip_thinking(raw_content),
+    ]
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            extracted = robust_json_extract(candidate)
+            if isinstance(extracted, str):
+                parsed = json.loads(extracted)
+            elif isinstance(extracted, dict):
+                parsed = extracted
+            else:
+                parsed = None
+
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            continue
+
+    # Last resort: ask a repair function (e.g., low-temp or no-thinking LLM call)
+    if repair_fn is not None:
+        try:
+            repaired_raw = repair_fn(strip_thinking(raw_content))
+            repaired_clean = strip_thinking(repaired_raw or "")
+            extracted = robust_json_extract(repaired_clean)
+            parsed = json.loads(extracted) if isinstance(extracted, str) else extracted
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as e:
+            logger.warning(f"Profile JSON repair failed: {e}")
+
     return None
 
 
@@ -358,26 +451,27 @@ def discover_mistral_context_window(base_url, model, default=4096):
     # todo: not implemented
     return discover_openai_context_window(base_url, model, default)
 
-def get_openai_models(base_url, api_key):
-    root = base_url.rstrip("/")
-    if not root.endswith("/v1"):
-        root = f"{root}/v1"
+# NOTE: NOT USING OPENAI FOR ANYTHING
+# def get_openai_models(base_url, api_key):
+#     root = base_url.rstrip("/")
+#     if not root.endswith("/v1"):
+#         root = f"{root}/v1"
 
-    # Resolve API key from arguments or environment
-    resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
+#     # Resolve API key from arguments or environment
+#     resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
 
-    headers = {}
-    if resolved_api_key:
-        headers["Authorization"] = f"Bearer {resolved_api_key}"
-    try:
-        # Query the standard OpenAI-compatible model list endpoint
-        r = httpx2.get(f"{root}/models", headers=headers, timeout=5)
-        r.raise_for_status()
+#     headers = {}
+#     if resolved_api_key:
+#         headers["Authorization"] = f"Bearer {resolved_api_key}"
+#     try:
+#         # Query the standard OpenAI-compatible model list endpoint
+#         r = httpx2.get(f"{root}/models", headers=headers, timeout=5)
+#         r.raise_for_status()
 
-        return r.json().get("data", [])
-    except Exception:
-        # Silently fail and fall back to default (network error, bad key, or endpoint doesn't support it)
-        pass
+#         return r.json().get("data", [])
+#     except Exception:
+#         # Silently fail and fall back to default (network error, bad key, or endpoint doesn't support it)
+#         pass
 
 def discover_openai_context_window(
     base_url: str,
