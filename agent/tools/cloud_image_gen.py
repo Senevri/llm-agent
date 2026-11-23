@@ -55,7 +55,10 @@ def _generate_pollinations_image(
         f"&model={model}")
 
     try:
-        Path(os.path.dirname(output_path)).mkdir(parents=True, exist_ok=True)
+        path = Path(output_path)
+        if not path.is_dir():
+            path = path.parent
+        path.mkdir(parents=True, exist_ok=True)
 
         # Pollinations can take 10-30s for high quality images
 
@@ -178,7 +181,10 @@ def _generate_image_hf(prompt: str, output_path: str = f"{default_workspace}/ima
 
     # Download to output_path
     try:
-        Path(os.path.dirname(output_path)).mkdir(parents=True, exist_ok=True)
+        path = Path(output_path)
+        if not path.is_dir():
+            path = path.parent
+        path.mkdir(parents=True, exist_ok=True)
         img_resp = requests.get(image_url, headers=headers, timeout=60, stream=True)
         img_resp.raise_for_status()
 

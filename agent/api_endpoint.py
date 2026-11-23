@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Dict, Type, Optional, List
+from typing import Dict, Type, Optional, List, Any
 
 import httpx2
 from openai import OpenAI
@@ -16,22 +16,67 @@ if SCRIPT_DIR not in sys.path:
 from custom_logger import setup_logging
 from model_catalog import MODEL_CATALOGS
 from get_ip import get_gateway_ip
+from endpoint_config import BackendConfig, ProxyConfig
 
 logger = setup_logging(__name__) # Could use unifiedagent
 
 class APIError(Exception):
     pass
 
+# api_endpoint.py  (additions only)
 class APIEndpoint:
-    """Base class for LLM API endpoints."""
-    def __init__(self, model: str = "", base_url: str = "", port:str = "443"):
+    DEFAULTS: Dict[str, Any] = {}        # subclasses override
+    REQUIRED_ENV: List[str] = []
+
+    def __init__(self, model="", base_url="", port="443", **_):
         self.model = model
         self.base_url = base_url
         self.port = port
         self.api_key = ""
-        self.available_models = []
-        self.rate_limits = {}
-        self.ctx_size = 4096  # Sensible default fallback
+        self.available_models: list[str] = []
+        self.rate_limits: Dict[str, Any] = {}
+        self.ctx_size: int = 4096
+        self.timeout: int = 60
+        self.extra = {}
+
+    @classmethod
+    def from_config(cls, cfg: BackendConfig) -> "APIEndpoint":
+        merged = {**cls.DEFAULTS}
+        for k in ("base_url", "port", "ctx_size"):
+            v = getattr(cfg, k)
+            if v not in ("", None): merged[k] = v
+
+        api_key = cfg.api_key or os.getenv(cls.REQUIRED_ENV[0], "") if cls.REQUIRED_ENV else cfg.api_key
+        if cls.REQUIRED_ENV and not api_key:
+            raise RuntimeError(f"{cls.REQUIRED_ENV[0]} not set (backend {cfg.name!r}).")
+
+        inst = cls(model=cfg.model, base_url=merged.get("base_url", ""), port=str(merged.get("port", "")))
+        inst.api_key = api_key
+        inst.timeout = cfg.timeout
+        inst.rate_limits = dict(cfg.rate_limits)
+        inst.ctx_size = inst._resolve_ctx(cfg.ctx_size, merged.get("ctx_size", 4096))
+        inst.extra = cfg.extra
+        inst._post_config(cfg)
+        return inst
+
+    def _resolve_ctx(self, cfg_ctx, default) -> int:
+        if cfg_ctx == "auto":
+            try:
+                return self._discover_ctx()
+            except Exception as e:
+                logger.warning(f"ctx_size discovery failed for {self.base_url}: {e}")
+                return default
+        return int(cfg_ctx) if cfg_ctx else default
+
+    def _discover_ctx(self) -> int:
+        raise NotImplementedError
+
+    def _post_config(self, cfg: BackendConfig) -> None:
+        """Subclass hook for model discovery, /models fetch, etc."""
+        pass
+
+    def get_model(self):
+        raise NotImplementedError("Subclasses must implement get_models()")
 
     def get_models(self) -> list[str]:
         raise NotImplementedError("Subclasses must implement get_models()")
@@ -65,10 +110,33 @@ class APIEndpoint:
         return "not_implemented"
 
 class OllamaCloudEndpoint(APIEndpoint):
-    # curl https://ollama.com/api/chat \
-    # -H "Authorization: Bearer $OLLAMA_API_KEY" \
-    # -d '{"model": "glm-5.3-flash", "messages": [{"role": "user", "content": "Why is the sky blue?"}], "stream": false}'
-    pass
+    DEFAULTS = {"base_url": "https://ollama.com/api", "port": "443", "ctx_size": 32768}
+    REQUIRED_ENV = ["OLLAMA_API_KEY"]
+
+    def __init__(self, model="", base_url="", port="443", **_):
+        super().__init__(model, base_url, port)
+
+    def _post_config(self, cfg):
+        self.available_models = self.get_models()
+        if not self.model and self.available_models:
+            self.model = self.available_models[0]
+
+    def get_model(self):
+        # risky.
+        return self.model or None
+    def get_models(self) -> list[str]:
+        try:
+            r = httpx2.get(f"{self.base_url}/models",
+                           headers={"Authorization": f"Bearer {self.api_key}"}, timeout=10)
+            r.raise_for_status()
+            return [m["id"] for m in r.json().get("data", []) if "id" in m]
+        except Exception as e:
+            logger.error(f"Failed to retrieve Ollama Cloud models: {e}")
+            return []
+
+    def get_client(self) -> tuple[OpenAI, str]:
+        logger.info(f"Ollama Cloud model resolved to: {self.model}")
+        return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
 
 class OpenAIEndpoint(APIEndpoint):
 
@@ -89,10 +157,8 @@ class OpenAIEndpoint(APIEndpoint):
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
         self.available_model_data = MODEL_CATALOGS["openai"]()
-        if isinstance(self.available_model_data, dict):
-            self.available_models = list(self.available_model_data.keys())
-        else:
-            self.available_models = self.available_model_data
+        self.available_models = self.get_models()
+
         self.try_get_model()
 
     def get_client(self) -> tuple[OpenAI, str]:
@@ -101,6 +167,13 @@ class OpenAIEndpoint(APIEndpoint):
     def get_model(self):
         if not self.model:
             return self.try_get_model()
+
+    def get_models(self):
+        if isinstance(self.available_model_data, dict):
+            self.available_models = list(self.available_model_data.keys())
+        else:
+            self.available_models = self.available_model_data
+        return self.available_models
 
     def try_get_model(self) -> str:
         self_model = self.model or ""
@@ -149,8 +222,8 @@ class KoboldCppApiendpoint(APIEndpoint):
             host_ip = get_gateway_ip()
             self.base_url = os.getenv("KOBOLD_BASE_URL", f"http://{host_ip}:{self.port}/")
         self.set_base_url(base_url.rstrip("/"), self.port)
-        if not self.base_url.endswith("/v1"):
-            self.base_url += "/v1"
+        # if not self.base_url.endswith("/v1"):
+        #     self.base_url += "/v1"
         self.ctx_size = 8192
         self.api_key = "kobold"
         try:
@@ -166,6 +239,9 @@ class KoboldCppApiendpoint(APIEndpoint):
         current_ctx = httpx2.get(self.base_url + "/api/extra/true_max_context_length")
         return current_ctx.json()["value"]
 
+    def get_model(self):
+        self.get_kobold_model()
+
     def get_models(self):
         self.get_kobold_model()
 
@@ -177,7 +253,7 @@ class KoboldCppApiendpoint(APIEndpoint):
 
     def get_client(self) -> tuple[OpenAI, str]:
         # Return openapi compatible way for now
-        return OpenAI(base_url=f"{self.base_url}/v1", api_key=self.api_key), self.model
+        return OpenAI(base_url=f"{self.base_url}", api_key=self.api_key), self.model
 
 class LlamaApiEndpoint(APIEndpoint):
     """ TODO:
@@ -267,6 +343,9 @@ class LlamaApiEndpoint(APIEndpoint):
             self.set_default_model()
         return self.model
 
+    def get_models(self):
+        return self.get_llama_models()
+
     def set_default_model(self):
         models = self.get_llama_models()
         if not models:
@@ -310,6 +389,9 @@ class OllamaApiEndpoint(APIEndpoint):
     def get_model(self):
         self.model = self.get_ollama_model()
 
+    def get_models(self):
+        return self.available_models
+
     def get_ollama_model(self):
         # /apimodel
         # current_model = httpx2.get(self.base_url + "/api/v1/model")
@@ -334,6 +416,9 @@ class MistralApiEndpoint(APIEndpoint):
             }
         if not self.api_key:
             raise RuntimeError("MISTRAL_API_KEY not set.")
+
+    def get_model(self):
+        return self.model
 
     def get_models(self) -> list[str]:
         return self.available_models
@@ -407,10 +492,10 @@ class MistralApiEndpoint(APIEndpoint):
 
 # TODO: Should we inherit OpenAI?
 
-class AiHordeClient:
-    # Implements openai-like interface, for now.
-    def __init__(self, base_url, api_key):
-        self.chat = AiHordeClientChat(base_url, api_key)
+# class AiHordeClient:
+#     # Implements openai-like interface, for now.
+#     def __init__(self, base_url, api_key):
+#         self.chat = AiHordeClientChat(base_url, api_key)
 
 
 class AIHordeEndpoint(APIEndpoint):
@@ -438,6 +523,10 @@ class AIHordeEndpoint(APIEndpoint):
             self.model = self.available_models[0]
         else:
             self.model = ""
+
+    #...should I deprecate this or make it return data from specific model? TODO apichange.
+    def get_model(self, model=None):
+        return self.model
 
     def get_models(self) -> list[str]:
         try:
@@ -484,6 +573,10 @@ class OpenRouterEndpoint(APIEndpoint):
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY not set.")
 
+    def get_model(self):
+        # risky.
+        return self.model or None
+
     def get_models(self) -> list[str]:
         return self.available_models
 
@@ -492,13 +585,39 @@ class OpenRouterEndpoint(APIEndpoint):
         return OpenAI(base_url=self.base_url, api_key=self.api_key), self.model
 
 
-BACKEND_MAP: Dict[str, Type[APIEndpoint]] = {
-            "ollama": OllamaApiEndpoint,
-            "mistral": MistralApiEndpoint,
-            "koboldcpp": KoboldCppApiendpoint,
-            "llamacpp": LlamaApiEndpoint,
-            "openai": OpenAIEndpoint,
-            "groq": OpenAIEndpoint,
-            "aihorde": AIHordeEndpoint,
-            "openrouter": OpenRouterEndpoint
-        }
+# api_endpoint.py  (bottom of file)
+DRIVERS: Dict[str, Type[APIEndpoint]] = {
+    "ollama":        OllamaApiEndpoint,
+    "ollama_cloud":  OllamaCloudEndpoint,
+    "mistral":       MistralApiEndpoint,
+    "koboldcpp":     KoboldCppApiendpoint,
+    "llamacpp":      LlamaApiEndpoint,
+    "openai":        OpenAIEndpoint,
+    "groq":          OpenAIEndpoint,
+    "aihorde":       AIHordeEndpoint,
+    "openrouter":    OpenRouterEndpoint,
+}
+
+def build_endpoint(cfg: BackendConfig) -> APIEndpoint:
+    cls = DRIVERS.get(cfg.type)
+    if not cls:
+        raise ValueError(f"Unknown backend type {cfg.type!r} (name={cfg.name})")
+    return cls.from_config(cfg)
+
+def build_all(settings: ProxyConfig) -> Dict[str, APIEndpoint]:
+    return {b.name: build_endpoint(b) for b in settings.backends}
+
+settings = ProxyConfig.from_file(Path.cwd() / "backend.yaml")
+endpoints = build_all(settings)
+
+if __name__ == "__main__":
+    for name, ep in endpoints.items():
+        if ep.available_models:
+            print("-"*60)
+            print(f"## {name}")
+            for m in ep.available_models:
+                print(m)
+            print(ep.get_model())
+
+
+BACKEND_MAP = DRIVERS

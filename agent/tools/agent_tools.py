@@ -349,7 +349,7 @@ def python_repl(code: str) -> str:
     global _repl_state
     if not _repl_state:
         _repl_state = {}
-        if os.path.exists(WORKSPACE_DIR / "repl_state.json"):
+        if (WORKSPACE_DIR / "repl_state.json").exists():
             with open(WORKSPACE_DIR / "repl_state.json", "r") as f:
                 _repl_state = json.load(f)
     session_globals = _repl_state.get("globals", {})
