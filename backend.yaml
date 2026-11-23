@@ -5,7 +5,7 @@ log_level: info
 
 backends:
   - name: ollama_cloud
-    type: ollama_cloud          # driver key, see DRIVERS below
+    type: ollama_cloud # driver key
     base_url: https://ollama.com/api
     api_key: ${OLLAMA_API_KEY}
     ctx_size: 32768
@@ -13,25 +13,27 @@ backends:
 
   - name: llamacpp
     type: llamacpp
-    base_url: http://127.0.0.1:9931
+    base_url: http://127.0.0.1:9931/v1
     api_key: llama
-    ctx_size: auto              # auto = discover via /props
+    ctx_size: auto
     timeout: 120
-    model: ""                   # empty = auto-resolve from /v1/models
+    model: ""
 
   - name: koboldcpp
     type: koboldcpp
     base_url: http://127.0.0.1:5001
-    ctx_size: auto              # discovers via /api/extra/true_max_context_length
+    api_key: kobold
+    ctx_size: auto
     timeout: 120
     model: ""
 
   - name: ollama
     type: ollama
-    base_url: http://127.0.0.1:5001
-    ctx_size: auto              # discovers via /api/extra/true_max_context_length
+    base_url: http://127.0.0.1:11434/v1
+    port: 11434
+    api_key: ollama
+    ctx_size: 8192
     timeout: 120
-
 
   - name: openrouter
     type: openrouter
@@ -43,20 +45,27 @@ backends:
       requests_per_second: 10
 
   - name: mistral
-    type: mistral               # base_url + ctx_size come from driver DEFAULTS
-    api_key: $(MISTRAL_API_KEY)
+    type: mistral
+    base_url: https://api.mistral.ai/v1
+    api_key: ${MISTRAL_API_KEY}
+    ctx_size: 32000
+    rate_limits:
+      tokens_per_minute: 40000
+      requests_per_second: 1
 
   - name: aihorde
     type: aihorde
+    base_url: https://oai.aihorde.net/v1
     api_key: ${AIHORDE_API_KEY}
+    ctx_size: 8192
 
-routes:
-  - path_prefix: /v1/chat/
-    backend: local-llamacpp
-    stream_mode: auto
-  - path_prefix: /v1/models
-    backend: local-llamacpp
-    stream_mode: passthrough
+# routes:
+#   - path_prefix: /v1/chat/
+#     backend: local-llamacpp
+#     stream_mode: auto
+#   - path_prefix: /v1/models
+#     backend: local-llamacpp
+#     stream_mode: passthrough
 
-default:
-  round_robin: [local-llamacpp, ollama_cloud, mistral]
+# default:
+#   round_robin: [local-llamacpp, ollama_cloud, mistral]
