@@ -601,29 +601,24 @@ class LLMRepl:
             "content": f"[History]: {summary}",
         }
 
-        # Disable unused tools TODO: Figure out better rules for this
-        # + "LLM can ask for a tool" mechanism
         unused_tools = self.tool_registry.get_tool_call_counts_sorted()
-
         if unused_tools:
             max_count = unused_tools[0][1]
             threshold = max_count / 20
-
-            for index, (tool_name, count) in enumerate(
-                reversed(unused_tools)
-            ):
+            for index, (tool_name, count) in enumerate(reversed(unused_tools)):
                 if count == 0:
                     self.tool_registry.disable_tool(tool_name)
                     break
-
                 original_index = len(unused_tools) - 1 - index
-
                 if original_index < len(unused_tools) // 2 and count < threshold:
-                    self.tool_registry.disable_tool(tool_name)    # math
+                    self.tool_registry.disable_tool(tool_name)
+
+        # FIXED: Valid Python f-string syntax (was broken with nested quotes)
+        disabled_tools_list = list(self.tool_registry._disabled_tools)
         t_content = (
-            f"[Disabled tools]: {", ".join(self.tool_registry._disabled_tools)}"
+            f"[Disabled tools]: {', '.join(disabled_tools_list)} "
             "re-enable by putting '/tool <tool_name>:enable ' into your response."
-                     )
+        )
 
         tool_message = {
             "role": "system",
@@ -631,22 +626,35 @@ class LLMRepl:
         }
 
         with self._state_lock:
-            new_tail = self.messages[anchor:]
+            current = list(self.messages)
+            new_tail = current[anchor:]
 
-            self.messages = compressor._combine_contents_by_role([
-                self.messages[0],
-                summary_msg,
-                tool_message,
-                *plan.keep,
-                *new_tail
-            ])
+            # THE ONLY NECESSARY FIX:
+            # Collect all valid tool_call_ids that survived in plan.keep or arrived in new_tail
+            parent_tool_ids = set()
+            for m in list(plan.keep) + new_tail:
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    for tc in m["tool_calls"]:
+                        parent_tool_ids.add(tc["id"])
+
+            # Drop any orphaned tool results that arrived while summarize() was running
+            cleaned_tail = []
+            for m in new_tail:
+                if m.get("role") == "tool":
+                    if m.get("tool_call_id") not in parent_tool_ids:
+                        logger.warning("Trim: dropping orphaned tool result id=%s", m.get("tool_call_id"))
+                        continue
+                cleaned_tail.append(m)
+
+            first_msg = self.messages[0] if self.messages else {"role": "system", "content": ""}
+            rebuilt = [first_msg, summary_msg, tool_message, *plan.keep, *cleaned_tail]
+
+            self.messages = compressor._combine_contents_by_role(rebuilt)
 
         try:
             self.save_conversation_history()
         except Exception as e:
             logger.exception(f"Trim: failed to archive conversation history. Error: {e}")
-
-
     def _request_chat_completion(
             self,
             messages: List[Dict[str, Any]],
@@ -671,7 +679,7 @@ class LLMRepl:
             )
         self.last_message_time = time.time()
         #fails oif no client, ofc.
-        logger.debug(f"{len(tools)}, {tool_choice}")
+        #logger.debug(f"{len(tools)}, {tool_choice}")
         #normalized_tool_choice = (tool_choice or "auto") if tools else None
         return self.client.chat.completions.create(
             model=self.model,
@@ -723,8 +731,8 @@ class LLMRepl:
                 logger.exception("Tool %s failed", name)
                 content = f"Error executing tool {name} with args {args}: {e}"
 
-        # Always return a result, including for malformed arguments and errors.
-        results.append(ToolCallResult(tool_call_id=tc.id, name=name, content=content))
+            # Always return a result, including for malformed arguments and errors.
+            results.append(ToolCallResult(tool_call_id=tc.id, name=name, content=content))
 
         return results
 
@@ -860,8 +868,14 @@ class LLMRepl:
                     self.ui_messages.post(f"[dim]{self.api.usage.summary()}[/dim]")
 
                     tool_results = self._get_tool_results(msg.tool_calls)
-                    if not tool_results:
-                        continue
+                    # if not tool_results:
+                    #     continue
+
+                    if len(tool_results) != len(msg.tool_calls):
+                        raise RuntimeError(
+                            f"Tool result mismatch: {len(msg.tool_calls)} calls, "
+                            f"{len(tool_results)} results"
+                        )
 
                     with self._state_lock:
                         self.messages.extend(tool_results)
@@ -951,8 +965,8 @@ class LLMRepl:
                     #     logger.warning(f"Bad Request: {str(e)}")
                     raise APIError(e)
                 if isinstance(e, BadRequestError):
-                    # if (e.request.status_code == 400
-                    #     and "Invalid value for 'tool choice'" in str(e)):
+                    if ("Invalid value for 'tool choice'" in str(e)):
+                        logger.error(self.messages)
                     #     logger.warning(f"Bad Request: {str(e)}")
                     raise APIError(e)
 
@@ -1455,8 +1469,8 @@ class LLMRepl:
                       "You are a helpful assistant that outputs ONLY valid JSON representing the user profile. "
                    )},
                  {"role": "user", "content": prompt}],
-                tools = [], # No tools
-                tool_choice="auto",
+                # tools = [], # No tools
+                # tool_choice="auto",
                 temperature=0.1,
                 reasoning_effort="none",
                 max_tokens=2000

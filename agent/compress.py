@@ -8,6 +8,7 @@ from prompt_generator import PromptGenerator, find_prompt_dir
 import secrets
 from pprint import pformat
 
+
 logger = setup_logging(__name__)
 
 @dataclass
@@ -43,10 +44,7 @@ class Compressor:
 
         keep_count = max(self.max_context_messages - 1, 3)
         split = max(len(messages) - keep_count, 0)
-
-        # never begin the kept tail with an orphaned tool result
-        while split < floor and _role(messages[split]) == "tool":
-            split += 1
+        split = min(split, floor)
 
         budget = limit * 2 // 3
         while split < floor and estimate_tokens(messages[split:]) > budget:
@@ -56,11 +54,43 @@ class Compressor:
                     nxt += 1
             split = min(nxt, floor)
 
+        # never begin the kept tail with an orphaned tool result
+        while split < floor and _role(messages[split]) == "tool":
+            split += 1
+
+        if split >= len(messages):
+            split = floor
+
         compress, keep = list(messages[:split]), list(messages[split:])
+        out, keep = self._repair_keep(keep)
+        compress.extend(out)
         if not compress:
             return TrimPlan(keep=keep, compress=[], reason="none")
         return TrimPlan(keep=keep, compress=compress,
                         reason="forced" if force else "usage")
+
+    def _repair_keep(self, keep):
+        out = []
+        i = 0
+        while i < len(keep):
+            m = keep[i]
+            if _role(m) == "assistant" and m.get("tool_calls"):
+                needed = {tc["id"] for tc in m["tool_calls"]}
+                j = i + 1
+                seen = set()
+                while j < len(keep) and _role(keep[j]) == "tool":
+                    if keep[j].get("tool_call_id") in needed:
+                        seen.add(keep[j]["tool_call_id"])
+                    j += 1
+                if seen != needed:
+                    # incomplete group → push this assistant (and any partial tools)
+                    # into compress instead of keeping it
+                    return out, keep[i:]      # caller extends compress
+                out.extend(keep[i:j])
+                i = j
+            else:
+                out.append(m); i += 1
+        return out, []
 
     def truncate_tool_results(self, t_id, messages, max_tool_results, tool_logger):
         # generate hash
@@ -112,10 +142,9 @@ class Compressor:
                 msg["content"] = prev_msg.get("content") + "\n" + msg["content"]
                 mergeables = ["tool_calls", "reasoning_content"]
                 for mrg in mergeables:
-                    if msg.get(mrg, []) or prev_msg.get(mrg):
-                        # Should never be here
+                    if msg.get(mrg) or prev_msg.get(mrg):
                         logger.warning(f"--- Merging {mrg}! ---\n{msg}")
-                        prev_msg[mrg] = prev_msg.get(mrg, []) + msg.get(mrg)
+                        msg[mrg] = (prev_msg.get(mrg) or []) + (msg.get(mrg) or [])
             else:
                 new_msg_queue.append(prev_msg)
             prev_msg = msg
