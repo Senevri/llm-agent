@@ -267,6 +267,6 @@ def loop (repl, *args, **kwargs):
         lt.ends_at = datetime.now() + delta
         repl.status = "run"          # starting a loop is an explicit user action
         lt.start()                   # not inside a swallow-all try
-        self.repl.ui_messages.post(f"[green]Loop active until {lt.ends_at}[/green]")
+        repl.ui_messages.post(f"[green]Loop active until {lt.ends_at}[/green]")
 
     return None

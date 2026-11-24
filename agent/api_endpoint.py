@@ -595,6 +595,9 @@ class AIHordeEndpoint(APIEndpoint):
 
     def _discover_ctx(self) -> int:
         return discover_context_window(self.base_url, self.model, backend="openai")
+        # response = httpx2.request("GET", f"https://aihorde.net/api/v2/status/models/{self.model}", timeout=10)
+        # response.raise_for_status()
+        # props = response.json()
 
 
 

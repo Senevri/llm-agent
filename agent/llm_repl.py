@@ -1248,8 +1248,8 @@ class LLMRepl:
             command, args, params, errors = parse_command(user_input) # type: ignore
             if _is_command(command):
                 status, result = self._process_command(command, args, params)
-                if not status:
-                    logger.error(result)
+                if not status and status != None:
+                    logger.error(f"No status, {result}")
                     result = None
                 return (True, result)
             elif command in self.aliases.keys():
@@ -1263,7 +1263,7 @@ class LLMRepl:
                 if _is_command(alias_cmd):
                     status, result = self._process_command(alias_cmd, args, params)
                     if not status:
-                        logger.error(result)
+                        logger.error(f"proc_cmd No status: {result}")
                         result = None
                     return (status, result)
                 self.ui_messages.post(f"Failed to process alias: {alias}")

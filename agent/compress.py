@@ -203,6 +203,12 @@ class Compressor:
             content = self.ai_compress(sections,
                                        max_tokens=max_tokens)
         except Exception as e:
+            if "request exceeds the context window:" in str(e):
+                try:
+                    content = self.fast_llm_complete(sections, max_tokens=max_tokens)
+                except Exception as e:
+                    logger.error(f"Secondary attempt failed too, {e}")
+
             logger.error("Trim summarizer failed: %s", e)
             return None
         if not isinstance(content, str) or not content.strip():
@@ -226,6 +232,30 @@ class Compressor:
             max_tokens=max_tokens,
             )
         return response.choices[0].message.content
+
+
+    def fast_llm_complete(self, sections, temperature:float=0.4, max_tokens:int=8000) -> str:
+        from backend import LLMBackend
+        from openai import OpenAI
+        backend = LLMBackend("mistral")
+        client, model = backend.get_client()
+        if not client or not isinstance(client, OpenAI):
+            return ""
+        content = self.prompt_gen.generate_prompt("message_compression")
+        content = content.replace("{max_tokens}", str(max_tokens))
+        logger.info(f"Completing with {backend.backend}/{model}")
+        request = [
+            {"role": "system", "content": content},
+            {"role": "user", "content": "\n\n".join(sections)}
+        ]
+        result = client.chat.completions.create(
+            messages=normalize_messages(request, "mistral"),
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens
+            )
+        return result.choices[0].message.content or ""
+
 
 
     def _format_for_compression(self, msg: dict) -> str:
