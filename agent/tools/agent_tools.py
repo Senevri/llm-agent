@@ -42,7 +42,7 @@ from tools.cloud_image_gen import CLOUD_IMAGE_GEN_TOOL_DEFINITION, generate_clou
 try:
     from tools.tmux_tools import TMUX_TOOL_MAP, TMUX_TOOL_DEFINITION_MAP
 except ImportError as e:
-    logger.warning("Failed to import tmux_tools. Error:(e)")
+    logger.warning(f"Failed to import tmux_tools. Error:{e}")
     TMUX_TOOL_MAP = {}
     TMUX_TOOL_DEFINITION_MAP = {}
 
@@ -50,7 +50,7 @@ except ImportError as e:
 try:
     from tools.context_tools import CONTEXT_TOOL_MAP, CONTEXT_TOOL_DEFINITION_MAP
 except ImportError as e:
-    logger.warning("Failed to import context_tools. Error:(e)")
+    logger.warning(f"Failed to import context_tools. Error:{e}")
     # Fallback if context_tools is not in the python path
     # In a real deployment, we'd ensure it's in the same directory or package
     CONTEXT_TOOL_MAP = {}
@@ -60,7 +60,7 @@ except ImportError as e:
 try:
     from tools.edit_tools import EDIT_TOOL_DEFINITIONS, EDIT_TOOL_MAP
 except ImportError as e:
-    logger.warning("Failed to import edit_tools. Error:(e)")
+    logger.warning(f"Failed to import edit_tools. Error:{e}")
     EDIT_TOOL_DEFINITIONS = {}
     EDIT_TOOL_MAP = {}
 
@@ -70,8 +70,19 @@ from datetime import datetime, timezone
 
 # --- Configuration ---
 # Note: These are defaults. In a more robust system, these could be passed from the main agent.
-TOOL_TIMEOUT = int(os.getenv("AGENT_TOOL_TIMEOUT", "60"))
-MAX_OUTPUT_LENGTH = int(os.getenv("AGENT_MAX_OUTPUT_LENGTH", "20000"))
+def _parse_int_env(var_name: str, default: int) -> int:
+    """Parse environment variable as int with validation."""
+    value = os.getenv(var_name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(f"Invalid value for {var_name}: '{value}', using default {default}")
+        return default
+
+TOOL_TIMEOUT = _parse_int_env("AGENT_TOOL_TIMEOUT", 60)
+MAX_OUTPUT_LENGTH = _parse_int_env("AGENT_MAX_OUTPUT_LENGTH", 20000)
 
 BG_TIMEOUT = TOOL_TIMEOUT
 
@@ -107,8 +118,12 @@ class Files:
 
             if cached.stat.st_mtime == stat.st_mtime:
                 return cached.lines
-        self.add_file(path, _read_file_all(path))
-        return self.open_files[path].lines
+        path = Path(path) # Normalize
+        if path.exists() and path.is_file():
+            self.add_file(path, _read_file_all(path))
+            return self.open_files[path].lines
+        else:
+            raise Exception(f"Path {path} is not a file.")
 
 files = Files()
 
@@ -146,7 +161,14 @@ def read_file(
     """ Read lines from a file. with paging and utf-8 encoding. """
     try:
         lines = files.read_file(path)
+        if not isinstance(lines, list) and not lines:
+            return "NOT A FILE. Wrong path or directory?"
+
         total_lines = len(lines)
+
+        if total_lines == 0:
+            return "EMPTY FILE. 0 lines, 0 bytes\nThere is no content to read."
+
         if start_line < 1 or start_line > total_lines + 1:
             return (
                 f"Error: start_line must be between 1 and "
@@ -227,14 +249,27 @@ def replace_lines_in_file(path: Union[str, Path], lines: List[str], start_line: 
             raise IOError("Temporary file was not created")
         if tmp_path.read_text(encoding="utf-8") != "".join(new_lines):
             raise IOError("Temporary file verification failed")
-        os.replace(tmp_path, path)
+        # On Windows, os.replace fails if destination exists and is open.
+        # Use a retry with remove first, or use shutil.move which handles this.
+        try:
+            os.replace(tmp_path, path)
+        except OSError as e:
+            if platform.system() == "Windows":
+                # On Windows, try removing the destination first
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                os.replace(tmp_path, path)
+            else:
+                raise
         files.open_files.pop(path, None)
         return f"Successfully replaced lines in {path}"
     except Exception as e:
         return f"Error replacing lines in file: {e}"
 
 
-def read_file_lines(path: str, start_line: int = 1, end_line: int = None) -> str:
+def read_file_lines(path: str, start_line: int = 1, end_line: int | None = None) -> str:
     """Read specific lines of a file (1-indexed)."""
     logger.info(f"Reading lines {start_line} to {end_line} of file: {to_relative(path)}")
     path = _relative_paths_helper(path)
@@ -330,9 +365,11 @@ def append_file(path: str, content: str) -> str:
     return write_or_append_file(
         path, content, mode="a", message=f"Successfully appended {len(content)} chars to {to_relative(path)}")
 
-def write_or_append_file(path: str, content: str, mode: str = "a", message: str = None) -> str:
+def write_or_append_file(path: str, content: str, mode: str = "a", message: str | None = None) -> str:
     path = _relative_paths_helper(path)
     try:
+        if not Path(path).exists():
+            Path(path).mkdir(parents=True)
         with open(path, mode, encoding="utf-8") as f:
             f.write(content)
         return message or f"Successfully wrote {len(content)} chars to {to_relative(path)}"
@@ -366,8 +403,12 @@ def python_repl(code: str) -> str:
             logger.error(f"Error in python_repl: {e}")
             results = bg.stop()
             return f"Error: {e}; results: {results}"
+
         _repl_state["globals"] = session_globals
         _repl_state["locals"] = session_locals
+
+        with open( WORKSPACE_DIR / "repl_state.json", "w") as f:
+            json.dump(_repl_state, f)
         return str(result) if result else "OK"
     except Exception as e:
         return f"Error: {e}"
@@ -669,6 +710,6 @@ for tool in TOOL_DEFINITIONS:
         Draft202012Validator.check_schema(schema)
 
     except Exception as e:
-        print(f"Invalid schema in {tool["function"]["name"]}: {e}")
+        print(f'Invalid schema in {tool["function"]["name"]}: {e}')
         exit(1)
 print("Schema OK")

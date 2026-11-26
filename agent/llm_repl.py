@@ -495,6 +495,13 @@ class LLMRepl:
         self._shutdown_done = True
 
         try:
+            self.messages.append(
+                {"role": "system", "content": "System is shutting down. Save memories, plans and notes NOW."}
+            )
+            self._request_chat_completion(self.messages, tools=self.tool_schemas, tool_choice="auto", temperature=0.2)
+        except Exception as e:
+            logger.error("Memory didn't work")
+        try:
             save_config(self)
         except Exception as e:
             logger.error(f"Error saving config: {e}")
@@ -581,6 +588,8 @@ class LLMRepl:
 
 
     def _trim_context(self, force: bool = False) -> None:
+        # First, swapt prompt to tiny.
+        self.current_role = "tiny_repl"
         with self._state_lock:
             snapshot = list(self.messages)
             anchor = len(snapshot)
@@ -617,7 +626,7 @@ class LLMRepl:
         disabled_tools_list = list(self.tool_registry._disabled_tools)
         t_content = (
             f"[Disabled tools]: {', '.join(disabled_tools_list)} "
-            "re-enable by putting '/tool <tool_name>:enable ' into your response."
+            "re-enable by putting '/tool <tool_name>:enable ' in your response."
         )
 
         tool_message = {
@@ -741,7 +750,7 @@ class LLMRepl:
         if not self.api:
             logger.error("called _get_tool_results without api!")
             return []
-        max_tool_result_tokens = int(self.api.usage.remaining_context_tokens * 0.8)
+        max_tool_result_tokens = int(self.api.usage.remaining_context_tokens * 0.6)
 
         tool_results = self._execute_tools(tool_calls)
         if not tool_results:
@@ -753,7 +762,7 @@ class LLMRepl:
                 tool_logger = setup_logging("ReplToolLogger", level="WARNING")
             _id =  f"#{secrets.token_hex(8)}"
             # We already have the full tool result stored; no need to do it specially in compressor
-            tool_logger.info("Tool results: %s %s", _id, pformat([t for t in tool_results]))
+            tool_logger.info("Tool results: %s\n%s", _id, pformat([t for t in tool_results]))
             result_length = estimate_tokens(tool_results)
             if  result_length> max_tool_result_tokens:
                 compressor = Compressor(self.api)
@@ -765,6 +774,54 @@ class LLMRepl:
                     )
 
         return tool_results
+
+    def dev_get_tool_results(self, tool_calls) -> Optional[List[ToolCallResult]]:
+        if not self.api:
+            logger.error("called _get_tool_results without api!")
+            return []
+
+        # Execute tools (your existing, well-tested UI/logging logic)
+        raw_results = self._execute_tools(tool_calls)
+        if not raw_results:
+            return None
+
+        processed_results = []
+        for res in raw_results:
+            # Estimate if this result is bloating the context
+            result_tokens = estimate_tokens([{"role": "tool", "content": res.content}])
+
+            # Threshold: If it's over ~800 tokens, it's probably a raw dump. Summarize it.
+            if result_tokens > 800:
+                logger.info("Summarizing large tool result for %s (%d tokens)", res.name, result_tokens)
+
+                # Find the original args for context (optional but highly recommended for the summarizer)
+                original_args = {}
+                for tc in tool_calls:
+                    if tc.id == res.tool_call_id:
+                        try:
+                            original_args = json.loads(tc.function.arguments or "{}")
+                        except:
+                            pass
+                        break
+
+                # THE "SEPARATE QUEUE": Get the dense, asserted report
+                summarized_content = self._summarize_tool_output(res.name, original_args, res.content)
+
+                # Append a note so the main LLM knows it was summarized, not truncated
+                final_content = f"[SUMMARIZED REPORT]:\n{summarized_content}"
+            else:
+                # Small results (e.g., "Success", {"id": 123}) pass through untouched
+                final_content = res.content
+
+            processed_results.append(ToolCallResult(
+                tool_call_id=res.tool_call_id,
+                name=res.name,
+                content=final_content
+            ))
+
+        return processed_results
+
+
 
     def _start_background_send(self, user_input: str) -> bool:
         if self.status == "stop":
@@ -825,6 +882,7 @@ class LLMRepl:
             if self.status == "stop":
                 self.current_bg_task.stop()
                 return "stopped"
+
             self.no_reply = False
             if self.api.usage.context_pct >= 80.0 and not warning_sent:
                 # warn llm.
@@ -844,22 +902,27 @@ class LLMRepl:
                 current_messages.append({"role": "system", "content": warning})
                 warning_sent = True
             try:
+
                 # json.dumps(self.tool_schemas) # defensive validation
                 assert len(self.tool_schemas) > 0
                 self.agent_active = True
                 for msg in current_messages[-6:]:
                     self.ui_messages.post(msg["role"], repr(msg.get("content", ""))[:100])
+                with self._state_lock:
+                    next_input = self._drain_pending_inputs()
+                if next_input:
+                    self.messages.append({"role": "user", "content": user_input})
+                    current_messages.append({"role": "user", "content": next_input})
+
+
                 response = self._request_chat_completion(
                     current_messages,
                     tools=self.tool_schemas or [],
                     tool_choice="auto")
+
                 msg = response.choices[0].message
-                # print((self.api.model, self.api.port, self.api.base_url))
-                # print("CONTENT:", repr(msg.content))
-                # print("TOOL CALLS:", msg.tool_calls)
-                # print("FINISH REASON:", response.choices[0].finish_reason)
                 assistant_msg = msg.model_dump(exclude_none=True)
-                # self.ui_messages.post((pformat(str(assistant_msg))))
+
                 if msg.tool_calls:
                     with self._state_lock:
                         self.messages.append(assistant_msg)
@@ -979,6 +1042,34 @@ class LLMRepl:
                 if not self._handle_api_error(e):
                     self.agent_active = False
                     return f"API Error: {e}"
+
+
+    def _summarize_tool_output(self, tool_name: str, args: dict, raw_output: str) -> str:
+        """
+        The 'separate queue': A quick, isolated LLM call to compress raw tool output
+        into a dense, actionable report for the main agent.
+        """
+        # Keep this prompt tight and cheap (~200 tokens)
+        prompt = (
+            f"The main agent called the tool '{tool_name}' with args: {json.dumps(args)[:200]}.\n"
+            f"Here is the raw output. Summarize ONLY the critical facts, errors, or data the main agent needs to know to proceed. "
+            f"Be extremely concise. Do not include raw HTML, stack traces, or filler.\n\n"
+            f"RAW OUTPUT:\n{raw_output[:4000]}"  # Hard cap to prevent summarizer from blowing up
+        )
+
+        try:
+            # Use your existing API client, but with a cheap/fast model if you have one
+            response = self.api.client.chat.completions.create(
+                model=self.api.model,  # Or a cheaper model like "gpt-4o-mini" / "haiku"
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,  # Force brevity
+                temperature=0.1
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            logger.warning("Tool summarization failed, falling back to truncation: %s", e)
+            # Fallback to your existing truncation logic if the summarizer fails
+            return raw_output[:500] + "\n...[truncated due to summarization error]"
 
 
 
@@ -1249,7 +1340,7 @@ class LLMRepl:
             if _is_command(command):
                 status, result = self._process_command(command, args, params)
                 if not status and status != None:
-                    logger.error(f"No status, {result}")
+                    logger.debug(f"No status, {status}, Result:{result}")
                     result = None
                 return (True, result)
             elif command in self.aliases.keys():
