@@ -10,6 +10,8 @@ for path in ["/agent", "/workspace/agent_skills"]:
     else:
         sys.path.append(Path(__file__).parent.parent.as_posix())
 
+SCRIPT_DIR = Path(__file__).parent.parent.resolve()
+
 from skill_system.tool_registry import registry as tool_registry
 from skill_system.skills_manager import SkillsManager
 
@@ -22,13 +24,15 @@ def get_skills_root():
     """Determine the root directory for skills."""
     # Check environment variable first
     potential_paths = [
+
         os.getenv("SKILLS_ROOT"),
-        Path.cwd() / ".skills",
+        SCRIPT_DIR.parent / "data" / ".skills" ,
         Path("/workspace/.skills")
     ]
 
     for path in potential_paths:
         if path and Path(path).exists():
+
             path = Path(path)
             break
     else:
@@ -47,7 +51,7 @@ skills_manager = None
 def initialize():
     # Initialize Skills Manager
     global skills_manager
-    skills_manager = SkillsManager(SKILLS_ROOT)
+    skills_manager = SkillsManager([SKILLS_ROOT, Path.cwd() / ".skills"])
     skills_manager.discover_skills()
     return skills_manager
 

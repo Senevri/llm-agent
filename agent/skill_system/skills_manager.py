@@ -17,29 +17,30 @@ class SkillMetadata:
 
 class SkillsManager:
     """Manages discovery and loading of Agent Skills (SKILL.md)."""
-    def __init__(self, skills_root: str):
-        self.skills_root = skills_root
+    def __init__(self, skills_root: str | list):
+        self.skills_root = skills_root if isinstance(skills_root, list) else [skills_root]
         self.catalog: Dict[str, SkillMetadata] = {}
         self.active_skills: List[str] = []
 
     def discover_skills(self):
         """Scan the skills root directory for directories containing SKILL.md."""
         logger.info(f"Discovering skills in {self.skills_root}...")
-        if not os.path.exists(self.skills_root):
-            logger.error(f"Skills root {self.skills_root} does not exist.")
-            return
+        for sr in self.skills_root:
+            if not os.path.exists(sr):
+                logger.error(f"Skills root {sr} does not exist.")
+                continue
 
-        for entry in os.scandir(self.skills_root):
-            if entry.is_dir():
-                skill_md_path = os.path.join(entry.path, "SKILL.md")
-                if os.path.exists(skill_md_path):
-                    try:
-                        metadata = self._parse_skill_md(skill_md_path)
-                        if metadata:
-                            self.catalog[entry.name] = metadata
-                            logger.info(f"Discovered skill: {entry.name}")
-                    except Exception as e:
-                        logger.error(f"Error parsing skill {entry.name}: {e}")
+            for entry in os.scandir(sr):
+                if entry.is_dir():
+                    skill_md_path = os.path.join(entry.path, "SKILL.md")
+                    if os.path.exists(skill_md_path):
+                        try:
+                            metadata = self._parse_skill_md(skill_md_path)
+                            if metadata:
+                                self.catalog[entry.name] = metadata
+                                logger.info(f"Discovered skill: {entry.name}")
+                        except Exception as e:
+                            logger.error(f"Error parsing skill {entry.name}: {e}")
 
     def _parse_skill_md(self, path: str) -> Optional[SkillMetadata]:
         """Parse the SKILL.md file for basic metadata."""
