@@ -1,5 +1,4 @@
 # Environment
-
 - run_bash operates probably in cmd;
 - not running on /workspace, so use relative paths.
 - installed cli tools: git, curl, wget, awk, sed, rg(ripgrep), jq, tree, less, file,

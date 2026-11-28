@@ -234,6 +234,7 @@ try:
     from urllib.parse import urlparse
     from prompt_toolkit.styles import Style
 
+
     TOOLBAR_STYLE = Style.from_dict({
         "bottom-toolbar":      "noreverse bg:default #5f8787",
         "bottom-toolbar.meta": "noreverse #585858",
@@ -250,6 +251,8 @@ except Exception:
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.output import create_output
+    #from prompt_toolkit.keybindings import KeyBindings
     # try to find history file
     possible_paths = [
         Path("/workspace"),
@@ -911,8 +914,10 @@ class LLMRepl:
                 with self._state_lock:
                     next_input = self._drain_pending_inputs()
                 if next_input:
-                    self.messages.append({"role": "user", "content": user_input})
+                    self.messages.append({"role": "user", "content": next_input})
                     current_messages.append({"role": "user", "content": next_input})
+                    self.ui_messages.post(f'[dim][i]"{next_input}"[/i][/dim]')
+                    user_input = ""
 
 
                 response = self._request_chat_completion(
@@ -1100,7 +1105,7 @@ class LLMRepl:
             except Exception:
                 pass
             return True
-        logger.error(f"Fatal API error: {e}")
+        logger.exception(f"Fatal API error: {e}")
         if "exceeds the available context size" in str(e):
             try:
                 logger.debug(f"Messages: %d, %s", len(self.messages), [s for s in self.messages])
@@ -1217,6 +1222,7 @@ class LLMRepl:
             self.ui_messages.post("[dim]Processing queued user input...[/dim]")
             self.ui_messages.post(f'[dim][i]"{next_input}"[/i][/dim]')
 
+
             self._start_background_send(next_input)
             return
         except queue.Empty:
@@ -1276,6 +1282,8 @@ class LLMRepl:
         prefix = f"({agent}{looptask})"
         if len(prefix) == 2: prefix=""
         return f"{prefix}User > "
+
+    #User Promtp
     async def get_user_prompt(self, prompt_session):
         try:
             if not (self.loop_task and self.agent_active):
@@ -1291,10 +1299,17 @@ class LLMRepl:
                     bottom_toolbar=self._toolbar_fragments,
                     style=TOOLBAR_STYLE,
                     refresh_interval=1
+
                 )
+                # Normalize
+                user_input = user_input.encode(
+                    "utf-16-le", errors="surrogatepass"
+                ).decode("utf-16-le")
             else:
                 # works
                 user_input = input(input_prompt).strip()
+            # Normalize
+            #user_input = user_input.encode("utf-8", errors="replace").decode("utf-8")
             self.user_messages.append(user_input)
         except EOFError:
             return None
@@ -1387,9 +1402,22 @@ class LLMRepl:
             self.agent_active = False
             prompt_session = None
             if sys.stdin.isatty() and sys.stdout.isatty():
-                prompt_session = PromptSession(history=FileHistory(str(history_path)), refresh_interval=1)
+                prompt_session = PromptSession(
+                    history=FileHistory(str(history_path)),
+                    output=create_output(),
+                    refresh_interval=1,)
             result = ""
             self.user_messages=[]
+            # kb = KeyBindings()
+
+            # @kb.add('c-space')
+            # def _(event):
+            #     " Initialize autocompletion, or select the next completion. "
+            #     buff = event.app.current_buffer
+            #     if buff.complete_state:
+            #         buff.complete_next()
+            #     else:
+            #         buff.start_completion(select_first=False)
 
 
 
@@ -1400,7 +1428,7 @@ class LLMRepl:
 
                 self.ui_console = Console(
                     file=sys.stdout,
-                    #force_terminal=True,
+                    force_terminal=True,
                     color_system="auto",
                 )
                 console = self.ui_console
@@ -1584,7 +1612,15 @@ class LLMRepl:
                 if parsed is None:
                     logger.error("Profile worker returned unrecoverable JSON; keeping existing profile.")
                     logger.debug(f"Malformed profile content: Raw: \n {content}")
-                    raise ValueError("Profile worker returned invalid JSON.")
+                    #raise ValueError("Profile worker returned invalid JSON.")
+                    logger.warning("Duct taping...")
+                    parsed ={}
+                    parsed["user_profile"] = {
+                        "category":"whoops",
+                        "confidence": "low",
+                        "statement": str(content)[:-240].encode("utf-8", errors="replace").decode("utf-8"),
+                        "tags": ["profile_update_error"]
+                    }
 
                 # Unwrap {"user_profile": {...}} if the model wrapped it
                 updated_json = parsed["user_profile"] if (

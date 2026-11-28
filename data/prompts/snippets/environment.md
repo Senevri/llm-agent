@@ -1,6 +1,5 @@
 >
-# Environment (stable facts — verified at build time)
-
+# Environment
 - User: sandboxuser. Home: /home/sandboxuser (writable, exec-allowed).
 - Working directory: /workspace (persistent volume; 9p mount; SLOW for
   many-small-file I/O like pip installs; do not build

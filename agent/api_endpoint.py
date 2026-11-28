@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from typing import Dict, Type, Optional, List, Any
 
 import httpx2
+from httpcore2 import ConnectError
 from openai import OpenAI
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -43,25 +44,29 @@ class APIEndpoint:
 
     @classmethod
     def from_config(cls, cfg: BackendConfig) -> "APIEndpoint":
-        #cfg = {k:v for k, v in cfg.items() if v}
-        inst = cls(model=cfg.model or "", base_url=cfg.base_url, port=cfg.port)
+        try:
+            #cfg = {k:v for k, v in cfg.items() if v}
+            inst = cls(model=cfg.model or "", base_url=cfg.base_url, port=cfg.port)
 
-        # api_key resolution: YAML > env (if REQUIRED_ENV) > whatever __init__ set
-        inst.api_key = inst._resolve_api_key(cfg)
-        # else: keep __init__'s default (e.g. "ollama", "llama", "00000000")
+            # api_key resolution: YAML > env (if REQUIRED_ENV) > whatever __init__ set
+            inst.api_key = inst._resolve_api_key(cfg)
+            # else: keep __init__'s default (e.g. "ollama", "llama", "00000000")
 
-        if cfg.ctx_size is not None:
-            inst.ctx_size = inst._resolve_ctx(
-                cfg.ctx_size, cls.DEFAULTS.get("ctx_size", 4096))
+            if cfg.ctx_size is not None:
+                inst.ctx_size = inst._resolve_ctx(
+                    cfg.ctx_size, cls.DEFAULTS.get("ctx_size", 4096))
 
 
 
-        inst.timeout = cfg.timeout
-        if cfg.rate_limits:
-            inst.rate_limits = dict(cfg.rate_limits)
-        inst.extra = cfg.extra
-        inst._post_config(cfg)
-        return inst
+            inst.timeout = cfg.timeout
+            if cfg.rate_limits:
+                inst.rate_limits = dict(cfg.rate_limits)
+            inst.extra = cfg.extra
+            inst._post_config(cfg)
+            return inst
+        except Exception as ex:
+            logger.error(f"Could not build model: {(cfg.model, cfg.base_url, cfg.port)}")
+            return None
 
     def _resolve_api_key(self, cfg: BackendConfig) -> str:
         if cfg.api_key:
@@ -132,7 +137,7 @@ class APIEndpoint:
 
 class OllamaCloudEndpoint(APIEndpoint):
     #DEFAULTS = {"base_url": "https://api.ollama.com/v1", "port": "443", "ctx_size": 32768}
-    REQUIRED_ENV = ["OLLAMA_API_KEY"]
+    # REQUIRED_ENV = ["OLLAMA_API_KEY"]
 
     def __init__(self, model="", base_url="", port="443", **_):
         super().__init__(model, base_url, port)
@@ -250,20 +255,25 @@ class KoboldCppApiendpoint(APIEndpoint):
         self.api_key = "kobold"
         try:
             self.available_models = MODEL_CATALOGS["koboldcpp"]()
-            self.model = self.get_kobold_model()
-            self.ctx_size = self.get_kobold_ctx()
+            self.model = self.get_kobold_model() or "(none)"
+            self.ctx_size = self.get_kobold_ctx() or self.ctx_size
         except Exception as e:
             logger.error(f"Failed to get Kobold model: {e}")
             self.model = ""
 
     def _discover_ctx(self) -> int:
-        r = httpx2.get(self.base_url + "/api/extra/true_max_context_length", timeout=10)
-        r.raise_for_status()
+        try:
+            r = httpx2.get(self.base_url + "/api/extra/true_max_context_length", timeout=10)
+            r.raise_for_status()
+        except ConnectError as e:
+            logger.error(f"Could not connect to KoboldCPP api. Error: {e}")
+            return 0
         return r.json()["value"]
 
     def get_kobold_ctx(self):
         # /api/extra/true_max_context_length
-        return self._discover_ctx()
+            return self._discover_ctx()
+
 
     def get_model(self):
         self.get_kobold_model()
@@ -273,7 +283,11 @@ class KoboldCppApiendpoint(APIEndpoint):
 
     def get_kobold_model(self):
         # /api/v1/model
-        current_model = httpx2.get(self.base_url + "/api/v1/model")
+        try:
+            current_model = httpx2.get(self.base_url + "/api/v1/model")
+        except ConnectError as e:
+            logger.error("Koboldcpp could not get model: {e}")
+            return
         # format: {"result": "<model_name>"}
         return current_model.json()["result"]
 
@@ -439,7 +453,7 @@ class OllamaApiEndpoint(APIEndpoint):
 
 class MistralApiEndpoint(APIEndpoint):
     DEFAULTS = {"base_url": "https://api.mistral.ai/v1", "port": "443", "ctx_size": 32000}
-    REQUIRED_ENV = ["MISTRAL_API_KEY"]
+    # REQUIRED_ENV = ["MISTRAL_API_KEY"]
     #RATE_LIMITS = {"tokens_per_minute": 40000, "requests_per_second": 1}
 
     def __init__(self, model="", base_url="", port="443", **kwargs):
@@ -450,9 +464,9 @@ class MistralApiEndpoint(APIEndpoint):
         self.rate_limits = kwargs.get("rate_limits", {})
         self.available_models = MODEL_CATALOGS["mistral"]()
         self.model = model or (self.available_models[0] if self.available_models else "")
-        self.api_key = os.getenv("MISTRAL_API_KEY")
-        if not self.api_key:
-            raise RuntimeError("MISTRAL_API_KEY not set.")
+        # self.api_key = os.getenv("MISTRAL_API_KEY")
+        # if not self.api_key:
+        #     raise RuntimeError("MISTRAL_API_KEY not set.")
 
     def get_model(self):
         return self.model
@@ -658,7 +672,7 @@ if __name__ == "__main__":
     endpoints = build_all(settings)
 
     for name, ep in endpoints.items():
-        if ep.available_models:
+        if ep and ep.available_models:
             print("-"*60)
             print(f"## {name}")
             for m in ep.available_models:

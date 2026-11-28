@@ -1,6 +1,6 @@
 import os
 import sys
-import requests
+import httpx2 as requests #import requests
 from openai import OpenAI
 from mistralai.client import Mistral
 from get_ip import get_gateway_ip
@@ -67,7 +67,7 @@ def get_koboldcpp_models() -> dict:
         data = r.json()
         return {"models": data.get("data", data.get("models", []))}
     except Exception as e:
-        return {"error": str(e)}
+        return {"Koboldcpp Error": str(e)}
 
 
 def list_koboldcpp_models():

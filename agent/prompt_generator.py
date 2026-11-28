@@ -26,7 +26,7 @@ def find_prompt_dir(paths:Optional[List[Path]] = None) -> Path:
             Path.cwd() / "prompts",
             Path.cwd() / "workspace" / "prompts",
             Path(SCRIPT_DIR) /"prompts",
-            Path(SCRIPT_DIR) / "data" / "prompts",
+            Path(SCRIPT_DIR).parent / "data" / "prompts",
             Path("/workspace/prompts")
             ]
 

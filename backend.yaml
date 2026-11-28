@@ -42,7 +42,7 @@ backends:
     ctx_size: 128000
     rate_limits:
       tokens_per_minute: 100000
-      requests_per_second: 10
+      requests_per_second: 1
 
   - name: mistral
     type: mistral
@@ -57,7 +57,11 @@ backends:
     type: aihorde
     base_url: https://oai.aihorde.net/v1
     api_key: ${AIHORDE_API_KEY}
-    ctx_size: 8192
+    ctx_size: auto
+    rate_limits:
+      tokens_per_minute: 100000
+      requests_per_second: 1
+
 
 # routes:
 #   - path_prefix: /v1/chat/

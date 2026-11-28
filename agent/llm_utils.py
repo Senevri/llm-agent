@@ -378,12 +378,12 @@ def size_bytes(value):
     if value is None:
         return 0
     if isinstance(value, str):
-        return len(value.encode("utf-8"))
+        return len(value.encode("utf-8", errors="replace"))
     if isinstance(value, dict):
         return sum(size_bytes(k) + size_bytes(v) for k, v in value.items())
     if isinstance(value, (list, tuple)):
         return sum(size_bytes(item) for item in value)
-    return len(str(value).encode("utf-8"))
+    return len(str(value).encode("utf-8", errors="replace"))
 
 
 def discover_context_window(base_url: str, model: str, default: int = 4096, backend="ollama") -> int:

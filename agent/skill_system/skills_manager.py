@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SkillsManager")
@@ -17,8 +18,11 @@ class SkillMetadata:
 
 class SkillsManager:
     """Manages discovery and loading of Agent Skills (SKILL.md)."""
-    def __init__(self, skills_root: str | list):
-        self.skills_root = skills_root if isinstance(skills_root, list) else [skills_root]
+    def __init__(self, skills_root: str | Path | list[str | Path]):
+        if isinstance(skills_root, (str, Path)):
+            skills_root = [skills_root]
+
+        self.skills_root = [Path(p) for p in skills_root]
         self.catalog: Dict[str, SkillMetadata] = {}
         self.active_skills: List[str] = []
 

@@ -240,7 +240,7 @@ if __name__ == "__main__":
     # backend="mistral"
     # model="ministral-14b-latest"
 
-    if not args.test:
+    if args.backend or not args.test:
         llm_backends = [args.backend]
     else:
         llm_backends =  [str(k) for k in DRIVERS.keys()]
@@ -275,7 +275,7 @@ if __name__ == "__main__":
             f"Usage: Rate limits: TPM: {llm_backend.usage.tokens_per_minute} RPS: {llm_backend.usage.requests_per_second} "
             f"Used: {llm_backend.usage.prompt_tokens} in window: {llm_backend.usage.tokens_used_in_window} tokens")
         #exit(0)
-        continue
+        if not args.test: continue
         # msg = "What is Mistral AI?"
         msg = "Tell me about yourself concisely in tweet length."
 

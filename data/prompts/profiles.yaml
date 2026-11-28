@@ -16,6 +16,9 @@ roles:
       - environment
       - loop
       - allowed-paths
+  tiny_repl:
+    snippets:
+      - tiny_repl
   repl-dev:
     snippets:
       - repl
