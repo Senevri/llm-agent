@@ -1,3 +1,4 @@
+from __future__ import annotations
 import logging
 import os
 import sys
@@ -8,6 +9,8 @@ from typing import Dict, Type, Optional, List, Any
 import httpx2
 from httpcore2 import ConnectError
 from openai import OpenAI
+
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 
@@ -78,8 +81,8 @@ class APIEndpoint:
             return val
         return self.DEFAULT_API_KEY
 
-
-    def build_endpoint_cli(type_: str, **kwargs) -> APIEndpoint:
+    @staticmethod
+    def build_endpoint_cli(type_: str, **kwargs) -> "APIEndpoint":
         return DRIVERS[type_].from_config(BackendConfig.from_cli(type_, **kwargs))
 
     def _resolve_ctx(self, cfg_ctx, default) -> int:
