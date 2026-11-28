@@ -11,6 +11,7 @@ import os
 import sys
 import platform
 from pathlib import Path
+import shutil
 
 project_root = Path(__file__).parent.parent
 if project_root not in sys.path:
@@ -32,6 +33,53 @@ if platform.system() == "Windows":
     # EXECUTABLE = f"{userprofile}\\scoop\\shims\\bash.exe"
     EXECUTABLE = None
 
+
+def find_shell():
+    if platform.system() == "Windows":
+        candidates = [
+            os.getenv("COMSPEC", r"C:\Windows\System32\cmd.exe"),
+            shutil.which("powershell.exe"),
+            shutil.which("pwsh.exe"),
+        ]
+    else:
+        candidates = [
+            "/bin/bash",
+            shutil.which("bash"),
+            "/bin/sh",
+        ]
+
+    userprofile = os.getenv("USERPROFILE")
+    if userprofile:
+        candidates.insert(
+            0, str(Path(userprofile) / "scoop" / "shims" / "bash.exe")
+        )
+
+    return next(
+        (candidate for candidate in candidates
+         if candidate and Path(candidate).exists()),
+        None,
+    )
+
+def run_shell(command: str, executable=None, cwd=WORKSPACE_DIR) -> str:
+    executable = executable or find_shell()
+
+    if not executable:
+        return "Error: No supported shell found."
+
+    name = Path(executable).name.lower()
+
+    if name in ("bash", "bash.exe"):
+        return _run_bash(command, cwd=cwd, executable=executable)
+
+    return run_command(
+        command,
+        cwd=cwd,
+        executable=executable,
+    )
+
+def run_cmd(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
+    return run_command(command, cwd=cwd)
+
 def find_bash():
     candidates = [
         EXECUTABLE
@@ -45,16 +93,15 @@ def find_bash():
             return candidate
     return ""
 
-def run_cmd(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
-    return run_command(command, cwd=cwd)
-
 def run_bash(command: str, executable=EXECUTABLE, cwd=str(WORKSPACE_DIR)) -> str:
-    return _run_bash(command,  cwd=cwd)
+    if executable:
+        return _run_bash(command, cwd=cwd, executable=executable)
+    return run_command(command, cwd=cwd)  # Existing CMD fallback
 
-def _run_bash(command: str, cwd: Union[str, Path] = WORKSPACE_DIR) -> str:
+def _run_bash(command: str, cwd: Union[str, Path] = WORKSPACE_DIR, executable=None) -> str:
     """Execute a bash command inside the container environment."""
     logger.info(f"Executing bash: {command}")
-    bash = find_bash()
+    bash = find_bash() or executable
 
     if not bash:
         return "Error: bash executable not found."

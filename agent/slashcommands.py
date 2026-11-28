@@ -148,7 +148,7 @@ def load_commands():
 
 # --- Commands for CommandDispatcher -------------------------------------------------------------
 
-from tools.bash_tools import run_bash
+from tools.bash_tools import run_bash, run_shell
 
 class Script:
     def __init__(self, repl, command, script, **kwargs):
@@ -846,7 +846,6 @@ def shell_command(repl, *args, **kwargs):
     command_str = " ".join(args)
     repl.ui_messages.post(f"[dim]Executing: {command_str}[/dim]")
 
-    # Use the robust _run_bash function we refined
-    result = run_bash(command_str, cwd=str(WORKSPACE_DIR))
+    result = run_shell(command_str, cwd=str(WORKSPACE_DIR), executable=repl.config.get("executable", None))
 
     repl.ui_messages.post(result)
